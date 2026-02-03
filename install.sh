@@ -41,6 +41,9 @@ success() {
   echo -e "${GREEN}✓${RESET} $1"
 }
 
+# Optional variable to hold the path of the installed binary
+INSTALLED_BINARY=""
+
 error() {
   echo -e "${RED}✗${RESET} $1"
 }
@@ -167,6 +170,7 @@ install_binary() {
     mv "$TMP_DIR/macroscope" "$INSTALL_DIR/macroscope"
   fi
 
+  INSTALLED_BINARY="${INSTALL_DIR}/macroscope"
   success "Installed to ${BOLD}${INSTALL_DIR}/macroscope${RESET}"
 }
 
@@ -224,6 +228,39 @@ print_completion() {
   echo ""
 }
 
+launch_wizard() {
+  # Allow CI/automated installs to skip the wizard
+  if [ "${MACROSCOPE_SKIP_WIZARD:-0}" = "1" ]; then
+    info "Skipping wizard launch (MACROSCOPE_SKIP_WIZARD=1)."
+    return
+  fi
+
+  # Require an interactive TTY so we don't hang in non-interactive shells
+  if [ ! -t 0 ] || [ ! -t 1 ]; then
+    info "Non-interactive shell detected; run 'macroscope' later to start the setup wizard."
+    return
+  fi
+
+  # Prefer the binary we just installed, otherwise fall back to PATH
+  local bin_path="${INSTALLED_BINARY}"
+  if [ -z "$bin_path" ] || [ ! -x "$bin_path" ]; then
+    bin_path="$(command -v macroscope || true)"
+  fi
+
+  if [ -z "$bin_path" ]; then
+    warn "Could not find installed macroscope binary; skipping wizard launch."
+    return
+  fi
+
+  echo ""
+  step "Launching Macroscope setup wizard..."
+  # Running without args triggers the default review wizard; on first run it
+  # automatically falls into the setup flow (env + auth) before review.
+  if ! "$bin_path"; then
+    warn "Wizard exited with a non-zero status. You can rerun it anytime with: macroscope"
+  fi
+}
+
 # Main installation flow
 main() {
   clear
@@ -236,6 +273,7 @@ main() {
 
   install_binary "$@"
   update_shell_config
+  launch_wizard
   print_completion
 }
 
