@@ -20,18 +20,14 @@ fi
 print_banner() {
   cat << "EOF"
 
-    ╔════════════════════════════════════════════════════════════════════════════════════════════╗
-    ║                                                                                            ║
-    ║  ███╗   ███╗ █████╗  ██████╗██████╗  ██████╗ ███████╗ ██████╗ ██████╗ ██████╗ ███████╗  ║
-    ║  ████╗ ████║██╔══██╗██╔════╝██╔══██╗██╔═══██╗██╔════╝██╔════╝██╔═══██╗██╔══██╗██╔════╝  ║
-    ║  ██╔████╔██║███████║██║     ██████╔╝██║   ██║███████╗██║     ██║   ██║██████╔╝█████╗    ║
-    ║  ██║╚██╔╝██║██╔══██║██║     ██╔══██╗██║   ██║╚════██║██║     ██║   ██║██╔═══╝ ██╔══╝    ║
-    ║  ██║ ╚═╝ ██║██║  ██║╚██████╗██║  ██║╚██████╔╝███████║╚██████╗╚██████╔╝██║     ███████╗  ║
-    ║  ╚═╝     ╚═╝╚═╝  ╚═╝ ╚═════╝╚═╝  ╚═╝ ╚═════╝ ╚══════╝ ╚═════╝ ╚═════╝ ╚═╝     ╚══════╝  ║
-    ║                                                                                            ║
-    ║                            🔬 AI-Powered Code Intelligence                                ║
-    ║                                                                                            ║
-    ╚════════════════════════════════════════════════════════════════════════════════════════════╝
+  ███╗   ███╗ █████╗  ██████╗██████╗  ██████╗ ███████╗ ██████╗ ██████╗ ██████╗ ███████╗
+  ████╗ ████║██╔══██╗██╔════╝██╔══██╗██╔═══██╗██╔════╝██╔════╝██╔═══██╗██╔══██╗██╔════╝
+  ██╔████╔██║███████║██║     ██████╔╝██║   ██║███████╗██║     ██║   ██║██████╔╝█████╗
+  ██║╚██╔╝██║██╔══██║██║     ██╔══██╗██║   ██║╚════██║██║     ██║   ██║██╔═══╝ ██╔══╝
+  ██║ ╚═╝ ██║██║  ██║╚██████╗██║  ██║╚██████╔╝███████║╚██████╗╚██████╔╝██║     ███████╗
+  ╚═╝     ╚═╝╚═╝  ╚═╝ ╚═════╝╚═╝  ╚═╝ ╚═════╝ ╚══════╝ ╚═════╝ ╚═════╝ ╚═╝     ╚══════╝
+
+                        🔬 AI-Powered Code Intelligence
 
 EOF
 }
@@ -44,6 +40,9 @@ info() {
 success() {
   echo -e "${GREEN}✓${RESET} $1"
 }
+
+# Optional variable to hold the path of the installed binary
+INSTALLED_BINARY=""
 
 error() {
   echo -e "${RED}✗${RESET} $1"
@@ -105,18 +104,11 @@ detect_platform() {
   success "Detected platform: ${BOLD}${OS}-${ARCH}${RESET}"
 }
 
-# Determine installation directory
+# Determine installation directory — always use ~/.local/bin (like Claude CLI).
+# No sudo required; no /usr/local/bin fallback.
 determine_install_dir() {
-  # Check if user wants to install to home directory
-  if [ "${MACROSCOPE_USER_INSTALL:-0}" = "1" ] || [ ! -w "/usr/local/bin" ]; then
-    INSTALL_DIR="${HOME}/.local/bin"
-    mkdir -p "$INSTALL_DIR"
-    NEEDS_PATH_UPDATE=1
-  else
-    INSTALL_DIR="/usr/local/bin"
-    NEEDS_PATH_UPDATE=0
-  fi
-
+  INSTALL_DIR="${HOME}/.local/bin"
+  mkdir -p "$INSTALL_DIR"
   info "Installation directory: ${BOLD}${INSTALL_DIR}${RESET}"
 }
 
@@ -161,50 +153,102 @@ install_binary() {
   # Make executable
   chmod +x "$TMP_DIR/macroscope"
 
-  # Install binary
+  # Install binary (always to ~/.local/bin, no sudo needed)
   step "Installing binary..."
+  mv "$TMP_DIR/macroscope" "$INSTALL_DIR/macroscope"
 
-  if [ "$INSTALL_DIR" = "/usr/local/bin" ] && [ ! -w "$INSTALL_DIR" ]; then
-    info "Requesting sudo access for installation to ${INSTALL_DIR}..."
-    sudo mv "$TMP_DIR/macroscope" "$INSTALL_DIR/macroscope"
-  else
-    mv "$TMP_DIR/macroscope" "$INSTALL_DIR/macroscope"
-  fi
-
-  success "Installed to ${BOLD}${INSTALL_DIR}/macroscope${RESET}"
+  INSTALLED_BINARY="${INSTALL_DIR}/macroscope"
+  success "Installed to ${BOLD}${INSTALLED_BINARY}${RESET}"
 }
 
-# Update shell configuration
+# Update shell configuration so ~/.local/bin is on PATH.
+# Always runs (not gated by NEEDS_PATH_UPDATE) since we always install to ~/.local/bin.
 update_shell_config() {
-  if [ "$NEEDS_PATH_UPDATE" -eq 0 ]; then
-    return
-  fi
-
   step "Updating shell configuration..."
 
   local updated=0
-  local shell_configs=()
+  local install_bin="$HOME/.local/bin"
+  local shell_name=""
+  shell_name="$(basename "${SHELL:-}")"
 
-  # Detect active shells
-  [ -f "${HOME}/.bashrc" ] && shell_configs+=("${HOME}/.bashrc")
-  [ -f "${HOME}/.bash_profile" ] && shell_configs+=("${HOME}/.bash_profile")
-  [ -f "${HOME}/.zshrc" ] && shell_configs+=("${HOME}/.zshrc")
-  [ -f "${HOME}/.config/fish/config.fish" ] && shell_configs+=("${HOME}/.config/fish/config.fish")
+  local marker="# Added by Macroscope installer"
+  local export_line="export PATH=\"$install_bin:\$PATH\""
 
-  local export_line='export PATH="$HOME/.local/bin:$PATH"'
+  ensure_line_in_file() {
+    local file="$1"
+    local line="$2"
+    local marker_line="$3"
 
-  for config in "${shell_configs[@]}"; do
-    if ! grep -q ".local/bin" "$config" 2>/dev/null; then
-      echo "" >> "$config"
-      echo "# Added by Macroscope installer" >> "$config"
-      echo "$export_line" >> "$config"
-      success "Updated ${config}"
+    mkdir -p "$(dirname "$file")"
+    touch "$file"
+
+    if ! grep -Fq "$line" "$file" 2>/dev/null; then
+      {
+        echo ""
+        echo "$marker_line"
+        echo "$line"
+      } >> "$file"
+      success "Updated $file"
       updated=1
+    else
+      info "PATH already configured in $file"
     fi
-  done
+  }
 
-  if [ $updated -eq 1 ]; then
-    warn "Please restart your shell or run: ${BOLD}source ~/.bashrc${RESET} (or ~/.zshrc)"
+  # fish uses different syntax; do NOT write bash export lines there.
+  if [ "$shell_name" = "fish" ] || [ -n "${FISH_VERSION:-}" ]; then
+    local fish_cfg="$HOME/.config/fish/config.fish"
+    local fish_line="set -Ux fish_user_paths $install_bin \$fish_user_paths"
+    ensure_line_in_file "$fish_cfg" "$fish_line" "$marker"
+  else
+    # zsh (macOS default): PATH belongs in ~/.zprofile for login shells; ~/.zshrc as fallback
+    if [ "$shell_name" = "zsh" ] || [ -n "${ZSH_VERSION:-}" ]; then
+      ensure_line_in_file "$HOME/.zprofile" "$export_line" "$marker"
+      ensure_line_in_file "$HOME/.zshrc" "$export_line" "$marker"
+    fi
+
+    # bash: login shell reads ~/.bash_profile; interactive shells often read ~/.bashrc
+    if [ "$shell_name" = "bash" ] || [ -n "${BASH_VERSION:-}" ]; then
+      ensure_line_in_file "$HOME/.bash_profile" "$export_line" "$marker"
+      ensure_line_in_file "$HOME/.bashrc" "$export_line" "$marker"
+    fi
+
+    # unknown shell: safe defaults
+    if [ "$shell_name" != "zsh" ] && [ "$shell_name" != "bash" ]; then
+      ensure_line_in_file "$HOME/.profile" "$export_line" "$marker"
+      ensure_line_in_file "$HOME/.bashrc" "$export_line" "$marker"
+      ensure_line_in_file "$HOME/.zshrc" "$export_line" "$marker"
+      ensure_line_in_file "$HOME/.zprofile" "$export_line" "$marker"
+    fi
+  fi
+
+  # Add to current session so the binary is immediately usable
+  export PATH="$HOME/.local/bin:$PATH"
+
+  if [ $updated -eq 0 ]; then
+    info "PATH already appears configured for $install_bin"
+  fi
+}
+
+# Verify installation
+verify_install() {
+  step "Verifying installation..."
+
+  if [ -n "$INSTALLED_BINARY" ] && [ -x "$INSTALLED_BINARY" ]; then
+    success "Binary exists at: ${BOLD}${INSTALLED_BINARY}${RESET}"
+  else
+    warn "Installed binary path not found/executable: ${INSTALLED_BINARY}"
+  fi
+
+  # Check whether it's currently discoverable in this shell
+  if command -v macroscope >/dev/null 2>&1; then
+    success "macroscope is on PATH: ${BOLD}$(command -v macroscope)${RESET}"
+  else
+    warn "macroscope is not currently on PATH in this shell."
+    echo "Open a new terminal or run:"
+    echo -e "  ${CYAN}source ~/.zprofile${RESET}   (zsh)"
+    echo -e "  ${CYAN}source ~/.bash_profile${RESET} (bash)"
+    echo -e "  ${CYAN}exec fish${RESET}           (fish)"
   fi
 }
 
@@ -228,6 +272,40 @@ print_completion() {
   echo ""
 }
 
+launch_wizard() {
+  # Allow CI/automated installs to skip the wizard
+  if [ "${MACROSCOPE_SKIP_WIZARD:-0}" = "1" ]; then
+    info "Skipping wizard launch (MACROSCOPE_SKIP_WIZARD=1)."
+    return
+  fi
+
+  # When piped (curl | bash), stdin is the pipe — not a TTY. We use /dev/tty
+  # to reconnect to the user's terminal for interactive input.
+  if [ ! -e /dev/tty ]; then
+    info "No TTY available; run 'macroscope' later to start the setup wizard."
+    return
+  fi
+
+  # Prefer the binary we just installed, otherwise fall back to PATH
+  local bin_path="${INSTALLED_BINARY}"
+  if [ -z "$bin_path" ] || [ ! -x "$bin_path" ]; then
+    bin_path="$(command -v macroscope || true)"
+  fi
+
+  if [ -z "$bin_path" ]; then
+    warn "Could not find installed macroscope binary; skipping wizard launch."
+    return
+  fi
+
+  echo ""
+  step "Launching Macroscope setup wizard..."
+  # Redirect stdin from /dev/tty so the wizard can accept interactive input
+  # even when the install script itself was piped (curl | bash).
+  if ! "$bin_path" < /dev/tty; then
+    warn "Wizard exited with a non-zero status. You can rerun it anytime with: macroscope"
+  fi
+}
+
 # Main installation flow
 main() {
   clear
@@ -240,6 +318,8 @@ main() {
 
   install_binary "$@"
   update_shell_config
+  verify_install
+  launch_wizard
   print_completion
 }
 
