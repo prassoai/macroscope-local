@@ -309,9 +309,10 @@ launch_wizard() {
     return
   fi
 
-  # Require an interactive TTY so we don't hang in non-interactive shells
-  if [ ! -t 0 ] || [ ! -t 1 ]; then
-    info "Non-interactive shell detected; run 'macroscope' later to start the setup wizard."
+  # When piped (curl | bash), stdin is the pipe — not a TTY. We use /dev/tty
+  # to reconnect to the user's terminal for interactive input.
+  if [ ! -e /dev/tty ]; then
+    info "No TTY available; run 'macroscope' later to start the setup wizard."
     return
   fi
 
@@ -328,9 +329,9 @@ launch_wizard() {
 
   echo ""
   step "Launching Macroscope setup wizard..."
-  # Running without args triggers the default review wizard; on first run it
-  # automatically falls into the setup flow (env + auth) before review.
-  if ! "$bin_path"; then
+  # Redirect stdin from /dev/tty so the wizard can accept interactive input
+  # even when the install script itself was piped (curl | bash).
+  if ! "$bin_path" < /dev/tty; then
     warn "Wizard exited with a non-zero status. You can rerun it anytime with: macroscope"
   fi
 }
