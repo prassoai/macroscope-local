@@ -104,16 +104,24 @@ detect_platform() {
   success "Detected platform: ${BOLD}${OS}-${ARCH}${RESET}"
 }
 
-# Determine installation directory
+# Determine installation directory (most common behavior:
+# prefer /usr/local/bin if writable; else fall back to ~/.local/bin and update PATH)
 determine_install_dir() {
-  # Check if user wants to install to home directory
-  if [ "${MACROSCOPE_USER_INSTALL:-0}" = "1" ] || [ ! -w "/usr/local/bin" ]; then
+  if [ "${MACROSCOPE_USER_INSTALL:-0}" = "1" ]; then
     INSTALL_DIR="${HOME}/.local/bin"
     mkdir -p "$INSTALL_DIR"
     NEEDS_PATH_UPDATE=1
   else
-    INSTALL_DIR="/usr/local/bin"
-    NEEDS_PATH_UPDATE=0
+    # Prefer /usr/local/bin if it exists and is writable OR can be written with sudo.
+    if [ -d "/usr/local/bin" ] && [ -w "/usr/local/bin" ]; then
+      INSTALL_DIR="/usr/local/bin"
+      NEEDS_PATH_UPDATE=0
+    else
+      # Fall back to user install if /usr/local/bin isn't writable
+      INSTALL_DIR="${HOME}/.local/bin"
+      mkdir -p "$INSTALL_DIR"
+      NEEDS_PATH_UPDATE=1
+    fi
   fi
 
   info "Installation directory: ${BOLD}${INSTALL_DIR}${RESET}"
@@ -171,10 +179,11 @@ install_binary() {
   fi
 
   INSTALLED_BINARY="${INSTALL_DIR}/macroscope"
-  success "Installed to ${BOLD}${INSTALL_DIR}/macroscope${RESET}"
+  success "Installed to ${BOLD}${INSTALLED_BINARY}${RESET}"
 }
 
-# Update shell configuration
+# Update shell configuration so ~/.local/bin is on PATH.
+# This is the most common cross-shell approach.
 update_shell_config() {
   if [ "$NEEDS_PATH_UPDATE" -eq 0 ]; then
     return
@@ -183,28 +192,93 @@ update_shell_config() {
   step "Updating shell configuration..."
 
   local updated=0
-  local shell_configs=()
+  local install_bin="$HOME/.local/bin"
+  local shell_name=""
+  shell_name="$(basename "${SHELL:-}")"
 
-  # Detect active shells
-  [ -f "${HOME}/.bashrc" ] && shell_configs+=("${HOME}/.bashrc")
-  [ -f "${HOME}/.bash_profile" ] && shell_configs+=("${HOME}/.bash_profile")
-  [ -f "${HOME}/.zshrc" ] && shell_configs+=("${HOME}/.zshrc")
-  [ -f "${HOME}/.config/fish/config.fish" ] && shell_configs+=("${HOME}/.config/fish/config.fish")
+  local marker="# Added by Macroscope installer"
+  local export_line="export PATH=\"$install_bin:\$PATH\""
 
-  local export_line='export PATH="$HOME/.local/bin:$PATH"'
+  ensure_line_in_file() {
+    local file="$1"
+    local line="$2"
+    local marker_line="$3"
 
-  for config in "${shell_configs[@]}"; do
-    if ! grep -q ".local/bin" "$config" 2>/dev/null; then
-      echo "" >> "$config"
-      echo "# Added by Macroscope installer" >> "$config"
-      echo "$export_line" >> "$config"
-      success "Updated ${config}"
+    mkdir -p "$(dirname "$file")"
+    touch "$file"
+
+    if ! grep -Fq "$line" "$file" 2>/dev/null; then
+      {
+        echo ""
+        echo "$marker_line"
+        echo "$line"
+      } >> "$file"
+      success "Updated $file"
       updated=1
     fi
-  done
+  }
+
+  # fish uses different syntax; do NOT write bash export lines there.
+  if [ "$shell_name" = "fish" ] || [ -n "${FISH_VERSION:-}" ]; then
+    local fish_cfg="$HOME/.config/fish/config.fish"
+    local fish_line="set -Ux fish_user_paths $install_bin \$fish_user_paths"
+    ensure_line_in_file "$fish_cfg" "$fish_line" "$marker"
+  else
+    # zsh (macOS default): PATH belongs in ~/.zprofile for login shells; ~/.zshrc as fallback
+    if [ "$shell_name" = "zsh" ] || [ -n "${ZSH_VERSION:-}" ]; then
+      ensure_line_in_file "$HOME/.zprofile" "$export_line" "$marker"
+      ensure_line_in_file "$HOME/.zshrc" "$export_line" "$marker"
+    fi
+
+    # bash: login shell reads ~/.bash_profile; interactive shells often read ~/.bashrc
+    if [ "$shell_name" = "bash" ] || [ -n "${BASH_VERSION:-}" ]; then
+      ensure_line_in_file "$HOME/.bash_profile" "$export_line" "$marker"
+      ensure_line_in_file "$HOME/.bashrc" "$export_line" "$marker"
+    fi
+
+    # unknown shell: safe defaults
+    if [ "$shell_name" != "zsh" ] && [ "$shell_name" != "bash" ]; then
+      ensure_line_in_file "$HOME/.profile" "$export_line" "$marker"
+      ensure_line_in_file "$HOME/.bashrc" "$export_line" "$marker"
+      ensure_line_in_file "$HOME/.zshrc" "$export_line" "$marker"
+      ensure_line_in_file "$HOME/.zprofile" "$export_line" "$marker"
+    fi
+  fi
 
   if [ $updated -eq 1 ]; then
-    warn "Please restart your shell or run: ${BOLD}source ~/.bashrc${RESET} (or ~/.zshrc)"
+    warn "PATH was updated for future shells. Apply it now with ONE of these:"
+    echo "  • zsh:  source ~/.zprofile"
+    echo "  • bash: source ~/.bash_profile"
+    echo "  • fish: exec fish"
+  else
+    info "PATH already appears configured for $install_bin"
+  fi
+}
+
+# Verify installation (best-effort; can't reliably mutate parent shell PATH here)
+verify_install() {
+  step "Verifying installation..."
+
+  if [ -n "$INSTALLED_BINARY" ] && [ -x "$INSTALLED_BINARY" ]; then
+    success "Binary exists at: ${BOLD}${INSTALLED_BINARY}${RESET}"
+  else
+    warn "Installed binary path not found/executable: ${INSTALLED_BINARY}"
+  fi
+
+  # Check whether it's currently discoverable in this shell
+  if command -v macroscope >/dev/null 2>&1; then
+    success "macroscope is on PATH: ${BOLD}$(command -v macroscope)${RESET}"
+  else
+    warn "macroscope is not currently on PATH in this shell."
+    if [ "$NEEDS_PATH_UPDATE" -eq 1 ]; then
+      echo "In most cases, open a new terminal or run:"
+      echo "  ${CYAN}source ~/.zprofile${RESET}   (zsh)"
+      echo "  ${CYAN}source ~/.bash_profile${RESET} (bash)"
+      echo "  ${CYAN}exec fish${RESET}           (fish)"
+      echo ""
+      echo "Or for this session only:"
+      echo "  ${CYAN}export PATH=\"$HOME/.local/bin:\$PATH\"${RESET}"
+    fi
   fi
 }
 
@@ -273,6 +347,7 @@ main() {
 
   install_binary "$@"
   update_shell_config
+  verify_install
   launch_wizard
   print_completion
 }
