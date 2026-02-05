@@ -104,26 +104,11 @@ detect_platform() {
   success "Detected platform: ${BOLD}${OS}-${ARCH}${RESET}"
 }
 
-# Determine installation directory (most common behavior:
-# prefer /usr/local/bin if writable; else fall back to ~/.local/bin and update PATH)
+# Determine installation directory — always use ~/.local/bin (like Claude CLI).
+# No sudo required; no /usr/local/bin fallback.
 determine_install_dir() {
-  if [ "${MACROSCOPE_USER_INSTALL:-0}" = "1" ]; then
-    INSTALL_DIR="${HOME}/.local/bin"
-    mkdir -p "$INSTALL_DIR"
-    NEEDS_PATH_UPDATE=1
-  else
-    # Prefer /usr/local/bin if it exists and is writable OR can be written with sudo.
-    if [ -d "/usr/local/bin" ] && [ -w "/usr/local/bin" ]; then
-      INSTALL_DIR="/usr/local/bin"
-      NEEDS_PATH_UPDATE=0
-    else
-      # Fall back to user install if /usr/local/bin isn't writable
-      INSTALL_DIR="${HOME}/.local/bin"
-      mkdir -p "$INSTALL_DIR"
-      NEEDS_PATH_UPDATE=1
-    fi
-  fi
-
+  INSTALL_DIR="${HOME}/.local/bin"
+  mkdir -p "$INSTALL_DIR"
   info "Installation directory: ${BOLD}${INSTALL_DIR}${RESET}"
 }
 
@@ -168,27 +153,17 @@ install_binary() {
   # Make executable
   chmod +x "$TMP_DIR/macroscope"
 
-  # Install binary
+  # Install binary (always to ~/.local/bin, no sudo needed)
   step "Installing binary..."
-
-  if [ "$INSTALL_DIR" = "/usr/local/bin" ] && [ ! -w "$INSTALL_DIR" ]; then
-    info "Requesting sudo access for installation to ${INSTALL_DIR}..."
-    sudo mv "$TMP_DIR/macroscope" "$INSTALL_DIR/macroscope"
-  else
-    mv "$TMP_DIR/macroscope" "$INSTALL_DIR/macroscope"
-  fi
+  mv "$TMP_DIR/macroscope" "$INSTALL_DIR/macroscope"
 
   INSTALLED_BINARY="${INSTALL_DIR}/macroscope"
   success "Installed to ${BOLD}${INSTALLED_BINARY}${RESET}"
 }
 
 # Update shell configuration so ~/.local/bin is on PATH.
-# This is the most common cross-shell approach.
+# Always runs (not gated by NEEDS_PATH_UPDATE) since we always install to ~/.local/bin.
 update_shell_config() {
-  if [ "$NEEDS_PATH_UPDATE" -eq 0 ]; then
-    return
-  fi
-
   step "Updating shell configuration..."
 
   local updated=0
@@ -215,6 +190,8 @@ update_shell_config() {
       } >> "$file"
       success "Updated $file"
       updated=1
+    else
+      info "PATH already configured in $file"
     fi
   }
 
@@ -245,17 +222,15 @@ update_shell_config() {
     fi
   fi
 
-  if [ $updated -eq 1 ]; then
-    warn "PATH was updated for future shells. Apply it now with ONE of these:"
-    echo "  • zsh:  source ~/.zprofile"
-    echo "  • bash: source ~/.bash_profile"
-    echo "  • fish: exec fish"
-  else
+  # Add to current session so the binary is immediately usable
+  export PATH="$HOME/.local/bin:$PATH"
+
+  if [ $updated -eq 0 ]; then
     info "PATH already appears configured for $install_bin"
   fi
 }
 
-# Verify installation (best-effort; can't reliably mutate parent shell PATH here)
+# Verify installation
 verify_install() {
   step "Verifying installation..."
 
@@ -270,15 +245,10 @@ verify_install() {
     success "macroscope is on PATH: ${BOLD}$(command -v macroscope)${RESET}"
   else
     warn "macroscope is not currently on PATH in this shell."
-    if [ "$NEEDS_PATH_UPDATE" -eq 1 ]; then
-      echo "In most cases, open a new terminal or run:"
-      echo -e "  ${CYAN}source ~/.zprofile${RESET}   (zsh)"
-      echo -e "  ${CYAN}source ~/.bash_profile${RESET} (bash)"
-      echo -e "  ${CYAN}exec fish${RESET}           (fish)"
-      echo ""
-      echo "Or for this session only:"
-      echo -e "  ${CYAN}export PATH=\"$HOME/.local/bin:\$PATH\"${RESET}"
-    fi
+    echo "Open a new terminal or run:"
+    echo -e "  ${CYAN}source ~/.zprofile${RESET}   (zsh)"
+    echo -e "  ${CYAN}source ~/.bash_profile${RESET} (bash)"
+    echo -e "  ${CYAN}exec fish${RESET}           (fish)"
   fi
 }
 
