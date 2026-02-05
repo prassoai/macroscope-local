@@ -272,12 +272,12 @@ verify_install() {
     warn "macroscope is not currently on PATH in this shell."
     if [ "$NEEDS_PATH_UPDATE" -eq 1 ]; then
       echo "In most cases, open a new terminal or run:"
-      echo "  ${CYAN}source ~/.zprofile${RESET}   (zsh)"
-      echo "  ${CYAN}source ~/.bash_profile${RESET} (bash)"
-      echo "  ${CYAN}exec fish${RESET}           (fish)"
+      echo -e "  ${CYAN}source ~/.zprofile${RESET}   (zsh)"
+      echo -e "  ${CYAN}source ~/.bash_profile${RESET} (bash)"
+      echo -e "  ${CYAN}exec fish${RESET}           (fish)"
       echo ""
       echo "Or for this session only:"
-      echo "  ${CYAN}export PATH=\"$HOME/.local/bin:\$PATH\"${RESET}"
+      echo -e "  ${CYAN}export PATH=\"$HOME/.local/bin:\$PATH\"${RESET}"
     fi
   fi
 }
