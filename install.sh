@@ -319,8 +319,8 @@ main() {
   install_binary "$@"
   update_shell_config
   verify_install
-  launch_wizard
   print_completion
+  launch_wizard
 }
 
 # Run installation
