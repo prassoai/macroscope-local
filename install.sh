@@ -441,6 +441,7 @@ launch_wizard() {
   # even when the install script itself was piped (curl | bash).
   if ! "$bin_path" < /dev/tty; then
     warn "Wizard exited with a non-zero status. You can rerun it anytime with: macroscope"
+    WIZARD_FAILED=1
   fi
 }
 
@@ -459,7 +460,10 @@ main() {
   verify_install
   setup_mcp
   launch_wizard
-  print_completion
+
+  if [ "${WIZARD_FAILED:-0}" != "1" ]; then
+    print_completion
+  fi
 }
 
 # Run installation
