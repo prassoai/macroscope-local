@@ -474,8 +474,8 @@ main() {
   update_shell_config
   verify_install
   setup_mcp
-  launch_wizard
   print_completion
+  launch_wizard
 }
 
 # Run installation
