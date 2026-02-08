@@ -277,7 +277,7 @@ verify_install() {
 }
 
 # Print completion message
-print_completion() {
+print_installation_completion() {
   echo ""
   echo -e "${GREEN}${BOLD}════════════════════════════════════════════════${RESET}"
   echo -e "${GREEN}${BOLD}   Installation Complete! 🎉${RESET}"
@@ -473,8 +473,8 @@ main() {
   install_binary "$@"
   update_shell_config
   verify_install
+  print_installation_completion
   setup_mcp
-  print_completion
   launch_wizard
 }
 
