@@ -151,6 +151,9 @@ install_binary() {
 
   success "Downloaded successfully"
 
+  # Make executable
+  chmod +x "$TMP_DIR/macroscope"
+
   # Download MCP server binary
   if [ "$VERSION" = "latest" ]; then
     MCP_URL="https://github.com/${REPO}/releases/latest/download/macroscope-mcp-${OS}-${ARCH}"
