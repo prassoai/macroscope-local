@@ -1,0 +1,13 @@
+{
+  "name": "macroscope-codereview",
+  "version": "1.0.0",
+  "description": "Macroscope local code review plugin for Claude Code using the macroscope-mcp server.",
+  "author": {
+    "name": "Prasso",
+    "url": "https://github.com/prassoai"
+  },
+  "homepage": "https://github.com/prassoai/macroscope-local",
+  "repository": "https://github.com/prassoai/macroscope-local",
+  "license": "UNLICENSED",
+  "keywords": ["code-review", "mcp", "macroscope", "local-dev"]
+}

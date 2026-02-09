@@ -42,6 +42,9 @@ success() {
 # Optional variables to hold the paths of the installed binaries
 INSTALLED_BINARY=""
 INSTALLED_MCP_BINARY=""
+CLAUDE_MARKETPLACE_NAME="macroscope-local"
+CLAUDE_MARKETPLACE_SOURCE="prassoai/macroscope-local"
+CLAUDE_PLUGIN_NAME="macroscope-codereview"
 
 error() {
   printf "${RED}✗${RESET} %s\n" "$1"
@@ -290,7 +293,7 @@ print_installation_completion() {
   echo ""
   if [ -n "$INSTALLED_MCP_BINARY" ]; then
     printf "${BOLD}AI tool integration:${RESET}\n"
-    printf "  ${DIM}MCP server installed for detected tools. Restart them, then ask:${RESET}\n"
+    printf "  ${DIM}Claude plugin + MCP server configured for detected tools. Restart them, then ask:${RESET}\n"
     printf "  ${CYAN}\"Review my code changes\"${RESET}\n"
     echo ""
   fi
@@ -298,6 +301,43 @@ print_installation_completion() {
   printf "  Documentation: ${BLUE}https://github.com/prassoai/macroscope-local${RESET}\n"
   printf "  Report issues: ${BLUE}https://github.com/prassoai/macroscope-local/issues${RESET}\n"
   echo ""
+}
+
+setup_claude_plugin() {
+  local plugin_ref="${CLAUDE_PLUGIN_NAME}@${CLAUDE_MARKETPLACE_NAME}"
+
+  # Older Claude CLI versions may not support plugins yet.
+  if ! claude plugin list --json >/dev/null 2>&1; then
+    warn "Claude Code: plugin commands unavailable, falling back to direct MCP setup"
+    return 1
+  fi
+
+  if claude plugin list --json 2>/dev/null | grep -q "\"id\": \"${CLAUDE_PLUGIN_NAME}@"; then
+    info "Claude Code: plugin already installed (${plugin_ref})"
+    return 0
+  fi
+
+  if ! claude plugin marketplace list 2>/dev/null | grep -q "${CLAUDE_MARKETPLACE_NAME}"; then
+    if ! claude plugin marketplace add "${CLAUDE_MARKETPLACE_SOURCE}" >/dev/null 2>&1; then
+      warn "Claude Code: failed to add plugin marketplace (${CLAUDE_MARKETPLACE_SOURCE})"
+      return 1
+    fi
+    success "Claude Code: marketplace added (${CLAUDE_MARKETPLACE_NAME})"
+  fi
+
+  if claude plugin install --scope user "${plugin_ref}" >/dev/null 2>&1; then
+    success "Claude Code: plugin installed (${plugin_ref})"
+    return 0
+  fi
+
+  # If install command failed because plugin already exists in another scope, treat as success.
+  if claude plugin list --json 2>/dev/null | grep -q "\"id\": \"${CLAUDE_PLUGIN_NAME}@"; then
+    info "Claude Code: plugin already installed (${plugin_ref})"
+    return 0
+  fi
+
+  warn "Claude Code: plugin install failed (${plugin_ref})"
+  return 1
 }
 
 # Configure MCP server for AI coding tools
@@ -313,11 +353,15 @@ setup_mcp() {
 
   # Claude Code
   if command -v claude &> /dev/null; then
-    if claude mcp add macroscope-codereview -s user -- "$INSTALLED_MCP_BINARY" 2>/dev/null; then
-      success "Claude Code: MCP server registered"
+    if setup_claude_plugin; then
+      configured=1
+    elif claude mcp add macroscope-codereview -s user -- "$INSTALLED_MCP_BINARY" 2>/dev/null; then
+      success "Claude Code: MCP server registered (plugin fallback)"
       configured=1
     else
-      warn "Claude Code: auto-configure failed. Manual setup:"
+      warn "Claude Code: auto-configure failed for both plugin and MCP. Manual setup:"
+      printf "  ${CYAN}claude plugin marketplace add %s${RESET}\n" "$CLAUDE_MARKETPLACE_SOURCE"
+      printf "  ${CYAN}claude plugin install --scope user %s@%s${RESET}\n" "$CLAUDE_PLUGIN_NAME" "$CLAUDE_MARKETPLACE_NAME"
       printf "  ${CYAN}claude mcp add macroscope-codereview -s user -- %s${RESET}\n" "$INSTALLED_MCP_BINARY"
     fi
   fi
