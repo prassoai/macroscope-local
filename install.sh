@@ -27,18 +27,16 @@ print_banner() {
   ██║ ╚═╝ ██║██║  ██║╚██████╗██║  ██║╚██████╔╝███████║╚██████╗╚██████╔╝██║     ███████╗
   ╚═╝     ╚═╝╚═╝  ╚═╝ ╚═════╝╚═╝  ╚═╝ ╚═════╝ ╚══════╝ ╚═════╝ ╚═════╝ ╚═╝     ╚══════╝
 
-                        🔬 AI-Powered Code Intelligence
-
 EOF
 }
 
 # Status printing functions
 info() {
-  echo -e "${CYAN}ℹ${RESET} $1"
+  printf "${CYAN}ℹ${RESET} %s\n" "$1"
 }
 
 success() {
-  echo -e "${GREEN}✓${RESET} $1"
+  printf "${GREEN}✓${RESET} %s\n" "$1"
 }
 
 # Optional variables to hold the paths of the installed binaries
@@ -46,15 +44,15 @@ INSTALLED_BINARY=""
 INSTALLED_MCP_BINARY=""
 
 error() {
-  echo -e "${RED}✗${RESET} $1"
+  printf "${RED}✗${RESET} %s\n" "$1"
 }
 
 warn() {
-  echo -e "${YELLOW}⚠${RESET} $1"
+  printf "${YELLOW}⚠${RESET} %s\n" "$1"
 }
 
 step() {
-  echo -e "\n${BOLD}${MAGENTA}→${RESET} ${BOLD}$1${RESET}"
+  printf "\n${BOLD}${MAGENTA}→${RESET} ${BOLD}%s${RESET}\n" "$1"
 }
 
 # Check for required dependencies
@@ -71,9 +69,9 @@ check_dependencies() {
     error "Missing required dependencies: ${missing_deps[*]}"
     echo ""
     echo "Please install them first:"
-    echo "  • macOS: brew install ${missing_deps[*]}"
-    echo "  • Ubuntu/Debian: sudo apt-get install ${missing_deps[*]}"
-    echo "  • RHEL/CentOS: sudo yum install ${missing_deps[*]}"
+    echo "  macOS: brew install ${missing_deps[*]}"
+    echo "  Ubuntu/Debian: sudo apt-get install ${missing_deps[*]}"
+    echo "  RHEL/CentOS: sudo yum install ${missing_deps[*]}"
     exit 1
   fi
 }
@@ -140,9 +138,9 @@ install_binary() {
     error "Failed to download macroscope"
     echo ""
     echo "Possible reasons:"
-    echo "  • Release doesn't exist for ${OS}-${ARCH}"
-    echo "  • Network connectivity issues"
-    echo "  • Invalid version specified: ${VERSION}"
+    echo "  Release doesn't exist for ${OS}-${ARCH}"
+    echo "  Network connectivity issues"
+    echo "  Invalid version specified: ${VERSION}"
     echo ""
     echo "Check available releases at:"
     echo "  https://github.com/${REPO}/releases"
@@ -270,35 +268,35 @@ verify_install() {
   else
     warn "macroscope is not currently on PATH in this shell."
     echo "Open a new terminal or run:"
-    echo -e "  ${CYAN}source ~/.zprofile${RESET}   (zsh)"
-    echo -e "  ${CYAN}source ~/.bash_profile${RESET} (bash)"
-    echo -e "  ${CYAN}exec fish${RESET}           (fish)"
+    printf "  ${CYAN}source ~/.zprofile${RESET}   (zsh)\n"
+    printf "  ${CYAN}source ~/.bash_profile${RESET} (bash)\n"
+    printf "  ${CYAN}exec fish${RESET}           (fish)\n"
   fi
 }
 
 # Print completion message
 print_installation_completion() {
   echo ""
-  echo -e "${GREEN}${BOLD}════════════════════════════════════════════════${RESET}"
-  echo -e "${GREEN}${BOLD}   Installation Complete! 🎉${RESET}"
-  echo -e "${GREEN}${BOLD}════════════════════════════════════════════════${RESET}"
+  printf "${GREEN}${BOLD}════════════════════════════════════════════════${RESET}\n"
+  printf "${GREEN}${BOLD}Installation Complete!${RESET}\n"
+  printf "${GREEN}${BOLD}════════════════════════════════════════════════${RESET}\n"
   echo ""
-  echo -e "${BOLD}Verify installation:${RESET}"
-  echo -e "  ${CYAN}macroscope version${RESET}"
+  printf "${BOLD}Verify installation:${RESET}\n"
+  printf "  ${CYAN}macroscope version${RESET}\n"
   echo ""
-  echo -e "${BOLD}Quick start:${RESET}"
-  echo -e "  ${CYAN}macroscope review${RESET}          ${DIM}# Review your code changes${RESET}"
-  echo -e "  ${CYAN}macroscope review --help${RESET}   ${DIM}# See all options${RESET}"
+  printf "${BOLD}Quick start:${RESET}\n"
+  printf "  ${CYAN}macroscope review${RESET}          ${DIM}# Review your code changes${RESET}\n"
+  printf "  ${CYAN}macroscope review --help${RESET}   ${DIM}# See all options${RESET}\n"
   echo ""
   if [ -n "$INSTALLED_MCP_BINARY" ]; then
-    echo -e "${BOLD}AI tool integration:${RESET}"
-    echo -e "  ${DIM}MCP server installed for detected tools. Restart them, then ask:${RESET}"
-    echo -e "  ${CYAN}\"Review my code changes\"${RESET}"
+    printf "${BOLD}AI tool integration:${RESET}\n"
+    printf "  ${DIM}MCP server installed for detected tools. Restart them, then ask:${RESET}\n"
+    printf "  ${CYAN}\"Review my code changes\"${RESET}\n"
+    echo ""
   fi
-  echo ""
-  echo -e "${BOLD}Need help?${RESET}"
-  echo -e "  📖 Documentation: ${BLUE}https://github.com/prassoai/macroscope-local${RESET}"
-  echo -e "  🐛 Report issues: ${BLUE}https://github.com/prassoai/macroscope-local/issues${RESET}"
+  printf "${BOLD}Need help?${RESET}\n"
+  printf "  Documentation: ${BLUE}https://github.com/prassoai/macroscope-local${RESET}\n"
+  printf "  Report issues: ${BLUE}https://github.com/prassoai/macroscope-local/issues${RESET}\n"
   echo ""
 }
 
@@ -320,7 +318,7 @@ setup_mcp() {
       configured=1
     else
       warn "Claude Code: auto-configure failed. Manual setup:"
-      echo -e "  ${CYAN}claude mcp add macroscope-codereview -s user -- ${INSTALLED_MCP_BINARY}${RESET}"
+      printf "  ${CYAN}claude mcp add macroscope-codereview -s user -- %s${RESET}\n" "$INSTALLED_MCP_BINARY"
     fi
   fi
 
@@ -337,7 +335,7 @@ setup_mcp() {
       configured=1
     else
       warn "Gemini CLI: auto-configure failed. Manual setup:"
-      echo -e "  ${CYAN}gemini mcp add -s user macroscope-codereview ${INSTALLED_MCP_BINARY}${RESET}"
+      printf "  ${CYAN}gemini mcp add -s user macroscope-codereview %s${RESET}\n" "$INSTALLED_MCP_BINARY"
     fi
   fi
 
@@ -349,7 +347,7 @@ setup_mcp() {
 
   if [ $configured -eq 0 ]; then
     info "No supported AI coding tools detected (Claude Code, Codex, Gemini CLI, Cursor)."
-    echo -e "  ${DIM}Install one and rerun, or configure MCP manually.${RESET}"
+    printf "  ${DIM}Install one and rerun, or configure MCP manually.${RESET}\n"
   else
     info "Restart your AI coding tools to enable the integration"
   fi
@@ -407,7 +405,7 @@ with open('$cursor_mcp', 'w') as f:
     fi
 
     warn "Cursor: could not auto-merge config. Add manually to ${BOLD}${cursor_mcp}${RESET}:"
-    echo -e "  ${CYAN}\"macroscope-codereview\": { \"command\": \"${INSTALLED_MCP_BINARY}\", \"args\": [] }${RESET}"
+    printf "  ${CYAN}\"macroscope-codereview\": { \"command\": \"%s\", \"args\": [] }${RESET}\n" "$INSTALLED_MCP_BINARY"
     return
   fi
 
