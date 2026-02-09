@@ -275,7 +275,7 @@ verify_install() {
 }
 
 # Print completion message
-print_completion() {
+print_installation_completion() {
   echo ""
   printf "${GREEN}${BOLD}════════════════════════════════════════════════${RESET}\n"
   printf "${GREEN}${BOLD}Installation Complete!${RESET}\n"
@@ -322,15 +322,10 @@ setup_mcp() {
     fi
   fi
 
-  # Codex (OpenAI) — uses `codex mcp add` with TOML config at ~/.codex/config.toml
+  # Codex (OpenAI) — no CLI command; write TOML config at ~/.codex/config.toml
   if command -v codex &> /dev/null; then
-    if codex mcp add macroscope-codereview -- "$INSTALLED_MCP_BINARY" 2>/dev/null; then
-      success "Codex: MCP server registered"
-      configured=1
-    else
-      warn "Codex: auto-configure failed. Manual setup:"
-      printf "  ${CYAN}codex mcp add macroscope-codereview -- %s${RESET}\n" "$INSTALLED_MCP_BINARY"
-    fi
+    setup_codex_mcp
+    configured=1
   fi
 
   # Gemini CLI — uses `gemini mcp add` with settings.json at ~/.gemini/settings.json
@@ -356,6 +351,27 @@ setup_mcp() {
   else
     info "Restart your AI coding tools to enable the integration"
   fi
+}
+
+# Write MCP config into Codex's ~/.codex/config.toml
+setup_codex_mcp() {
+  local codex_config="$HOME/.codex/config.toml"
+
+  if [ -f "$codex_config" ] && grep -q 'mcp_servers.macroscope-codereview' "$codex_config" 2>/dev/null; then
+    info "Codex: MCP server already configured"
+    return
+  fi
+
+  mkdir -p "$HOME/.codex"
+  # Append the MCP server block to the TOML config
+  {
+    echo ""
+    echo "# Added by Macroscope installer"
+    echo "[mcp_servers.macroscope-codereview]"
+    echo "command = \"$INSTALLED_MCP_BINARY\""
+    echo "args = []"
+  } >> "$codex_config"
+  success "Codex: MCP server registered"
 }
 
 # Write MCP config into Cursor's ~/.cursor/mcp.json
@@ -455,8 +471,8 @@ main() {
   install_binary "$@"
   update_shell_config
   verify_install
+  print_installation_completion
   setup_mcp
-  print_completion
   launch_wizard
 }
 
