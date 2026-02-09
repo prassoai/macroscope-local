@@ -329,7 +329,7 @@ setup_mcp() {
       configured=1
     else
       warn "Codex: auto-configure failed. Manual setup:"
-      echo -e "  ${CYAN}codex mcp add macroscope-codereview -- ${INSTALLED_MCP_BINARY}${RESET}"
+      printf "  ${CYAN}codex mcp add macroscope-codereview -- %s${RESET}\n" "$INSTALLED_MCP_BINARY"
     fi
   fi
 
