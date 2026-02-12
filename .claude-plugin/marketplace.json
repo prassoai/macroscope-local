@@ -11,14 +11,14 @@
   },
   "plugins": [
     {
-      "name": "macroscope-codereview",
+      "name": "macroscope",
       "description": "Run Macroscope local code reviews from Claude Code via the bundled MCP integration.",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "author": {
         "name": "Prasso",
         "url": "https://github.com/prassoai"
       },
-      "source": "./plugins/macroscope-codereview",
+      "source": "./plugins/macroscope",
       "category": "development",
       "homepage": "https://github.com/prassoai/macroscope-local"
     }

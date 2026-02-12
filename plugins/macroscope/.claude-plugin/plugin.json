@@ -1,6 +1,6 @@
 {
-  "name": "macroscope-codereview",
-  "version": "1.0.0",
+  "name": "macroscope",
+  "version": "1.0.1",
   "description": "Macroscope local code review plugin for Claude Code using the macroscope-mcp server.",
   "author": {
     "name": "Prasso",
