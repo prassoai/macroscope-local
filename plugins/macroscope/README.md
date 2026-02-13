@@ -19,8 +19,8 @@ claude plugin install --scope user macroscope-codereview@macroscope-local
 
 Restart Claude Code after installation.
 
-## Background execution
+## Execution notes
 
-Code reviews can take several minutes. The MCP tool descriptions instruct the agent to launch
-reviews in the background (using `run_in_background: true`) so you can keep working while the
-review runs. When the review completes, the agent will report the findings back to you.
+Code reviews can take several minutes (up to 10 min for large diffs). Reviews run in the
+foreground — MCP tools are not available in Claude Code background subagents (documented
+limitation), so background execution via `run_in_background: true` will hang indefinitely.
