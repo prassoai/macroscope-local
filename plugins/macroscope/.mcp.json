@@ -1,0 +1,8 @@
+{
+  "macroscope": {
+    "command": "${HOME}/.local/bin/macroscope-mcp",
+    "env": {
+      "MACRODAEMON_PATH": "${HOME}/.local/bin/macroscope"
+    }
+  }
+}
