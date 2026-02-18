@@ -36,6 +36,13 @@ success() {
   printf "${GREEN}✓${RESET} %s\n" "$1"
 }
 
+# Optional variables to hold the paths of the installed binaries
+INSTALLED_BINARY=""
+INSTALLED_MCP_BINARY=""
+CLAUDE_MARKETPLACE_NAME="macroscope-local"
+CLAUDE_MARKETPLACE_SOURCE="prassoai/macroscope-local"
+CLAUDE_PLUGIN_NAME="macroscope-codereview"
+
 error() {
   printf "${RED}✗${RESET} %s\n" "$1"
 }
@@ -48,7 +55,6 @@ step() {
   printf "\n${BOLD}${MAGENTA}→${RESET} ${BOLD}%s${RESET}\n" "$1"
 }
 
-INSTALLED_BINARY=""
 INSTALL_VERSION=""
 TMP_DIR=""
 CHECKOUT_DIR=""
@@ -679,10 +685,35 @@ install_binary() {
 
   chmod +x "$TMP_DIR/macroscope"
 
-  step "Installing binary..."
+  # Download MCP server binary
+  if [ "$VERSION" = "latest" ]; then
+    MCP_URL="https://github.com/${REPO}/releases/latest/download/macroscope-mcp-${OS}-${ARCH}"
+  else
+    MCP_URL="https://github.com/${REPO}/releases/download/${VERSION}/macroscope-mcp-${OS}-${ARCH}"
+  fi
+
+  info "Downloading MCP server from: ${DIM}${MCP_URL}${RESET}"
+
+  if ! curl -fL --progress-bar "$MCP_URL" -o "$TMP_DIR/macroscope-mcp"; then
+    warn "Failed to download macroscope-mcp (MCP server)"
+    echo "  The CLI will still work, but Claude Code integration won't be auto-configured."
+    echo "  You can set it up manually later: https://github.com/${REPO}#mcp-setup"
+  else
+    success "Downloaded MCP server"
+    chmod +x "$TMP_DIR/macroscope-mcp"
+  fi
+
+  # Install binaries (always to ~/.local/bin, no sudo needed)
+  step "Installing binaries..."
   mv "$TMP_DIR/macroscope" "$INSTALL_DIR/macroscope"
   INSTALLED_BINARY="${INSTALL_DIR}/macroscope"
   success "Installed CLI to ${BOLD}${INSTALLED_BINARY}${RESET}"
+
+  if [ -f "$TMP_DIR/macroscope-mcp" ]; then
+    mv "$TMP_DIR/macroscope-mcp" "$INSTALL_DIR/macroscope-mcp"
+    INSTALLED_MCP_BINARY="${INSTALL_DIR}/macroscope-mcp"
+    success "Installed MCP server to ${BOLD}${INSTALLED_MCP_BINARY}${RESET}"
+  fi
 }
 
 fetch_plugin_bundle() {
@@ -1335,10 +1366,387 @@ print_installation_completion() {
     printf "  ${YELLOW}%s${RESET}\n" "$CODEX_PLUGIN_HOST_WARNING"
   fi
   echo ""
+  if [ -n "$INSTALLED_MCP_BINARY" ]; then
+    printf "${BOLD}AI tool integration:${RESET}\n"
+    printf "  ${DIM}Claude plugin + MCP server configured for detected tools. Restart them, then ask:${RESET}\n"
+    printf "  ${CYAN}\"Review my code changes\"${RESET}\n"
+    echo ""
+  fi
   printf "${BOLD}Need help?${RESET}\n"
   printf "  Documentation: ${BLUE}https://github.com/prassoai/macroscope-local${RESET}\n"
   printf "  Report issues: ${BLUE}https://github.com/prassoai/macroscope-local/issues${RESET}\n"
   echo ""
+}
+
+setup_claude_plugin() {
+  local plugin_ref="${CLAUDE_PLUGIN_NAME}@${CLAUDE_MARKETPLACE_NAME}"
+
+  # Older Claude CLI versions may not support plugins yet.
+  if ! claude plugin list --json >/dev/null 2>&1; then
+    warn "Claude Code: plugin commands unavailable, falling back to direct MCP setup"
+    return 1
+  fi
+
+  if claude plugin list --json 2>/dev/null | grep -q "\"id\": \"${CLAUDE_PLUGIN_NAME}@"; then
+    info "Claude Code: plugin already installed (${plugin_ref})"
+    return 0
+  fi
+
+  if ! claude plugin marketplace list 2>/dev/null | grep -q "${CLAUDE_MARKETPLACE_NAME}"; then
+    if ! claude plugin marketplace add "${CLAUDE_MARKETPLACE_SOURCE}" >/dev/null 2>&1; then
+      warn "Claude Code: failed to add plugin marketplace (${CLAUDE_MARKETPLACE_SOURCE})"
+      return 1
+    fi
+    success "Claude Code: marketplace added (${CLAUDE_MARKETPLACE_NAME})"
+  fi
+
+  if claude plugin install --scope user "${plugin_ref}" >/dev/null 2>&1; then
+    success "Claude Code: plugin installed (${plugin_ref})"
+    return 0
+  fi
+
+  # If install command failed because plugin already exists in another scope, treat as success.
+  if claude plugin list --json 2>/dev/null | grep -q "\"id\": \"${CLAUDE_PLUGIN_NAME}@"; then
+    info "Claude Code: plugin already installed (${plugin_ref})"
+    return 0
+  fi
+
+  warn "Claude Code: plugin install failed (${plugin_ref})"
+  return 1
+}
+
+# Configure MCP server for AI coding tools
+setup_mcp() {
+  # Skip if MCP binary wasn't installed
+  if [ -z "$INSTALLED_MCP_BINARY" ] || [ ! -x "$INSTALLED_MCP_BINARY" ]; then
+    return
+  fi
+
+  step "Configuring MCP integrations..."
+
+  local configured=0
+
+  # Claude Code
+  if command -v claude &> /dev/null; then
+    if setup_claude_plugin; then
+      configured=1
+    elif claude mcp add macroscope-codereview -s user -- "$INSTALLED_MCP_BINARY" 2>/dev/null; then
+      success "Claude Code: MCP server registered (plugin fallback)"
+      configured=1
+    else
+      warn "Claude Code: auto-configure failed for both plugin and MCP. Manual setup:"
+      printf "  ${CYAN}claude plugin marketplace add %s${RESET}\n" "$CLAUDE_MARKETPLACE_SOURCE"
+      printf "  ${CYAN}claude plugin install --scope user %s@%s${RESET}\n" "$CLAUDE_PLUGIN_NAME" "$CLAUDE_MARKETPLACE_NAME"
+      printf "  ${CYAN}claude mcp add macroscope-codereview -s user -- %s${RESET}\n" "$INSTALLED_MCP_BINARY"
+    fi
+    # Install auto-review hook (runs on every Claude Code Stop event)
+    setup_claude_auto_review_hook
+  fi
+
+  # Codex (OpenAI) — no CLI command; write TOML config at ~/.codex/config.toml
+  if command -v codex &> /dev/null; then
+    setup_codex_mcp
+    configured=1
+  fi
+
+  # Gemini CLI — uses `gemini mcp add` with settings.json at ~/.gemini/settings.json
+  if command -v gemini &> /dev/null; then
+    if gemini mcp add -s user macroscope-codereview "$INSTALLED_MCP_BINARY" 2>/dev/null; then
+      success "Gemini CLI: MCP server registered"
+      configured=1
+    else
+      warn "Gemini CLI: auto-configure failed. Manual setup:"
+      printf "  ${CYAN}gemini mcp add -s user macroscope-codereview %s${RESET}\n" "$INSTALLED_MCP_BINARY"
+    fi
+  fi
+
+  # Cursor — uses JSON config at ~/.cursor/mcp.json (no CLI command; write JSON directly)
+  if [ -d "$HOME/.cursor" ]; then
+    setup_cursor_mcp
+    configured=1
+  fi
+
+  if [ $configured -eq 0 ]; then
+    info "No supported AI coding tools detected (Claude Code, Codex, Gemini CLI, Cursor)."
+    printf "  ${DIM}Install one and rerun, or configure MCP manually.${RESET}\n"
+  else
+    info "Restart your AI coding tools to enable the integration"
+  fi
+}
+
+# Write MCP config into Codex's ~/.codex/config.toml
+setup_codex_mcp() {
+  local codex_config="$HOME/.codex/config.toml"
+
+  if [ -f "$codex_config" ] && grep -q 'mcp_servers.macroscope-codereview' "$codex_config" 2>/dev/null; then
+    info "Codex: MCP server already configured"
+    return
+  fi
+
+  mkdir -p "$HOME/.codex"
+  # Append the MCP server block to the TOML config
+  {
+    echo ""
+    echo "# Added by Macroscope installer"
+    echo "[mcp_servers.macroscope-codereview]"
+    echo "command = \"$INSTALLED_MCP_BINARY\""
+    echo "args = []"
+  } >> "$codex_config"
+  success "Codex: MCP server registered"
+}
+
+# Write MCP config into Cursor's ~/.cursor/mcp.json
+setup_cursor_mcp() {
+  local cursor_mcp="$HOME/.cursor/mcp.json"
+
+  # If file exists, merge our server in (if not already present)
+  if [ -f "$cursor_mcp" ]; then
+    if grep -q '"macroscope-codereview"' "$cursor_mcp" 2>/dev/null; then
+      info "Cursor: MCP server already configured"
+      return
+    fi
+
+    # Use python/node to safely merge JSON if available, otherwise fall back to simple check
+    if command -v python3 &> /dev/null; then
+      python3 -c "
+import json, sys
+try:
+    with open('$cursor_mcp', 'r') as f:
+        cfg = json.load(f)
+except (json.JSONDecodeError, FileNotFoundError):
+    cfg = {}
+cfg.setdefault('mcpServers', {})
+cfg['mcpServers']['macroscope-codereview'] = {
+    'command': '$INSTALLED_MCP_BINARY',
+    'args': []
+}
+with open('$cursor_mcp', 'w') as f:
+    json.dump(cfg, f, indent=2)
+" 2>/dev/null && success "Cursor: MCP server registered" && return
+    fi
+
+    warn "Cursor: could not auto-merge config. Add manually to ${BOLD}${cursor_mcp}${RESET}:"
+    printf "  ${CYAN}\"macroscope-codereview\": { \"command\": \"%s\", \"args\": [] }${RESET}\n" "$INSTALLED_MCP_BINARY"
+    return
+  fi
+
+  # No existing file — create it
+  mkdir -p "$HOME/.cursor"
+  cat > "$cursor_mcp" << CURSOREOF
+{
+  "mcpServers": {
+    "macroscope-codereview": {
+      "command": "$INSTALLED_MCP_BINARY",
+      "args": []
+    }
+  }
+}
+CURSOREOF
+  success "Cursor: MCP server registered"
+}
+
+# Install the auto-review Claude Code hook.
+# Writes the hook script to ~/.macroscope/hooks/auto-review.sh and registers
+# it in ~/.claude/settings.json (user-level) so it fires on every Stop event.
+setup_claude_auto_review_hook() {
+  local hooks_dir="$HOME/.macroscope/hooks"
+  local script_path="$hooks_dir/auto-review.sh"
+  local claude_settings="$HOME/.claude/settings.json"
+
+  mkdir -p "$hooks_dir"
+
+  # Write the hook script
+  cat > "$script_path" << 'HOOKEOF'
+#!/usr/bin/env bash
+# auto-review.sh — Claude Code "Stop" hook that automatically reviews
+# significant code changes after each agent response.
+#
+# Outputs a JSON systemMessage when issues are found so Claude sees the
+# review results on its next turn. Exits silently when changes are
+# insignificant or a review is already running.
+set -euo pipefail
+
+# ── Quick bail-outs ──────────────────────────────────────────────────
+command -v macroscope >/dev/null 2>&1 || exit 0
+git rev-parse --is-inside-work-tree >/dev/null 2>&1 || exit 0
+
+LOCKFILE="/tmp/macroscope-auto-review.lock"
+if [ -f "$LOCKFILE" ]; then
+    OLD_PID=$(cat "$LOCKFILE" 2>/dev/null || echo "")
+    if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" 2>/dev/null; then
+        exit 0
+    fi
+    rm -f "$LOCKFILE"
+fi
+
+# ── Collect change stats ────────────────────────────────────────────
+NUMSTAT=$(git diff --numstat HEAD 2>/dev/null || true)
+UNTRACKED=$(git ls-files --others --exclude-standard 2>/dev/null || true)
+
+CHANGED_FILES=0
+ADDED_LINES=0
+DELETED_LINES=0
+
+if [ -n "$NUMSTAT" ]; then
+    while IFS=$'\t' read -r added deleted _path; do
+        [ "$added" = "-" ] && continue
+        CHANGED_FILES=$((CHANGED_FILES + 1))
+        ADDED_LINES=$((ADDED_LINES + added))
+        DELETED_LINES=$((DELETED_LINES + deleted))
+    done <<< "$NUMSTAT"
+fi
+
+if [ -n "$UNTRACKED" ]; then
+    UNTRACKED_COUNT=$(echo "$UNTRACKED" | wc -l | tr -d ' ')
+    CHANGED_FILES=$((CHANGED_FILES + UNTRACKED_COUNT))
+fi
+
+TOTAL_CHANGED_LINES=$((ADDED_LINES + DELETED_LINES))
+
+RISKY_FILES=0
+ALL_PATHS=""
+if [ -n "$NUMSTAT" ]; then
+    ALL_PATHS=$(echo "$NUMSTAT" | awk '{print $3}')
+fi
+if [ -n "$UNTRACKED" ]; then
+    if [ -n "$ALL_PATHS" ]; then
+        ALL_PATHS=$(printf '%s\n%s' "$ALL_PATHS" "$UNTRACKED")
+    else
+        ALL_PATHS="$UNTRACKED"
+    fi
+fi
+if [ -n "$ALL_PATHS" ]; then
+    RISKY_FILES=$(echo "$ALL_PATHS" | grep -ciE 'auth|security|payment|billing|migration|schema|concurrency|lock|crypto' || true)
+fi
+
+# ── Significance gate ───────────────────────────────────────────────
+SIGNIFICANT=0
+if [ "$CHANGED_FILES" -ge 2 ]; then
+    SIGNIFICANT=1
+elif [ "$TOTAL_CHANGED_LINES" -ge 40 ]; then
+    SIGNIFICANT=1
+elif [ "$RISKY_FILES" -gt 0 ]; then
+    SIGNIFICANT=1
+fi
+[ "$SIGNIFICANT" -eq 0 ] && exit 0
+
+# ── Run review ──────────────────────────────────────────────────────
+echo $$ > "$LOCKFILE"
+cleanup() { rm -f "$LOCKFILE"; }
+trap cleanup EXIT
+
+RESULTS_FILE=$(mktemp /tmp/macroscope-review-XXXXXX.json)
+macroscope codereview --json > "$RESULTS_FILE" 2>/dev/null || true
+
+if [ ! -s "$RESULTS_FILE" ]; then
+    rm -f "$RESULTS_FILE"
+    exit 0
+fi
+
+if command -v jq >/dev/null 2>&1; then
+    ISSUE_COUNT=$(jq -r '.issues | length // 0' "$RESULTS_FILE" 2>/dev/null || echo "0")
+    if [ "$ISSUE_COUNT" -eq 0 ]; then
+        rm -f "$RESULTS_FILE"
+        exit 0
+    fi
+    TOP_FINDINGS=$(jq -r '
+        .issues[:5] |
+        map("- [\(.category // "issue")] \(.file // "unknown"):\(.line // "?") — \(.message // .text // "no description")")  |
+        join("\n")
+    ' "$RESULTS_FILE" 2>/dev/null || echo "")
+
+    SUMMARY="Macroscope auto-review found $ISSUE_COUNT issue(s) in your uncommitted changes."
+    if [ -n "$TOP_FINDINGS" ]; then
+        SUMMARY="$SUMMARY\n\nTop findings:\n$TOP_FINDINGS"
+    fi
+    if [ "$ISSUE_COUNT" -gt 5 ]; then
+        REMAINING=$((ISSUE_COUNT - 5))
+        SUMMARY="$SUMMARY\n\n...and $REMAINING more. Run \`macroscope codereview --json\` to see all."
+    fi
+    jq -n --arg msg "$SUMMARY" '{"systemMessage": $msg}'
+else
+    echo "{\"systemMessage\": \"Macroscope auto-review complete. Results saved to $RESULTS_FILE\"}"
+fi
+
+rm -f "$RESULTS_FILE"
+HOOKEOF
+  chmod +x "$script_path"
+  success "Claude Code: auto-review hook installed to ${BOLD}${script_path}${RESET}"
+
+  # Register the hook in user-level Claude Code settings (~/.claude/settings.json)
+  mkdir -p "$HOME/.claude"
+
+  if command -v python3 &> /dev/null; then
+    python3 -c "
+import json, os
+
+settings_path = os.path.expanduser('$claude_settings')
+cfg = {}
+if os.path.isfile(settings_path):
+    try:
+        with open(settings_path, 'r') as f:
+            cfg = json.load(f)
+    except (json.JSONDecodeError, IOError):
+        pass
+
+hook_entry = {
+    'hooks': [{
+        'type': 'command',
+        'command': os.path.expanduser('$script_path'),
+        'timeout': 300
+    }]
+}
+
+hooks = cfg.setdefault('hooks', {})
+stop_hooks = hooks.get('Stop', [])
+
+# Check if already registered (avoid duplicates)
+already = False
+for h in stop_hooks:
+    for inner in h.get('hooks', []):
+        if 'auto-review' in inner.get('command', ''):
+            already = True
+            break
+if not already:
+    stop_hooks.append(hook_entry)
+    hooks['Stop'] = stop_hooks
+
+cfg['hooks'] = hooks
+with open(settings_path, 'w') as f:
+    json.dump(cfg, f, indent=2)
+    f.write('\n')
+" 2>/dev/null && success "Claude Code: auto-review hook registered in ${BOLD}${claude_settings}${RESET}" && return
+  fi
+
+  # Fallback: if no python3, try simple check + write
+  if [ -f "$claude_settings" ] && grep -q 'auto-review' "$claude_settings" 2>/dev/null; then
+    info "Claude Code: auto-review hook already registered"
+    return
+  fi
+
+  # No existing settings or can't merge — write fresh
+  if [ ! -f "$claude_settings" ]; then
+    cat > "$claude_settings" << SETTINGSEOF
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$script_path",
+            "timeout": 300
+          }
+        ]
+      }
+    ]
+  }
+}
+SETTINGSEOF
+    success "Claude Code: auto-review hook registered in ${BOLD}${claude_settings}${RESET}"
+  else
+    warn "Claude Code: could not auto-merge hook config. Add manually to ${BOLD}${claude_settings}${RESET}"
+  fi
 }
 
 launch_wizard() {
@@ -1403,6 +1811,7 @@ main() {
   seed_local_build_config_if_needed
   verify_install
   print_installation_completion
+  setup_mcp
   launch_wizard
 }
 
