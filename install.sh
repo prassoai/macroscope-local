@@ -40,13 +40,6 @@ success() {
   printf "${GREEN}✓${RESET} %s\n" "$1"
 }
 
-# Optional variables to hold the paths of the installed binaries
-INSTALLED_BINARY=""
-INSTALLED_MCP_BINARY=""
-CLAUDE_MARKETPLACE_NAME="macroscope-local"
-CLAUDE_MARKETPLACE_SOURCE="prassoai/macroscope-local"
-CLAUDE_PLUGIN_NAME="macroscope-codereview"
-
 error() {
   printf "${RED}✗${RESET} %s\n" "$1"
 }
@@ -58,6 +51,9 @@ warn() {
 step() {
   printf "\n${BOLD}${MAGENTA}→${RESET} ${BOLD}%s${RESET}\n" "$1"
 }
+
+# Path of the installed binary (set by install_binary, read by verify_install/launch_wizard)
+INSTALLED_BINARY=""
 
 # Check for required dependencies
 check_dependencies() {
@@ -156,35 +152,11 @@ install_binary() {
   # Make executable
   chmod +x "$TMP_DIR/macroscope"
 
-  # Download MCP server binary
-  if [ "$VERSION" = "latest" ]; then
-    MCP_URL="https://github.com/${REPO}/releases/latest/download/macroscope-mcp-${OS}-${ARCH}"
-  else
-    MCP_URL="https://github.com/${REPO}/releases/download/${VERSION}/macroscope-mcp-${OS}-${ARCH}"
-  fi
-
-  info "Downloading MCP server from: ${DIM}${MCP_URL}${RESET}"
-
-  if ! curl -fL --progress-bar "$MCP_URL" -o "$TMP_DIR/macroscope-mcp"; then
-    warn "Failed to download macroscope-mcp (MCP server)"
-    echo "  The CLI will still work, but Claude Code integration won't be auto-configured."
-    echo "  You can set it up manually later: https://github.com/${REPO}#mcp-setup"
-  else
-    success "Downloaded MCP server"
-    chmod +x "$TMP_DIR/macroscope-mcp"
-  fi
-
-  # Install binaries (always to ~/.local/bin, no sudo needed)
-  step "Installing binaries..."
+  # Install binary (always to ~/.local/bin, no sudo needed)
+  step "Installing binary..."
   mv "$TMP_DIR/macroscope" "$INSTALL_DIR/macroscope"
   INSTALLED_BINARY="${INSTALL_DIR}/macroscope"
   success "Installed CLI to ${BOLD}${INSTALLED_BINARY}${RESET}"
-
-  if [ -f "$TMP_DIR/macroscope-mcp" ]; then
-    mv "$TMP_DIR/macroscope-mcp" "$INSTALL_DIR/macroscope-mcp"
-    INSTALLED_MCP_BINARY="${INSTALL_DIR}/macroscope-mcp"
-    success "Installed MCP server to ${BOLD}${INSTALLED_MCP_BINARY}${RESET}"
-  fi
 }
 
 # Update shell configuration so ~/.local/bin is on PATH.
@@ -292,181 +264,10 @@ print_installation_completion() {
   printf "  ${CYAN}macroscope review${RESET}          ${DIM}# Review your code changes${RESET}\n"
   printf "  ${CYAN}macroscope review --help${RESET}   ${DIM}# See all options${RESET}\n"
   echo ""
-  if [ -n "$INSTALLED_MCP_BINARY" ]; then
-    printf "${BOLD}AI tool integration:${RESET}\n"
-    printf "  ${DIM}Claude plugin + MCP server configured for detected tools. Restart them, then ask:${RESET}\n"
-    printf "  ${CYAN}\"Review my code changes\"${RESET}\n"
-    echo ""
-  fi
   printf "${BOLD}Need help?${RESET}\n"
   printf "  Documentation: ${BLUE}https://github.com/prassoai/macroscope-local${RESET}\n"
   printf "  Report issues: ${BLUE}https://github.com/prassoai/macroscope-local/issues${RESET}\n"
   echo ""
-}
-
-setup_claude_plugin() {
-  local plugin_ref="${CLAUDE_PLUGIN_NAME}@${CLAUDE_MARKETPLACE_NAME}"
-
-  # Older Claude CLI versions may not support plugins yet.
-  if ! claude plugin list --json >/dev/null 2>&1; then
-    warn "Claude Code: plugin commands unavailable, falling back to direct MCP setup"
-    return 1
-  fi
-
-  if claude plugin list --json 2>/dev/null | grep -q "\"id\": \"${CLAUDE_PLUGIN_NAME}@"; then
-    info "Claude Code: plugin already installed (${plugin_ref})"
-    return 0
-  fi
-
-  if ! claude plugin marketplace list 2>/dev/null | grep -q "${CLAUDE_MARKETPLACE_NAME}"; then
-    if ! claude plugin marketplace add "${CLAUDE_MARKETPLACE_SOURCE}" >/dev/null 2>&1; then
-      warn "Claude Code: failed to add plugin marketplace (${CLAUDE_MARKETPLACE_SOURCE})"
-      return 1
-    fi
-    success "Claude Code: marketplace added (${CLAUDE_MARKETPLACE_NAME})"
-  fi
-
-  if claude plugin install --scope user "${plugin_ref}" >/dev/null 2>&1; then
-    success "Claude Code: plugin installed (${plugin_ref})"
-    return 0
-  fi
-
-  # If install command failed because plugin already exists in another scope, treat as success.
-  if claude plugin list --json 2>/dev/null | grep -q "\"id\": \"${CLAUDE_PLUGIN_NAME}@"; then
-    info "Claude Code: plugin already installed (${plugin_ref})"
-    return 0
-  fi
-
-  warn "Claude Code: plugin install failed (${plugin_ref})"
-  return 1
-}
-
-# Configure MCP server for AI coding tools
-setup_mcp() {
-  # Skip if MCP binary wasn't installed
-  if [ -z "$INSTALLED_MCP_BINARY" ] || [ ! -x "$INSTALLED_MCP_BINARY" ]; then
-    return
-  fi
-
-  step "Configuring MCP integrations..."
-
-  local configured=0
-
-  # Claude Code
-  if command -v claude &> /dev/null; then
-    if setup_claude_plugin; then
-      configured=1
-    elif claude mcp add macroscope-codereview -s user -- "$INSTALLED_MCP_BINARY" 2>/dev/null; then
-      success "Claude Code: MCP server registered (plugin fallback)"
-      configured=1
-    else
-      warn "Claude Code: auto-configure failed for both plugin and MCP. Manual setup:"
-      printf "  ${CYAN}claude plugin marketplace add %s${RESET}\n" "$CLAUDE_MARKETPLACE_SOURCE"
-      printf "  ${CYAN}claude plugin install --scope user %s@%s${RESET}\n" "$CLAUDE_PLUGIN_NAME" "$CLAUDE_MARKETPLACE_NAME"
-      printf "  ${CYAN}claude mcp add macroscope-codereview -s user -- %s${RESET}\n" "$INSTALLED_MCP_BINARY"
-    fi
-  fi
-
-  # Codex (OpenAI) — no CLI command; write TOML config at ~/.codex/config.toml
-  if command -v codex &> /dev/null; then
-    setup_codex_mcp
-    configured=1
-  fi
-
-  # Gemini CLI — uses `gemini mcp add` with settings.json at ~/.gemini/settings.json
-  if command -v gemini &> /dev/null; then
-    if gemini mcp add -s user macroscope-codereview "$INSTALLED_MCP_BINARY" 2>/dev/null; then
-      success "Gemini CLI: MCP server registered"
-      configured=1
-    else
-      warn "Gemini CLI: auto-configure failed. Manual setup:"
-      printf "  ${CYAN}gemini mcp add -s user macroscope-codereview %s${RESET}\n" "$INSTALLED_MCP_BINARY"
-    fi
-  fi
-
-  # Cursor — uses JSON config at ~/.cursor/mcp.json (no CLI command; write JSON directly)
-  if [ -d "$HOME/.cursor" ]; then
-    setup_cursor_mcp
-    configured=1
-  fi
-
-  if [ $configured -eq 0 ]; then
-    info "No supported AI coding tools detected (Claude Code, Codex, Gemini CLI, Cursor)."
-    printf "  ${DIM}Install one and rerun, or configure MCP manually.${RESET}\n"
-  else
-    info "Restart your AI coding tools to enable the integration"
-  fi
-}
-
-# Write MCP config into Codex's ~/.codex/config.toml
-setup_codex_mcp() {
-  local codex_config="$HOME/.codex/config.toml"
-
-  if [ -f "$codex_config" ] && grep -q 'mcp_servers.macroscope-codereview' "$codex_config" 2>/dev/null; then
-    info "Codex: MCP server already configured"
-    return
-  fi
-
-  mkdir -p "$HOME/.codex"
-  # Append the MCP server block to the TOML config
-  {
-    echo ""
-    echo "# Added by Macroscope installer"
-    echo "[mcp_servers.macroscope-codereview]"
-    echo "command = \"$INSTALLED_MCP_BINARY\""
-    echo "args = []"
-  } >> "$codex_config"
-  success "Codex: MCP server registered"
-}
-
-# Write MCP config into Cursor's ~/.cursor/mcp.json
-setup_cursor_mcp() {
-  local cursor_mcp="$HOME/.cursor/mcp.json"
-
-  # If file exists, merge our server in (if not already present)
-  if [ -f "$cursor_mcp" ]; then
-    if grep -q '"macroscope-codereview"' "$cursor_mcp" 2>/dev/null; then
-      info "Cursor: MCP server already configured"
-      return
-    fi
-
-    # Use python/node to safely merge JSON if available, otherwise fall back to simple check
-    if command -v python3 &> /dev/null; then
-      python3 -c "
-import json, sys
-try:
-    with open('$cursor_mcp', 'r') as f:
-        cfg = json.load(f)
-except (json.JSONDecodeError, FileNotFoundError):
-    cfg = {}
-cfg.setdefault('mcpServers', {})
-cfg['mcpServers']['macroscope-codereview'] = {
-    'command': '$INSTALLED_MCP_BINARY',
-    'args': []
-}
-with open('$cursor_mcp', 'w') as f:
-    json.dump(cfg, f, indent=2)
-" 2>/dev/null && success "Cursor: MCP server registered" && return
-    fi
-
-    warn "Cursor: could not auto-merge config. Add manually to ${BOLD}${cursor_mcp}${RESET}:"
-    printf "  ${CYAN}\"macroscope-codereview\": { \"command\": \"%s\", \"args\": [] }${RESET}\n" "$INSTALLED_MCP_BINARY"
-    return
-  fi
-
-  # No existing file — create it
-  mkdir -p "$HOME/.cursor"
-  cat > "$cursor_mcp" << CURSOREOF
-{
-  "mcpServers": {
-    "macroscope-codereview": {
-      "command": "$INSTALLED_MCP_BINARY",
-      "args": []
-    }
-  }
-}
-CURSOREOF
-  success "Cursor: MCP server registered"
 }
 
 launch_wizard() {
@@ -517,7 +318,6 @@ main() {
   update_shell_config
   verify_install
   print_installation_completion
-  setup_mcp
   launch_wizard
 }
 
