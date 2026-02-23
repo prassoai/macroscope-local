@@ -1,9 +1,9 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
   "name": "macroscope-local",
-  "description": "Macroscope local tooling for Claude Code, including MCP-powered local code review.",
+  "description": "Macroscope local tooling for Claude Code.",
   "metadata": {
-    "description": "Macroscope local CLI and MCP integrations for Claude Code."
+    "description": "Macroscope local CLI integrations for Claude Code."
   },
   "owner": {
     "name": "Prasso",
@@ -12,7 +12,7 @@
   "plugins": [
     {
       "name": "macroscope",
-      "description": "Run Macroscope local code reviews from Claude Code via the bundled MCP integration.",
+      "description": "Run Macroscope local code reviews from Claude Code.",
       "version": "1.0.1",
       "author": {
         "name": "Prasso",
