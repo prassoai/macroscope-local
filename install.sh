@@ -54,6 +54,7 @@ TMP_DIR=""
 CHECKOUT_DIR=""
 PLUGIN_VERSION=""
 INSTALL_DIR=""
+CONFIG_SEEDED=0
 
 check_dependencies() {
   local missing_deps=()
@@ -238,6 +239,38 @@ copy_tree() {
   rm -rf "$dst"
   mkdir -p "$(dirname "$dst")"
   cp -R "$src" "$dst"
+}
+
+seed_local_build_config_if_needed() {
+  if [ -z "${MACROSCOPE_LOCAL_BACK_REPO:-}" ] && [ -z "${MACROSCOPE_LOCAL_BINARY_SOURCE:-}" ]; then
+    return
+  fi
+
+  local config_dir="$HOME/.macroscope"
+  local config_path="$config_dir/config.yaml"
+  local default_env="${MACROSCOPE_DEFAULT_ENV:-prod}"
+
+  if [ -f "$config_path" ]; then
+    info "Existing Macroscope config found at $config_path"
+    return
+  fi
+
+  case "$default_env" in
+    prod|nonprod|local) ;;
+    *)
+      warn "Unsupported MACROSCOPE_DEFAULT_ENV=$default_env; falling back to prod"
+      default_env="prod"
+      ;;
+  esac
+
+  mkdir -p "$config_dir"
+  cat > "$config_path" <<EOF
+env: $default_env
+envs: {}
+EOF
+  chmod 600 "$config_path"
+  CONFIG_SEEDED=1
+  success "Seeded local-build config at ${BOLD}${config_path}${RESET} (${default_env})"
 }
 
 update_shell_config() {
@@ -543,6 +576,7 @@ main() {
   update_shell_config
   install_codex_plugin
   install_claude_plugin
+  seed_local_build_config_if_needed
   verify_install
   print_installation_completion
   launch_wizard
