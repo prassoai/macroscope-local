@@ -15,4 +15,4 @@ If your `codex` CLI is too old to load local plugins, the installer will place a
 After installation:
 
 - Run `macroscope` to launch the interactive wizard.
-- Run `/macroscope` in Claude Code or `/macroscope:macroscope` in Codex to use the PR-aware review router. It reuses PR comments only when the current PR HEAD already has a completed `Macroscope - Correctness Check`; otherwise it runs the local CLI path.
+- Run `/macroscope` in Claude Code or `/macroscope:macroscope` in Codex to use the PR-aware review router. It first checks whether the current local `HEAD` already has a completed `Macroscope - Correctness Check`; if not, it runs the local CLI path.
