@@ -373,10 +373,10 @@ install_codex_cli_shim() {
 
   if [ ! -x "$CODEX_BUNDLED_BINARY" ] || ! codex_supports_plugins "$CODEX_BUNDLED_BINARY"; then
     if [ -n "$current_codex" ]; then
-      CODEX_PLUGIN_HOST_WARNING="Codex CLI at ${current_codex} does not support local plugins. Install or update Codex.app to use /macroscope:review from the CLI."
+      CODEX_PLUGIN_HOST_WARNING="Codex CLI at ${current_codex} does not support local plugins. Install or update Codex.app to use /macroscope:macroscope from the CLI."
       warn "$CODEX_PLUGIN_HOST_WARNING"
     else
-      CODEX_PLUGIN_HOST_WARNING="Codex CLI is not installed. Install Codex.app to use /macroscope:review from the CLI."
+      CODEX_PLUGIN_HOST_WARNING="Codex CLI is not installed. Install Codex.app to use /macroscope:macroscope from the CLI."
       warn "$CODEX_PLUGIN_HOST_WARNING"
     fi
     return
@@ -729,7 +729,8 @@ print_installation_completion() {
   printf "${BOLD}Quick start:${RESET}\n"
   printf "  ${CYAN}macroscope${RESET}                     ${DIM}# Launch the interactive wizard${RESET}\n"
   printf "  ${CYAN}macroscope codereview --base staging${RESET} ${DIM}# Run the CLI directly${RESET}\n"
-  printf "  ${CYAN}/macroscope:review${RESET}           ${DIM}# Main plugin entrypoint in Codex or Claude Code${RESET}\n"
+  printf "  ${CYAN}/macroscope${RESET}                  ${DIM}# Main router in Claude Code${RESET}\n"
+  printf "  ${CYAN}/macroscope:macroscope${RESET}      ${DIM}# Main router in Codex${RESET}\n"
   echo ""
   printf "${BOLD}Notes:${RESET}\n"
   printf "  Restart Codex or Claude Code if they were already open.\n"

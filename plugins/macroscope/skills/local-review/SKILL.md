@@ -3,7 +3,7 @@ name: local-review
 description: Run a local Macroscope review with the installed CLI, triage streaming findings, fix the valid ones, and report only the issues you addressed.
 ---
 
-Run a code review using the installed `macroscope` CLI, then triage streaming issues as they arrive. This is the no-open-PR path for `/macroscope:review`.
+Run a code review using the installed `macroscope` CLI, then triage streaming issues as they arrive. This is the no-open-PR path for the top-level Macroscope router (`/macroscope` in Claude Code, `/macroscope:macroscope` in Codex).
 
 This workflow is **closed-loop**:
 

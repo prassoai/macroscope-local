@@ -5,7 +5,8 @@ Packaged review workflows for Codex and Claude Code.
 The primary entrypoint is:
 
 ```text
-/macroscope:review
+Claude Code: /macroscope
+Codex:       /macroscope:macroscope
 ```
 
 That router behaves differently depending on the current branch:

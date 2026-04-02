@@ -1,11 +1,11 @@
 ---
 name: respond-to-pr-comments
-description: Rejects invalid PR comments and fixes valid ones based on a prior triage from /macroscope:triage-pr-comments or the PR path of /macroscope:review. Replies to each thread, resolves it, and fixes code for valid findings.
+description: Rejects invalid PR comments and fixes valid ones based on a prior triage from the PR triage skill or the PR path of the top-level Macroscope router. Replies to each thread, resolves it, and fixes code for valid findings.
 ---
 
-Act on a prior `/macroscope:triage-pr-comments` assessment that the user has reviewed and confirmed. Handle invalid and valid findings in two phases: reject the invalid ones first, then fix the valid ones one at a time.
+Act on a prior PR triage assessment that the user has reviewed and confirmed. Handle invalid and valid findings in two phases: reject the invalid ones first, then fix the valid ones one at a time.
 
-This skill requires a prior triage in the current conversation. If none exists, tell the user to run `/macroscope:triage-pr-comments` first and stop.
+This skill requires a prior triage in the current conversation. If none exists, tell the user to run `/triage-pr-comments` in Claude Code or `/macroscope:triage-pr-comments` in Codex first and stop.
 
 ## Steps
 

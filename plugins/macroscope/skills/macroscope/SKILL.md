@@ -1,9 +1,13 @@
 ---
-name: review
-description: Main review entrypoint. If the current branch has an open PR, triage unresolved PR comments. If it does not, run a local Macroscope review, triage streaming findings, fix the valid ones, and report what was addressed.
+name: macroscope
+description: Main Macroscope entrypoint. If the current branch has an open PR, triage unresolved PR comments. If it does not, run a local Macroscope review, triage streaming findings, fix the valid ones, and report what was addressed.
 ---
 
-Use this as the canonical review router.
+Use this as the canonical Macroscope router.
+
+In Claude Code, this skill is `/macroscope`.
+
+In Codex, plugin skills are namespaced, so this skill is `/macroscope:macroscope`.
 
 This skill chooses between two different workflows:
 
@@ -49,7 +53,7 @@ If there is no open PR on the current branch:
 2. Follow that skill exactly.
 3. Keep the workflow closed-loop: triage streaming CLI findings, fix the valid ones, ignore false positives silently, and report only what you addressed.
 
-### 3. Respect explicit user intent when it is narrower than `/macroscope:review`
+### 3. Respect explicit user intent when it is narrower than the top-level Macroscope router
 
 - If the user explicitly asks to act on a previously triaged PR comment list, skip this router and use `../respond-to-pr-comments/SKILL.md`.
 - If the user explicitly asks for a general review of the PR diff itself rather than comment triage, use `../review-pr/SKILL.md`.
