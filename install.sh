@@ -55,6 +55,28 @@ CHECKOUT_DIR=""
 PLUGIN_VERSION=""
 INSTALL_DIR=""
 CONFIG_SEEDED=0
+CODEX_SHIM_INSTALLED=0
+CODEX_PLUGIN_HOST_WARNING=""
+
+CODEX_LOCAL_PLUGIN_VERSION="local"
+CODEX_BUNDLED_BINARY="/Applications/Codex.app/Contents/Resources/codex"
+CODEX_SHIM_PATH=""
+
+get_codex_home() {
+  printf '%s' "${CODEX_HOME:-$HOME/.codex}"
+}
+
+codex_supports_plugins() {
+  local codex_bin="$1"
+  [ -x "$codex_bin" ] || return 1
+  "$codex_bin" --help 2>/dev/null | grep -q "app-server"
+}
+
+is_managed_codex_shim() {
+  local path="$1"
+  [ -f "$path" ] || return 1
+  grep -Fq "Macroscope-managed Codex shim" "$path"
+}
 
 check_dependencies() {
   local missing_deps=()
@@ -335,17 +357,76 @@ update_shell_config() {
   fi
 }
 
+install_codex_cli_shim() {
+  step "Checking Codex CLI..."
+
+  local current_codex=""
+  local shim_path="$HOME/.local/bin/codex"
+
+  CODEX_SHIM_PATH="$shim_path"
+  current_codex="$(command -v codex || true)"
+
+  if [ -n "$current_codex" ] && codex_supports_plugins "$current_codex"; then
+    success "Codex CLI already supports plugins: ${BOLD}${current_codex}${RESET}"
+    return
+  fi
+
+  if [ ! -x "$CODEX_BUNDLED_BINARY" ] || ! codex_supports_plugins "$CODEX_BUNDLED_BINARY"; then
+    if [ -n "$current_codex" ]; then
+      CODEX_PLUGIN_HOST_WARNING="Codex CLI at ${current_codex} does not support local plugins. Install or update Codex.app to use /macroscope:review from the CLI."
+      warn "$CODEX_PLUGIN_HOST_WARNING"
+    else
+      CODEX_PLUGIN_HOST_WARNING="Codex CLI is not installed. Install Codex.app to use /macroscope:review from the CLI."
+      warn "$CODEX_PLUGIN_HOST_WARNING"
+    fi
+    return
+  fi
+
+  if [ -f "$shim_path" ] && ! is_managed_codex_shim "$shim_path"; then
+    CODEX_PLUGIN_HOST_WARNING="Existing ${shim_path} was left untouched, so the current Codex CLI may still be too old for plugins."
+    warn "$CODEX_PLUGIN_HOST_WARNING"
+    return
+  fi
+
+  cat > "$shim_path" <<EOF
+#!/bin/bash
+set -euo pipefail
+# Macroscope-managed Codex shim
+exec "${CODEX_BUNDLED_BINARY}" "\$@"
+EOF
+  chmod +x "$shim_path"
+  CODEX_SHIM_INSTALLED=1
+
+  if [ -n "$current_codex" ]; then
+    success "Installed Codex CLI shim at ${BOLD}${shim_path}${RESET}"
+    info "Your previous Codex CLI at ${current_codex} does not support local plugins; ${BOLD}codex${RESET} will now use the bundled Codex.app binary."
+  else
+    success "Installed Codex CLI shim at ${BOLD}${shim_path}${RESET}"
+    info "${BOLD}codex${RESET} is now available via the bundled Codex.app binary."
+  fi
+}
+
 install_codex_plugin() {
   step "Installing Codex plugin..."
 
   local plugin_src="$CHECKOUT_DIR/plugins/macroscope"
-  local plugin_dst="$HOME/.codex/plugins/macroscope"
+  local plugin_dst="$HOME/plugins/macroscope"
+  local codex_home=""
+  local codex_cache_root=""
+  local codex_cache_dst=""
   local marketplace_dst="$HOME/.agents/plugins/marketplace.json"
+  local codex_config=""
+  local marketplace_name=""
+  local plugin_key=""
 
-  mkdir -p "$HOME/.codex/plugins" "$HOME/.agents/plugins"
+  codex_home="$(get_codex_home)"
+  codex_cache_root="$codex_home/plugins/cache"
+  codex_config="$codex_home/config.toml"
+
+  mkdir -p "$HOME/plugins" "$HOME/.agents/plugins" "$codex_cache_root"
   copy_tree "$plugin_src" "$plugin_dst"
 
-  python3 - "$marketplace_dst" <<'PY'
+  marketplace_name="$(python3 - "$marketplace_dst" <<'PY'
 import json
 import os
 import sys
@@ -369,7 +450,7 @@ plugins = [p for p in data.get("plugins", []) if p.get("name") != "macroscope"]
 plugins.append(
     {
         "name": "macroscope",
-        "source": {"source": "local", "path": "./.codex/plugins/macroscope"},
+        "source": {"source": "local", "path": "./plugins/macroscope"},
         "policy": {
             "installation": "INSTALLED_BY_DEFAULT",
             "authentication": "ON_USE",
@@ -382,9 +463,73 @@ data["plugins"] = plugins
 with open(path, "w", encoding="utf-8") as f:
     json.dump(data, f, indent=2)
     f.write("\n")
+
+print(data["name"])
+PY
+)"
+
+  codex_cache_dst="$codex_cache_root/$marketplace_name/macroscope/$CODEX_LOCAL_PLUGIN_VERSION"
+  plugin_key="macroscope@$marketplace_name"
+  copy_tree "$plugin_src" "$codex_cache_dst"
+
+  python3 - "$codex_config" "$plugin_key" <<'PY'
+import os
+import re
+import sys
+
+path, plugin_key = sys.argv[1:3]
+
+if os.path.exists(path):
+    with open(path, "r", encoding="utf-8") as f:
+        text = f.read()
+else:
+    text = ""
+
+if text and not text.endswith("\n"):
+    text += "\n"
+
+def ensure_section_value(payload: str, section: str, key: str, value: str) -> str:
+    header = f"[{section}]"
+    pattern = re.compile(
+        rf"(?ms)^(\[{re.escape(section)}\]\n)(.*?)(?=^\[|\Z)"
+    )
+    match = pattern.search(payload)
+    desired_line = f'{key} = {value}'
+
+    if match:
+        body = match.group(2)
+        key_pattern = re.compile(rf"(?m)^{re.escape(key)}\s*=")
+        lines = body.splitlines()
+        replaced = False
+        for idx, line in enumerate(lines):
+            if key_pattern.match(line):
+                lines[idx] = desired_line
+                replaced = True
+                break
+        if not replaced:
+            if lines and lines[-1] != "":
+                lines.append(desired_line)
+            else:
+                lines.insert(len(lines) - 1 if lines else 0, desired_line)
+        new_body = "\n".join(lines)
+        if new_body and not new_body.endswith("\n"):
+            new_body += "\n"
+        return payload[: match.start()] + match.group(1) + new_body + payload[match.end() :]
+
+    if payload and not payload.endswith("\n\n"):
+        payload = payload.rstrip("\n") + "\n\n"
+    return payload + header + "\n" + desired_line + "\n"
+
+text = ensure_section_value(text, "features", "plugins", "true")
+text = ensure_section_value(text, f'plugins."{plugin_key}"', "enabled", "true")
+
+os.makedirs(os.path.dirname(path), exist_ok=True)
+with open(path, "w", encoding="utf-8") as f:
+    f.write(text)
 PY
 
-  success "Installed Codex plugin to ${BOLD}${plugin_dst}${RESET}"
+  success "Installed Codex plugin source to ${BOLD}${plugin_dst}${RESET}"
+  success "Installed Codex plugin cache to ${BOLD}${codex_cache_dst}${RESET}"
 }
 
 install_claude_plugin() {
@@ -519,16 +664,56 @@ verify_install() {
     printf "  ${CYAN}exec fish${RESET}           (fish)\n"
   fi
 
-  if [ -f "$HOME/.codex/plugins/macroscope/.codex-plugin/plugin.json" ]; then
+  local codex_home=""
+  local codex_source=""
+  local codex_cache=""
+  local codex_marketplace_name=""
+  local codex_cli=""
+
+  codex_home="$(get_codex_home)"
+  codex_source="$HOME/plugins/macroscope"
+  codex_marketplace_name="$(python3 - <<'PY'
+import json
+import os
+
+path = os.path.expanduser("~/.agents/plugins/marketplace.json")
+name = "local-user-plugins"
+
+if os.path.exists(path):
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    name = data.get("name", name)
+
+print(name)
+PY
+)"
+  codex_cache="$codex_home/plugins/cache/$codex_marketplace_name/macroscope/$CODEX_LOCAL_PLUGIN_VERSION"
+
+  if [ -f "$codex_source/.codex-plugin/plugin.json" ]; then
     success "Codex plugin installed"
   else
-    warn "Codex plugin install did not produce ~/.codex/plugins/macroscope"
+    warn "Codex plugin install did not produce ~/plugins/macroscope"
+  fi
+
+  if [ -f "$codex_cache/.codex-plugin/plugin.json" ]; then
+    success "Codex plugin cache installed"
+  else
+    warn "Codex plugin cache install did not produce the expected cache entry"
   fi
 
   if [ -f "$HOME/.claude/plugins/cache/macroscope-local/macroscope/$PLUGIN_VERSION/.claude-plugin/plugin.json" ]; then
     success "Claude Code plugin installed"
   else
     warn "Claude Code plugin install did not produce the expected cache entry"
+  fi
+
+  codex_cli="$(command -v codex || true)"
+  if [ -n "$codex_cli" ] && codex_supports_plugins "$codex_cli"; then
+    success "Codex CLI supports plugins: ${BOLD}${codex_cli}${RESET}"
+  elif [ -n "$CODEX_PLUGIN_HOST_WARNING" ]; then
+    warn "$CODEX_PLUGIN_HOST_WARNING"
+  else
+    warn "Codex CLI is not available for plugin verification in this shell"
   fi
 }
 
@@ -550,6 +735,11 @@ print_installation_completion() {
   printf "  Restart Codex or Claude Code if they were already open.\n"
   printf "  The review router uses PR comment triage when the branch has an open PR.\n"
   printf "  Otherwise it runs a local streaming CLI review and fixes valid issues.\n"
+  if [ "$CODEX_SHIM_INSTALLED" = "1" ]; then
+    printf "  ${BOLD}codex${RESET} now points at the bundled Codex.app CLI so plugins work from the terminal.\n"
+  elif [ -n "$CODEX_PLUGIN_HOST_WARNING" ]; then
+    printf "  ${YELLOW}%s${RESET}\n" "$CODEX_PLUGIN_HOST_WARNING"
+  fi
   echo ""
   printf "${BOLD}Need help?${RESET}\n"
   printf "  Documentation: ${BLUE}https://github.com/prassoai/macroscope-local${RESET}\n"
@@ -563,7 +753,7 @@ launch_wizard() {
     return
   fi
 
-  if [ ! -e /dev/tty ]; then
+  if [ ! -t 0 ] || [ ! -t 1 ] || [ ! -e /dev/tty ]; then
     info "No TTY available; run 'macroscope' later to start the setup wizard."
     return
   fi
@@ -601,6 +791,7 @@ main() {
   install_binary
   fetch_plugin_bundle
   update_shell_config
+  install_codex_cli_shim
   install_codex_plugin
   install_claude_plugin
   seed_local_build_config_if_needed

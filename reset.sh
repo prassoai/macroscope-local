@@ -30,7 +30,11 @@ success() { printf "${GREEN}✓${RESET} %s\n" "$1"; }
 step()    { printf "\n${BOLD}${MAGENTA}→${RESET} ${BOLD}%s${RESET}\n" "$1"; }
 
 CLI_BINARY="$HOME/.local/bin/macroscope"
-CODEX_PLUGIN_DIR="$HOME/.codex/plugins/macroscope"
+CODEX_CLI_SHIM="$HOME/.local/bin/codex"
+CODEX_HOME_DIR="${CODEX_HOME:-$HOME/.codex}"
+CODEX_PLUGIN_SOURCE_DIR="$HOME/plugins/macroscope"
+CODEX_PLUGIN_LEGACY_DIR="$CODEX_HOME_DIR/plugins/macroscope"
+CODEX_PLUGIN_CACHE_ROOT="$CODEX_HOME_DIR/plugins/cache"
 CODEX_MARKETPLACE="$HOME/.agents/plugins/marketplace.json"
 CLAUDE_MARKETPLACE_DIR="$HOME/.claude/plugins/marketplaces/macroscope-local"
 CLAUDE_CACHE_DIR="$HOME/.claude/plugins/cache/macroscope-local"
@@ -54,6 +58,13 @@ else
   info "Not found: $CLI_BINARY (already clean)"
 fi
 
+if [ -f "$CODEX_CLI_SHIM" ] && grep -Fq "Macroscope-managed Codex shim" "$CODEX_CLI_SHIM"; then
+  rm -f "$CODEX_CLI_SHIM"
+  success "Removed $CODEX_CLI_SHIM"
+else
+  info "No managed Codex CLI shim to remove"
+fi
+
 # ─── Step 2: Remove macroscope app data ──────────────────────────────────
 step "Removing macroscope app data..."
 
@@ -68,11 +79,27 @@ fi
 # ─── Step 3: Remove Codex + Claude plugin state ──────────────────────────
 step "Removing plugin state..."
 
-if [ -d "$CODEX_PLUGIN_DIR" ]; then
-  rm -rf "$CODEX_PLUGIN_DIR"
-  success "Removed $CODEX_PLUGIN_DIR"
+if [ -d "$CODEX_PLUGIN_SOURCE_DIR" ]; then
+  rm -rf "$CODEX_PLUGIN_SOURCE_DIR"
+  success "Removed $CODEX_PLUGIN_SOURCE_DIR"
 else
-  info "No Codex plugin directory to remove"
+  info "No Codex plugin source directory to remove"
+fi
+
+if [ -d "$CODEX_PLUGIN_LEGACY_DIR" ]; then
+  rm -rf "$CODEX_PLUGIN_LEGACY_DIR"
+  success "Removed $CODEX_PLUGIN_LEGACY_DIR"
+else
+  info "No legacy Codex plugin directory to remove"
+fi
+
+if [ -d "$CODEX_PLUGIN_CACHE_ROOT" ]; then
+  find "$CODEX_PLUGIN_CACHE_ROOT" -mindepth 2 -maxdepth 2 -type d -name macroscope -print0 2>/dev/null | while IFS= read -r -d '' dir; do
+    rm -rf "$dir"
+    success "Removed $dir"
+  done
+else
+  info "No Codex plugin cache directory to clean"
 fi
 
 if [ -d "$CLAUDE_MARKETPLACE_DIR" ]; then
@@ -118,6 +145,29 @@ for path, list_key, target, key_name in targets:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
             f.write("\n")
+PY
+
+python3 - <<'PY'
+import os
+import re
+
+path = os.path.expanduser(os.environ.get("CODEX_HOME", "~/.codex") + "/config.toml")
+if not os.path.exists(path):
+    raise SystemExit(0)
+
+with open(path, "r", encoding="utf-8") as f:
+    text = f.read()
+
+new_text = re.sub(
+    r'(?ms)^\[plugins\."macroscope@[^"]+"\]\n.*?(?=^\[|\Z)',
+    '',
+    text,
+)
+
+if new_text != text:
+    new_text = re.sub(r'\n{3,}', '\n\n', new_text).rstrip() + '\n'
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(new_text)
 PY
 
 python3 - <<'PY'

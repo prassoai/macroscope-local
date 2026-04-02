@@ -4,6 +4,7 @@
   "description": "Macroscope review workflows for Codex and Claude Code.",
   "author": {
     "name": "Prasso",
+    "email": "macroscope@prasso.ai",
     "url": "https://github.com/prassoai"
   },
   "homepage": "https://github.com/prassoai/macroscope-local",
@@ -34,6 +35,9 @@
       "Triage my PR comments.",
       "Run a local review and fix valid issues."
     ],
-    "brandColor": "#0F766E"
+    "brandColor": "#0F766E",
+    "composerIcon": "./assets/macroscope-small.svg",
+    "logo": "./assets/macroscope.svg",
+    "screenshots": []
   }
 }

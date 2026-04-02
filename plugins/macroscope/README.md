@@ -18,3 +18,5 @@ The installer in the repo root installs both the CLI and this plugin for support
 ```bash
 curl -sSL https://raw.githubusercontent.com/prassoai/macroscope-local/main/install.sh | bash
 ```
+
+For Codex terminal sessions, the installer will automatically prefer the newer Codex.app CLI when the `codex` command on your PATH is too old to load local plugins.
