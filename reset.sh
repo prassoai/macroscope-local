@@ -6,7 +6,7 @@ set -euo pipefail
 # then re-installs from the latest release. Safe to run multiple times.
 #
 # Usage:
-#   curl -sSL https://raw.githubusercontent.com/prassoai/macroscope-local/macroscope-local/reset.sh | bash
+#   curl -sSL https://raw.githubusercontent.com/prassoai/macroscope-local/main/reset.sh | bash
 #   # or locally:
 #   bash reset.sh
 
@@ -57,7 +57,7 @@ fi
 step "Re-installing from latest release..."
 echo ""
 
-curl -sSL https://raw.githubusercontent.com/prassoai/macroscope-local/macroscope-local/install.sh | bash
+curl -sSL https://raw.githubusercontent.com/prassoai/macroscope-local/main/install.sh | bash
 
 echo ""
 printf "${GREEN}${BOLD}════════════════════════════════════════════════${RESET}\n"
