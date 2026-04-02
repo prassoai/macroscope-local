@@ -396,6 +396,7 @@ install_claude_plugin() {
   local cache_dst="$HOME/.claude/plugins/cache/macroscope-local/macroscope/$PLUGIN_VERSION"
   local known_marketplaces="$HOME/.claude/plugins/known_marketplaces.json"
   local installed_plugins="$HOME/.claude/plugins/installed_plugins.json"
+  local claude_settings="$HOME/.claude/settings.json"
   local now=""
 
   mkdir -p "$HOME/.claude/plugins/marketplaces" "$HOME/.claude/plugins/cache/macroscope-local/macroscope"
@@ -427,10 +428,36 @@ else:
     data = {}
 
 data["macroscope-local"] = {
-    "source": {"source": "local", "path": marketplace_root},
+    "source": {"source": "directory", "path": marketplace_root},
     "installLocation": marketplace_root,
     "lastUpdated": now,
 }
+
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(data, f, indent=2)
+    f.write("\n")
+PY
+
+  python3 - "$claude_settings" "$marketplace_root" <<'PY'
+import json
+import os
+import sys
+
+path, marketplace_root = sys.argv[1:3]
+
+if os.path.exists(path):
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+else:
+    data = {}
+
+extra = data.setdefault("extraKnownMarketplaces", {})
+extra["macroscope-local"] = {
+    "source": {"source": "directory", "path": marketplace_root}
+}
+
+enabled = data.setdefault("enabledPlugins", {})
+enabled["macroscope@macroscope-local"] = True
 
 with open(path, "w", encoding="utf-8") as f:
     json.dump(data, f, indent=2)

@@ -36,6 +36,8 @@ CLAUDE_MARKETPLACE_DIR="$HOME/.claude/plugins/marketplaces/macroscope-local"
 CLAUDE_CACHE_DIR="$HOME/.claude/plugins/cache/macroscope-local"
 CLAUDE_KNOWN_MARKETPLACES="$HOME/.claude/plugins/known_marketplaces.json"
 CLAUDE_INSTALLED_PLUGINS="$HOME/.claude/plugins/installed_plugins.json"
+CLAUDE_SETTINGS="$HOME/.claude/settings.json"
+CLAUDE_SETTINGS_LOCAL="$HOME/.claude/settings.local.json"
 
 echo ""
 printf "${BOLD}Macroscope Reset${RESET}\n"
@@ -129,6 +131,42 @@ if os.path.exists(path):
     plugins = data.get("plugins", {})
     if "macroscope@macroscope-local" in plugins:
         del plugins["macroscope@macroscope-local"]
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+            f.write("\n")
+PY
+
+python3 - <<'PY'
+import json
+import os
+
+for path in (
+    os.path.expanduser("~/.claude/settings.json"),
+    os.path.expanduser("~/.claude/settings.local.json"),
+):
+    if not os.path.exists(path):
+        continue
+
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    changed = False
+
+    extra = data.get("extraKnownMarketplaces")
+    if isinstance(extra, dict) and "macroscope-local" in extra:
+        del extra["macroscope-local"]
+        changed = True
+        if not extra:
+            del data["extraKnownMarketplaces"]
+
+    enabled = data.get("enabledPlugins")
+    if isinstance(enabled, dict) and "macroscope@macroscope-local" in enabled:
+        del enabled["macroscope@macroscope-local"]
+        changed = True
+        if not enabled:
+            del data["enabledPlugins"]
+
+    if changed:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
             f.write("\n")
