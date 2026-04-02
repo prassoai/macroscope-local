@@ -11,8 +11,8 @@ Codex:       /macroscope:macroscope
 
 That router behaves differently depending on the current branch:
 
-- If the branch has an open PR, it uses the PR-comment triage workflow.
-- If the branch has no open PR, it runs a streaming local `macroscope codereview`, fixes valid findings, and reports only the issues it addressed.
+- If the branch's open or draft PR already has a completed `Macroscope - Correctness Check` on the same HEAD commit, it uses the PR-comment triage workflow.
+- Otherwise, it runs a streaming local `macroscope codereview`, fixes valid findings, and reports only the issues it addressed.
 
 The installer in the repo root installs both the CLI and this plugin for supported local Codex and Claude setups:
 

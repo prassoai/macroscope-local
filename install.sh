@@ -734,7 +734,7 @@ print_installation_completion() {
   echo ""
   printf "${BOLD}Notes:${RESET}\n"
   printf "  Restart Codex or Claude Code if they were already open.\n"
-  printf "  The review router uses PR comment triage when the branch has an open PR.\n"
+  printf "  The review router uses PR comment triage only when the PR HEAD already has a completed Macroscope correctness check.\n"
   printf "  Otherwise it runs a local streaming CLI review and fixes valid issues.\n"
   if [ "$CODEX_SHIM_INSTALLED" = "1" ]; then
     printf "  ${BOLD}codex${RESET} now points at the bundled Codex.app CLI so plugins work from the terminal.\n"
