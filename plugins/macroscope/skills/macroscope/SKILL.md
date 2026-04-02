@@ -33,9 +33,9 @@ gh pr view --json number,title,url,headRefOid,statusCheckRollup 2>/dev/null
 Treat Macroscope correctness review as having already run for the current local `HEAD` only when both of these are true:
 
 1. `gh pr view` succeeds and `headRefOid` exactly matches `LOCAL_HEAD`.
-2. `statusCheckRollup` contains a completed GitHub check run named `Macroscope - Correctness Check`.
+2. `statusCheckRollup` contains a successful GitHub check run named `Macroscope - Correctness Check`.
    For compatibility, also accept the legacy name `Review for correctness`.
-   The matching check should have `status == "COMPLETED"` and a non-null `completedAt`.
+   The matching check should have `status == "COMPLETED"`, `conclusion == "SUCCESS"`, and a non-null `completedAt`.
 
 If either condition fails, use the CLI path.
 

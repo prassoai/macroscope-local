@@ -20,4 +20,4 @@ After installation:
   - Codex: `/macroscope:macroscope`
   - Cursor: `/macroscope:macroscope`
   - OpenCode: `/macroscope`
-- The router first checks whether the current local `HEAD` already has a completed `Macroscope - Correctness Check`; if not, it runs the local CLI path.
+- The router first checks whether the current local `HEAD` already has a successful `Macroscope - Correctness Check`; if not, it runs the local CLI path.

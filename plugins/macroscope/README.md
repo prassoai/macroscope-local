@@ -13,7 +13,7 @@ OpenCode:    /macroscope
 
 That router behaves differently depending on the current local `HEAD`:
 
-- If the current local `HEAD` already has a completed `Macroscope - Correctness Check`, it uses the PR-comment triage workflow.
+- If the current local `HEAD` already has a successful `Macroscope - Correctness Check`, it uses the PR-comment triage workflow.
 - Otherwise, it runs a streaming local `macroscope codereview`, fixes valid findings, and reports only the issues it addressed.
 
 The installer in the repo root installs both the CLI and these packaged workflows for supported local Codex, Claude Code, Cursor, and OpenCode setups:

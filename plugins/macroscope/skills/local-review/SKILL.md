@@ -75,7 +75,7 @@ This returns the current status snapshot:
 
 Maintain a seen-set of issue fingerprints so you only process newly surfaced findings on each poll. Use a stable fingerprint such as:
 
-`path:start_line:end_line:category:message`
+`file:start_line:end_line:category:message`
 
 ### 4. Triage and fix issues as they arrive
 
