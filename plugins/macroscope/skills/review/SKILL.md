@@ -3,7 +3,7 @@ name: review
 description: Main review entrypoint. If the current branch has an open PR, triage unresolved PR comments. If it does not, run a local Macroscope review, triage streaming findings, fix the valid ones, and report what was addressed.
 ---
 
-Use this as the customer-facing review router.
+Use this as the canonical review router.
 
 This skill chooses between two different workflows:
 
