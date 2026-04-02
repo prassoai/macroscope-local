@@ -1,0 +1,20 @@
+{
+  "name": "macroscope-local",
+  "interface": {
+    "displayName": "Macroscope"
+  },
+  "plugins": [
+    {
+      "name": "macroscope",
+      "source": {
+        "source": "local",
+        "path": "./plugins/macroscope"
+      },
+      "policy": {
+        "installation": "INSTALLED_BY_DEFAULT",
+        "authentication": "ON_USE"
+      },
+      "category": "Development"
+    }
+  ]
+}

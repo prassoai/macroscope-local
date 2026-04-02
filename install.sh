@@ -1,8 +1,6 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
-# Color codes (disabled if NO_COLOR is set or not a tty)
-# NOTE: use ANSI-C quoting so the variables contain real ESC bytes (not literal "\033")
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
   BOLD=$'\033[1m'
   DIM=$'\033[2m'
@@ -17,7 +15,6 @@ else
   BOLD='' DIM='' CYAN='' GREEN='' YELLOW='' RED='' BLUE='' MAGENTA='' RESET=''
 fi
 
-# Print ASCII art banner
 print_banner() {
   cat << "EOF"
 
@@ -31,7 +28,6 @@ print_banner() {
 EOF
 }
 
-# Status printing functions
 info() {
   printf "${CYAN}ℹ${RESET} %s\n" "$1"
 }
@@ -52,15 +48,18 @@ step() {
   printf "\n${BOLD}${MAGENTA}→${RESET} ${BOLD}%s${RESET}\n" "$1"
 }
 
-# Path of the installed binary (set by install_binary, read by verify_install/launch_wizard)
 INSTALLED_BINARY=""
+INSTALL_VERSION=""
+TMP_DIR=""
+CHECKOUT_DIR=""
+PLUGIN_VERSION=""
+INSTALL_DIR=""
 
-# Check for required dependencies
 check_dependencies() {
   local missing_deps=()
 
-  for cmd in curl git; do
-    if ! command -v "$cmd" &> /dev/null; then
+  for cmd in curl git python3; do
+    if ! command -v "$cmd" >/dev/null 2>&1; then
       missing_deps+=("$cmd")
     fi
   done
@@ -76,12 +75,10 @@ check_dependencies() {
   fi
 }
 
-# Detect OS and architecture
 detect_platform() {
   OS=$(uname -s | tr '[:upper:]' '[:lower:]')
   ARCH=$(uname -m)
 
-  # Normalize architecture
   case $ARCH in
     x86_64) ARCH="amd64" ;;
     aarch64|arm64) ARCH="arm64" ;;
@@ -92,7 +89,6 @@ detect_platform() {
       ;;
   esac
 
-  # Validate OS
   if [[ "$OS" != "linux" && "$OS" != "darwin" ]]; then
     error "Unsupported OS: $OS"
     echo "Only Linux and macOS are currently supported."
@@ -103,64 +99,107 @@ detect_platform() {
   success "Detected platform: ${BOLD}${OS}-${ARCH}${RESET}"
 }
 
-# Determine installation directory — always use ~/.local/bin (like Claude CLI).
-# No sudo required; no /usr/local/bin fallback.
 determine_install_dir() {
   INSTALL_DIR="${HOME}/.local/bin"
   mkdir -p "$INSTALL_DIR"
   info "Installation directory: ${BOLD}${INSTALL_DIR}${RESET}"
 }
 
-# Download and install binary
+prepare_tmp_dir() {
+  TMP_DIR=$(mktemp -d)
+  chmod 700 "$TMP_DIR"
+  trap 'rm -rf "$TMP_DIR"' EXIT
+}
+
+resolve_version() {
+  INSTALL_VERSION="${MACROSCOPE_VERSION:-${1:-latest}}"
+  info "Requested version: ${BOLD}${INSTALL_VERSION}${RESET}"
+}
+
 install_binary() {
   step "Downloading Macroscope CLI..."
 
-  # GitHub repo info
-  REPO="prassoai/macroscope-local"
-  VERSION="${MACROSCOPE_VERSION:-${1:-latest}}"
+  local repo="prassoai/macroscope-local"
+  local url=""
 
-  # Construct download URL
-  if [ "$VERSION" = "latest" ]; then
-    URL="https://github.com/${REPO}/releases/latest/download/macroscope-${OS}-${ARCH}"
+  if [ "$INSTALL_VERSION" = "latest" ]; then
+    url="https://github.com/${repo}/releases/latest/download/macroscope-${OS}-${ARCH}"
   else
-    URL="https://github.com/${REPO}/releases/download/${VERSION}/macroscope-${OS}-${ARCH}"
+    url="https://github.com/${repo}/releases/download/${INSTALL_VERSION}/macroscope-${OS}-${ARCH}"
   fi
 
-  # Create secure temporary directory
-  TMP_DIR=$(mktemp -d)
-  chmod 700 "$TMP_DIR"
-  trap "rm -rf $TMP_DIR" EXIT
+  info "Downloading from: ${DIM}${url}${RESET}"
 
-  info "Downloading from: ${DIM}${URL}${RESET}"
-
-  # Download with progress bar
-  if ! curl -fL --progress-bar "$URL" -o "$TMP_DIR/macroscope"; then
+  if ! curl -fL --progress-bar "$url" -o "$TMP_DIR/macroscope"; then
     error "Failed to download macroscope"
     echo ""
     echo "Possible reasons:"
     echo "  Release doesn't exist for ${OS}-${ARCH}"
     echo "  Network connectivity issues"
-    echo "  Invalid version specified: ${VERSION}"
+    echo "  Invalid version specified: ${INSTALL_VERSION}"
     echo ""
     echo "Check available releases at:"
-    echo "  https://github.com/${REPO}/releases"
+    echo "  https://github.com/${repo}/releases"
     exit 1
   fi
 
-  success "Downloaded successfully"
-
-  # Make executable
   chmod +x "$TMP_DIR/macroscope"
 
-  # Install binary (always to ~/.local/bin, no sudo needed)
   step "Installing binary..."
   mv "$TMP_DIR/macroscope" "$INSTALL_DIR/macroscope"
   INSTALLED_BINARY="${INSTALL_DIR}/macroscope"
   success "Installed CLI to ${BOLD}${INSTALLED_BINARY}${RESET}"
 }
 
-# Update shell configuration so ~/.local/bin is on PATH.
-# Always runs (not gated by NEEDS_PATH_UPDATE) since we always install to ~/.local/bin.
+fetch_plugin_bundle() {
+  step "Fetching plugin bundle..."
+
+  local repo_url="https://github.com/prassoai/macroscope-local.git"
+  CHECKOUT_DIR="$TMP_DIR/macroscope-local"
+
+  if [ -n "${MACROSCOPE_PLUGIN_BUNDLE_SOURCE:-}" ]; then
+    if [ -d "${MACROSCOPE_PLUGIN_BUNDLE_SOURCE}" ]; then
+      copy_tree "${MACROSCOPE_PLUGIN_BUNDLE_SOURCE}" "$CHECKOUT_DIR"
+      success "Using local plugin bundle from ${BOLD}${MACROSCOPE_PLUGIN_BUNDLE_SOURCE}${RESET}"
+    else
+      git clone --depth 1 "${MACROSCOPE_PLUGIN_BUNDLE_SOURCE}" "$CHECKOUT_DIR" >/dev/null 2>&1
+      success "Fetched plugin bundle from ${BOLD}${MACROSCOPE_PLUGIN_BUNDLE_SOURCE}${RESET}"
+    fi
+  elif [ "$INSTALL_VERSION" = "latest" ]; then
+    git clone --depth 1 "$repo_url" "$CHECKOUT_DIR" >/dev/null 2>&1
+    success "Fetched latest plugin bundle from ${BOLD}main${RESET}"
+  else
+    if git clone --depth 1 --branch "$INSTALL_VERSION" "$repo_url" "$CHECKOUT_DIR" >/dev/null 2>&1; then
+      success "Fetched plugin bundle for ${BOLD}${INSTALL_VERSION}${RESET}"
+    else
+      warn "Could not fetch plugin bundle at ref '${INSTALL_VERSION}'. Falling back to the default branch for plugin files."
+      git clone --depth 1 "$repo_url" "$CHECKOUT_DIR" >/dev/null 2>&1
+      success "Fetched fallback plugin bundle from ${BOLD}main${RESET}"
+    fi
+  fi
+
+  if [ ! -f "$CHECKOUT_DIR/plugins/macroscope/.claude-plugin/plugin.json" ] || [ ! -f "$CHECKOUT_DIR/plugins/macroscope/.codex-plugin/plugin.json" ]; then
+    error "Fetched repo is missing the packaged macroscope plugin files."
+    exit 1
+  fi
+
+  PLUGIN_VERSION="$(python3 - "$CHECKOUT_DIR/plugins/macroscope/.claude-plugin/plugin.json" <<'PY'
+import json, sys
+with open(sys.argv[1], "r", encoding="utf-8") as f:
+    print(json.load(f).get("version", "unknown"))
+PY
+)"
+}
+
+copy_tree() {
+  local src="$1"
+  local dst="$2"
+
+  rm -rf "$dst"
+  mkdir -p "$(dirname "$dst")"
+  cp -R "$src" "$dst"
+}
+
 update_shell_config() {
   step "Updating shell configuration..."
 
@@ -193,25 +232,21 @@ update_shell_config() {
     fi
   }
 
-  # fish uses different syntax; do NOT write bash export lines there.
   if [ "$shell_name" = "fish" ] || [ -n "${FISH_VERSION:-}" ]; then
     local fish_cfg="$HOME/.config/fish/config.fish"
     local fish_line="set -Ux fish_user_paths $install_bin \$fish_user_paths"
     ensure_line_in_file "$fish_cfg" "$fish_line" "$marker"
   else
-    # zsh (macOS default): PATH belongs in ~/.zprofile for login shells; ~/.zshrc as fallback
     if [ "$shell_name" = "zsh" ] || [ -n "${ZSH_VERSION:-}" ]; then
       ensure_line_in_file "$HOME/.zprofile" "$export_line" "$marker"
       ensure_line_in_file "$HOME/.zshrc" "$export_line" "$marker"
     fi
 
-    # bash: login shell reads ~/.bash_profile; interactive shells often read ~/.bashrc
     if [ "$shell_name" = "bash" ] || [ -n "${BASH_VERSION:-}" ]; then
       ensure_line_in_file "$HOME/.bash_profile" "$export_line" "$marker"
       ensure_line_in_file "$HOME/.bashrc" "$export_line" "$marker"
     fi
 
-    # unknown shell: safe defaults
     if [ "$shell_name" != "zsh" ] && [ "$shell_name" != "bash" ]; then
       ensure_line_in_file "$HOME/.profile" "$export_line" "$marker"
       ensure_line_in_file "$HOME/.bashrc" "$export_line" "$marker"
@@ -220,7 +255,6 @@ update_shell_config() {
     fi
   fi
 
-  # Add to current session so the binary is immediately usable
   export PATH="$HOME/.local/bin:$PATH"
 
   if [ $updated -eq 0 ]; then
@@ -228,7 +262,144 @@ update_shell_config() {
   fi
 }
 
-# Verify installation
+install_codex_plugin() {
+  step "Installing Codex plugin..."
+
+  local plugin_src="$CHECKOUT_DIR/plugins/macroscope"
+  local plugin_dst="$HOME/.codex/plugins/macroscope"
+  local marketplace_dst="$HOME/.agents/plugins/marketplace.json"
+
+  mkdir -p "$HOME/.codex/plugins" "$HOME/.agents/plugins"
+  copy_tree "$plugin_src" "$plugin_dst"
+
+  python3 - "$marketplace_dst" <<'PY'
+import json
+import os
+import sys
+
+path = sys.argv[1]
+
+if os.path.exists(path):
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+else:
+    data = {
+        "name": "local-user-plugins",
+        "interface": {"displayName": "Local Plugins"},
+        "plugins": [],
+    }
+
+data.setdefault("name", "local-user-plugins")
+data.setdefault("interface", {})
+data["interface"].setdefault("displayName", "Local Plugins")
+plugins = [p for p in data.get("plugins", []) if p.get("name") != "macroscope"]
+plugins.append(
+    {
+        "name": "macroscope",
+        "source": {"source": "local", "path": "./.codex/plugins/macroscope"},
+        "policy": {
+            "installation": "INSTALLED_BY_DEFAULT",
+            "authentication": "ON_USE",
+        },
+        "category": "Development",
+    }
+)
+data["plugins"] = plugins
+
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(data, f, indent=2)
+    f.write("\n")
+PY
+
+  success "Installed Codex plugin to ${BOLD}${plugin_dst}${RESET}"
+}
+
+install_claude_plugin() {
+  step "Installing Claude Code plugin..."
+
+  local plugin_src="$CHECKOUT_DIR/plugins/macroscope"
+  local marketplace_src="$CHECKOUT_DIR/.claude-plugin"
+  local marketplace_root="$HOME/.claude/plugins/marketplaces/macroscope-local"
+  local cache_dst="$HOME/.claude/plugins/cache/macroscope-local/macroscope/$PLUGIN_VERSION"
+  local known_marketplaces="$HOME/.claude/plugins/known_marketplaces.json"
+  local installed_plugins="$HOME/.claude/plugins/installed_plugins.json"
+  local now=""
+
+  mkdir -p "$HOME/.claude/plugins/marketplaces" "$HOME/.claude/plugins/cache/macroscope-local/macroscope"
+
+  rm -rf "$marketplace_root"
+  mkdir -p "$marketplace_root"
+  copy_tree "$marketplace_src" "$marketplace_root/.claude-plugin"
+  mkdir -p "$marketplace_root/plugins"
+  copy_tree "$plugin_src" "$marketplace_root/plugins/macroscope"
+  copy_tree "$plugin_src" "$cache_dst"
+
+  now="$(python3 - <<'PY'
+from datetime import datetime, timezone
+print(datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"))
+PY
+)"
+
+  python3 - "$known_marketplaces" "$marketplace_root" "$now" <<'PY'
+import json
+import os
+import sys
+
+path, marketplace_root, now = sys.argv[1:4]
+
+if os.path.exists(path):
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+else:
+    data = {}
+
+data["macroscope-local"] = {
+    "source": {"source": "local", "path": marketplace_root},
+    "installLocation": marketplace_root,
+    "lastUpdated": now,
+}
+
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(data, f, indent=2)
+    f.write("\n")
+PY
+
+  python3 - "$installed_plugins" "$cache_dst" "$PLUGIN_VERSION" "$now" <<'PY'
+import json
+import os
+import sys
+
+path, install_path, version, now = sys.argv[1:5]
+key = "macroscope@macroscope-local"
+
+if os.path.exists(path):
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+else:
+    data = {"version": 2, "plugins": {}}
+
+data.setdefault("version", 2)
+plugins = data.setdefault("plugins", {})
+existing = plugins.get(key, [])
+installed_at = existing[0].get("installedAt", now) if existing else now
+plugins[key] = [
+    {
+        "scope": "user",
+        "installPath": install_path,
+        "version": version,
+        "installedAt": installed_at,
+        "lastUpdated": now,
+    }
+]
+
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(data, f, indent=2)
+    f.write("\n")
+PY
+
+  success "Installed Claude Code plugin to ${BOLD}${cache_dst}${RESET}"
+}
+
 verify_install() {
   step "Verifying installation..."
 
@@ -238,7 +409,6 @@ verify_install() {
     warn "Installed binary path not found/executable: ${INSTALLED_BINARY}"
   fi
 
-  # Check whether it's currently discoverable in this shell
   if command -v macroscope >/dev/null 2>&1; then
     success "macroscope is on PATH: ${BOLD}$(command -v macroscope)${RESET}"
   else
@@ -248,9 +418,20 @@ verify_install() {
     printf "  ${CYAN}source ~/.bash_profile${RESET} (bash)\n"
     printf "  ${CYAN}exec fish${RESET}           (fish)\n"
   fi
+
+  if [ -f "$HOME/.codex/plugins/macroscope/.codex-plugin/plugin.json" ]; then
+    success "Codex plugin installed"
+  else
+    warn "Codex plugin install did not produce ~/.codex/plugins/macroscope"
+  fi
+
+  if [ -f "$HOME/.claude/plugins/cache/macroscope-local/macroscope/$PLUGIN_VERSION/.claude-plugin/plugin.json" ]; then
+    success "Claude Code plugin installed"
+  else
+    warn "Claude Code plugin install did not produce the expected cache entry"
+  fi
 }
 
-# Print completion message
 print_installation_completion() {
   echo ""
   printf "${GREEN}${BOLD}════════════════════════════════════════════════${RESET}\n"
@@ -258,11 +439,17 @@ print_installation_completion() {
   printf "${GREEN}${BOLD}════════════════════════════════════════════════${RESET}\n"
   echo ""
   printf "${BOLD}Verify installation:${RESET}\n"
-  printf "  ${CYAN}macroscope version${RESET}\n"
+  printf "  ${CYAN}macroscope --help${RESET}\n"
   echo ""
   printf "${BOLD}Quick start:${RESET}\n"
-  printf "  ${CYAN}macroscope review${RESET}          ${DIM}# Review your code changes${RESET}\n"
-  printf "  ${CYAN}macroscope review --help${RESET}   ${DIM}# See all options${RESET}\n"
+  printf "  ${CYAN}macroscope${RESET}                     ${DIM}# Launch the interactive wizard${RESET}\n"
+  printf "  ${CYAN}macroscope codereview --base staging${RESET} ${DIM}# Run the CLI directly${RESET}\n"
+  printf "  ${CYAN}/macroscope:review${RESET}           ${DIM}# Main plugin entrypoint in Codex or Claude Code${RESET}\n"
+  echo ""
+  printf "${BOLD}Notes:${RESET}\n"
+  printf "  Restart Codex or Claude Code if they were already open.\n"
+  printf "  The review router uses PR comment triage when the branch has an open PR.\n"
+  printf "  Otherwise it runs a local streaming CLI review and fixes valid issues.\n"
   echo ""
   printf "${BOLD}Need help?${RESET}\n"
   printf "  Documentation: ${BLUE}https://github.com/prassoai/macroscope-local${RESET}\n"
@@ -271,20 +458,16 @@ print_installation_completion() {
 }
 
 launch_wizard() {
-  # Allow CI/automated installs to skip the wizard
   if [ "${MACROSCOPE_SKIP_WIZARD:-0}" = "1" ]; then
     info "Skipping wizard launch (MACROSCOPE_SKIP_WIZARD=1)."
     return
   fi
 
-  # When piped (curl | bash), stdin is the pipe — not a TTY. We use /dev/tty
-  # to reconnect to the user's terminal for interactive input.
   if [ ! -e /dev/tty ]; then
     info "No TTY available; run 'macroscope' later to start the setup wizard."
     return
   fi
 
-  # Prefer the binary we just installed, otherwise fall back to PATH
   local bin_path="${INSTALLED_BINARY}"
   if [ -z "$bin_path" ] || [ ! -x "$bin_path" ]; then
     bin_path="$(command -v macroscope || true)"
@@ -297,29 +480,32 @@ launch_wizard() {
 
   echo ""
   step "Launching Macroscope setup wizard..."
-  # Redirect stdin from /dev/tty so the wizard can accept interactive input
-  # even when the install script itself was piped (curl | bash).
   if ! "$bin_path" < /dev/tty; then
     warn "Wizard exited with a non-zero status. You can rerun it anytime with: macroscope"
   fi
 }
 
-# Main installation flow
 main() {
-  clear
+  if command -v clear >/dev/null 2>&1 && [ -t 1 ]; then
+    clear || true
+  fi
   print_banner
 
   step "Checking system requirements..."
   check_dependencies
   detect_platform
   determine_install_dir
+  prepare_tmp_dir
+  resolve_version "$@"
 
-  install_binary "$@"
+  install_binary
+  fetch_plugin_bundle
   update_shell_config
+  install_codex_plugin
+  install_claude_plugin
   verify_install
   print_installation_completion
   launch_wizard
 }
 
-# Run installation
 main "$@"

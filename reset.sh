@@ -9,6 +9,10 @@ set -euo pipefail
 #   curl -sSL https://raw.githubusercontent.com/prassoai/macroscope-local/main/reset.sh | bash
 #   # or locally:
 #   bash reset.sh
+#
+# Optional:
+#   MACROSCOPE_SKIP_REINSTALL=1 bash reset.sh
+#     -> remove Macroscope state without re-installing it
 
 # Color codes (disabled if NO_COLOR is set or not a tty)
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
@@ -26,6 +30,12 @@ success() { printf "${GREEN}✓${RESET} %s\n" "$1"; }
 step()    { printf "\n${BOLD}${MAGENTA}→${RESET} ${BOLD}%s${RESET}\n" "$1"; }
 
 CLI_BINARY="$HOME/.local/bin/macroscope"
+CODEX_PLUGIN_DIR="$HOME/.codex/plugins/macroscope"
+CODEX_MARKETPLACE="$HOME/.agents/plugins/marketplace.json"
+CLAUDE_MARKETPLACE_DIR="$HOME/.claude/plugins/marketplaces/macroscope-local"
+CLAUDE_CACHE_DIR="$HOME/.claude/plugins/cache/macroscope-local"
+CLAUDE_KNOWN_MARKETPLACES="$HOME/.claude/plugins/known_marketplaces.json"
+CLAUDE_INSTALLED_PLUGINS="$HOME/.claude/plugins/installed_plugins.json"
 
 echo ""
 printf "${BOLD}Macroscope Reset${RESET}\n"
@@ -53,11 +63,87 @@ else
   info "No ~/.macroscope directory to remove"
 fi
 
-# ─── Step 3: Re-install from latest release ──────────────────────────────
-step "Re-installing from latest release..."
-echo ""
+# ─── Step 3: Remove Codex + Claude plugin state ──────────────────────────
+step "Removing plugin state..."
 
-curl -sSL https://raw.githubusercontent.com/prassoai/macroscope-local/main/install.sh | bash
+if [ -d "$CODEX_PLUGIN_DIR" ]; then
+  rm -rf "$CODEX_PLUGIN_DIR"
+  success "Removed $CODEX_PLUGIN_DIR"
+else
+  info "No Codex plugin directory to remove"
+fi
+
+if [ -d "$CLAUDE_MARKETPLACE_DIR" ]; then
+  rm -rf "$CLAUDE_MARKETPLACE_DIR"
+  success "Removed $CLAUDE_MARKETPLACE_DIR"
+else
+  info "No Claude marketplace directory to remove"
+fi
+
+if [ -d "$CLAUDE_CACHE_DIR" ]; then
+  rm -rf "$CLAUDE_CACHE_DIR"
+  success "Removed $CLAUDE_CACHE_DIR"
+else
+  info "No Claude cache directory to remove"
+fi
+
+python3 - <<'PY'
+import json
+import os
+
+targets = [
+    (os.path.expanduser("~/.agents/plugins/marketplace.json"), "plugins", "macroscope", "name"),
+    (os.path.expanduser("~/.claude/plugins/known_marketplaces.json"), None, "macroscope-local", None),
+]
+
+for path, list_key, target, key_name in targets:
+    if not os.path.exists(path):
+        continue
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    changed = False
+    if list_key is None:
+        if target in data:
+            del data[target]
+            changed = True
+    else:
+        items = data.get(list_key, [])
+        filtered = [item for item in items if item.get(key_name) != target]
+        if len(filtered) != len(items):
+            data[list_key] = filtered
+            changed = True
+    if changed:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+            f.write("\n")
+PY
+
+python3 - <<'PY'
+import json
+import os
+
+path = os.path.expanduser("~/.claude/plugins/installed_plugins.json")
+if os.path.exists(path):
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    plugins = data.get("plugins", {})
+    if "macroscope@macroscope-local" in plugins:
+        del plugins["macroscope@macroscope-local"]
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+            f.write("\n")
+PY
+
+if [ "${MACROSCOPE_SKIP_REINSTALL:-0}" = "1" ]; then
+  step "Skipping re-install..."
+  info "Removal complete. Reinstall manually when you're ready."
+else
+  # ─── Step 4: Re-install from latest release ────────────────────────────
+  step "Re-installing from latest release..."
+  echo ""
+
+  curl -sSL https://raw.githubusercontent.com/prassoai/macroscope-local/main/install.sh | bash
+fi
 
 echo ""
 printf "${GREEN}${BOLD}════════════════════════════════════════════════${RESET}\n"

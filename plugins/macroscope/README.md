@@ -1,20 +1,20 @@
-# macroscope-codereview plugin
+# macroscope plugin
 
-Claude Code plugin for Macroscope local code review.
+Packaged review workflows for Codex and Claude Code.
 
-## Prerequisites
+The primary entrypoint is:
 
-Install Macroscope first:
+```text
+/macroscope:review
+```
+
+That router behaves differently depending on the current branch:
+
+- If the branch has an open PR, it uses the PR-comment triage workflow.
+- If the branch has no open PR, it runs a streaming local `macroscope codereview`, fixes valid findings, and reports only the issues it addressed.
+
+The installer in the repo root installs both the CLI and this plugin for supported local Codex and Claude setups:
 
 ```bash
 curl -sSL https://raw.githubusercontent.com/prassoai/macroscope-local/main/install.sh | bash
 ```
-
-## Install from marketplace
-
-```bash
-claude plugin marketplace add prassoai/macroscope-local
-claude plugin install --scope user macroscope-codereview@macroscope-local
-```
-
-Restart Claude Code after installation.
