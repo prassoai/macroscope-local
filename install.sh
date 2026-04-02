@@ -645,6 +645,59 @@ PY
   success "Installed Claude Code plugin to ${BOLD}${cache_dst}${RESET}"
 }
 
+install_cursor_plugin() {
+  step "Installing Cursor plugin..."
+
+  local plugin_src="$CHECKOUT_DIR/plugins/macroscope"
+  local cursor_dst="$HOME/.cursor/plugins/local/macroscope"
+
+  if [ ! -f "$plugin_src/.cursor-plugin/plugin.json" ]; then
+    warn "Cursor manifest not found in the plugin bundle; skipping Cursor installation."
+    return
+  fi
+
+  mkdir -p "$HOME/.cursor/plugins/local"
+  copy_tree "$plugin_src" "$cursor_dst"
+
+  success "Installed Cursor plugin to ${BOLD}${cursor_dst}${RESET}"
+}
+
+install_opencode_support() {
+  step "Installing OpenCode plugin, commands, and skills..."
+
+  local plugin_src="$CHECKOUT_DIR/plugins/macroscope"
+  local commands_src="$plugin_src/commands"
+  local skills_src="$plugin_src/skills"
+  local plugin_file="$plugin_src/opencode/macroscope.js"
+  local opencode_root="$HOME/.config/opencode"
+  local opencode_commands="$opencode_root/commands"
+  local opencode_skills="$opencode_root/skills"
+  local opencode_plugins="$opencode_root/plugins"
+  local command_name=""
+  local skill_name=""
+
+  if [ ! -d "$commands_src" ] || [ ! -d "$skills_src" ] || [ ! -f "$plugin_file" ]; then
+    warn "OpenCode plugin, command, or skill files were not found in the plugin bundle; skipping OpenCode installation."
+    return
+  fi
+
+  mkdir -p "$opencode_commands" "$opencode_skills" "$opencode_plugins"
+
+  cp "$plugin_file" "$opencode_plugins/macroscope.js"
+
+  for command_name in macroscope local-review triage-pr-comments respond-to-pr-comments review-pr; do
+    cp "$commands_src/$command_name.md" "$opencode_commands/$command_name.md"
+  done
+
+  for skill_name in macroscope local-review triage-pr-comments respond-to-pr-comments review-pr; do
+    copy_tree "$skills_src/$skill_name" "$opencode_skills/$skill_name"
+  done
+
+  success "Installed OpenCode plugin to ${BOLD}${opencode_plugins}/macroscope.js${RESET}"
+  success "Installed OpenCode commands to ${BOLD}${opencode_commands}${RESET}"
+  success "Installed OpenCode skills to ${BOLD}${opencode_skills}${RESET}"
+}
+
 verify_install() {
   step "Verifying installation..."
 
@@ -707,6 +760,18 @@ PY
     warn "Claude Code plugin install did not produce the expected cache entry"
   fi
 
+  if [ -f "$HOME/.cursor/plugins/local/macroscope/.cursor-plugin/plugin.json" ]; then
+    success "Cursor plugin installed"
+  else
+    warn "Cursor plugin install did not produce the expected local plugin entry"
+  fi
+
+  if [ -f "$HOME/.config/opencode/plugins/macroscope.js" ] && [ -f "$HOME/.config/opencode/commands/macroscope.md" ] && [ -f "$HOME/.config/opencode/skills/macroscope/SKILL.md" ]; then
+    success "OpenCode plugin, commands, and skills installed"
+  else
+    warn "OpenCode install did not produce the expected plugin, command, and skill files"
+  fi
+
   codex_cli="$(command -v codex || true)"
   if [ -n "$codex_cli" ] && codex_supports_plugins "$codex_cli"; then
     success "Codex CLI supports plugins: ${BOLD}${codex_cli}${RESET}"
@@ -731,9 +796,11 @@ print_installation_completion() {
   printf "  ${CYAN}macroscope codereview --base staging${RESET} ${DIM}# Run the CLI directly${RESET}\n"
   printf "  ${CYAN}/macroscope${RESET}                  ${DIM}# Main router in Claude Code${RESET}\n"
   printf "  ${CYAN}/macroscope:macroscope${RESET}      ${DIM}# Main router in Codex${RESET}\n"
+  printf "  ${CYAN}/macroscope:macroscope${RESET}      ${DIM}# Main router in Cursor${RESET}\n"
+  printf "  ${CYAN}/macroscope${RESET}                  ${DIM}# Main router in OpenCode${RESET}\n"
   echo ""
   printf "${BOLD}Notes:${RESET}\n"
-  printf "  Restart Codex or Claude Code if they were already open.\n"
+  printf "  Restart Codex, Claude Code, Cursor, or OpenCode if they were already open.\n"
   printf "  The review router first checks whether the current local HEAD already has a completed Macroscope correctness check.\n"
   printf "  Otherwise it runs a local streaming CLI review and fixes valid issues.\n"
   if [ "$CODEX_SHIM_INSTALLED" = "1" ]; then
@@ -795,6 +862,8 @@ main() {
   install_codex_cli_shim
   install_codex_plugin
   install_claude_plugin
+  install_cursor_plugin
+  install_opencode_support
   seed_local_build_config_if_needed
   verify_install
   print_installation_completion

@@ -1,7 +1,7 @@
 {
   "name": "macroscope",
-  "version": "1.1.0",
-  "description": "Macroscope review workflows for Codex and Claude Code.",
+  "version": "1.2.0",
+  "description": "Macroscope review workflows for Codex, Claude Code, Cursor, and OpenCode.",
   "author": {
     "name": "Prasso",
     "email": "macroscope@prasso.ai",
@@ -14,7 +14,9 @@
     "code-review",
     "macroscope",
     "codex",
-    "claude-code"
+    "claude-code",
+    "cursor",
+    "opencode"
   ],
   "skills": "./skills/",
   "interface": {

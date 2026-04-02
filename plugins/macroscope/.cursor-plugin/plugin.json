@@ -1,0 +1,29 @@
+{
+  "name": "macroscope",
+  "displayName": "Macroscope",
+  "version": "1.2.0",
+  "description": "Macroscope review workflows for Cursor.",
+  "author": {
+    "name": "Prasso",
+    "email": "macroscope@prasso.ai",
+    "url": "https://github.com/prassoai"
+  },
+  "homepage": "https://github.com/prassoai/macroscope-local",
+  "repository": "https://github.com/prassoai/macroscope-local",
+  "license": "UNLICENSED",
+  "logo": "assets/macroscope.svg",
+  "keywords": [
+    "macroscope",
+    "code-review",
+    "cursor",
+    "pull-request",
+    "local-review"
+  ],
+  "category": "developer-tools",
+  "tags": [
+    "review",
+    "quality",
+    "automation"
+  ],
+  "skills": "./skills/"
+}

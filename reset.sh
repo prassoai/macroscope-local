@@ -42,6 +42,10 @@ CLAUDE_KNOWN_MARKETPLACES="$HOME/.claude/plugins/known_marketplaces.json"
 CLAUDE_INSTALLED_PLUGINS="$HOME/.claude/plugins/installed_plugins.json"
 CLAUDE_SETTINGS="$HOME/.claude/settings.json"
 CLAUDE_SETTINGS_LOCAL="$HOME/.claude/settings.local.json"
+CURSOR_PLUGIN_DIR="$HOME/.cursor/plugins/local/macroscope"
+OPENCODE_COMMANDS_DIR="$HOME/.config/opencode/commands"
+OPENCODE_SKILLS_DIR="$HOME/.config/opencode/skills"
+OPENCODE_PLUGINS_DIR="$HOME/.config/opencode/plugins"
 
 echo ""
 printf "${BOLD}Macroscope Reset${RESET}\n"
@@ -115,6 +119,40 @@ if [ -d "$CLAUDE_CACHE_DIR" ]; then
 else
   info "No Claude cache directory to remove"
 fi
+
+if [ -d "$CURSOR_PLUGIN_DIR" ]; then
+  rm -rf "$CURSOR_PLUGIN_DIR"
+  success "Removed $CURSOR_PLUGIN_DIR"
+else
+  info "No Cursor plugin directory to remove"
+fi
+
+for file in \
+  "$OPENCODE_PLUGINS_DIR/macroscope.js" \
+  "$OPENCODE_COMMANDS_DIR/macroscope.md" \
+  "$OPENCODE_COMMANDS_DIR/local-review.md" \
+  "$OPENCODE_COMMANDS_DIR/triage-pr-comments.md" \
+  "$OPENCODE_COMMANDS_DIR/respond-to-pr-comments.md" \
+  "$OPENCODE_COMMANDS_DIR/review-pr.md"
+do
+  if [ -f "$file" ]; then
+    rm -f "$file"
+    success "Removed $file"
+  fi
+done
+
+for dir in \
+  "$OPENCODE_SKILLS_DIR/macroscope" \
+  "$OPENCODE_SKILLS_DIR/local-review" \
+  "$OPENCODE_SKILLS_DIR/triage-pr-comments" \
+  "$OPENCODE_SKILLS_DIR/respond-to-pr-comments" \
+  "$OPENCODE_SKILLS_DIR/review-pr"
+do
+  if [ -d "$dir" ]; then
+    rm -rf "$dir"
+    success "Removed $dir"
+  fi
+done
 
 python3 - <<'PY'
 import json
