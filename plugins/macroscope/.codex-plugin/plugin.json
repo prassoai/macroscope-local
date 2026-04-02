@@ -1,0 +1,45 @@
+{
+  "name": "macroscope",
+  "version": "1.2.0",
+  "description": "Macroscope review workflows for Codex, Claude Code, Cursor, and OpenCode.",
+  "author": {
+    "name": "Prasso",
+    "email": "macroscope@prasso.ai",
+    "url": "https://github.com/prassoai"
+  },
+  "homepage": "https://github.com/prassoai/macroscope-local",
+  "repository": "https://github.com/prassoai/macroscope-local",
+  "license": "UNLICENSED",
+  "keywords": [
+    "code-review",
+    "macroscope",
+    "codex",
+    "claude-code",
+    "cursor",
+    "opencode"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Macroscope",
+    "shortDescription": "PR-aware review routing for local and PR workflows",
+    "longDescription": "Routes branches with open PRs to GitHub review-comment triage and branches without an open PR to a streaming local Macroscope CLI review that fixes valid findings.",
+    "developerName": "Prasso",
+    "category": "Development",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/prassoai/macroscope-local",
+    "privacyPolicyURL": "https://github.com/prassoai/macroscope-local",
+    "termsOfServiceURL": "https://github.com/prassoai/macroscope-local",
+    "defaultPrompt": [
+      "Review this branch with Macroscope.",
+      "Triage my PR comments.",
+      "Run a local review and fix valid issues."
+    ],
+    "brandColor": "#0F766E",
+    "composerIcon": "./assets/macroscope-small.svg",
+    "logo": "./assets/macroscope.svg",
+    "screenshots": []
+  }
+}

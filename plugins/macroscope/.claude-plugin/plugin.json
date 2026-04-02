@@ -1,7 +1,7 @@
 {
   "name": "macroscope",
-  "version": "1.0.1",
-  "description": "Macroscope local code review plugin for Claude Code.",
+  "version": "1.2.0",
+  "description": "Macroscope PR-aware review workflows.",
   "author": {
     "name": "Prasso",
     "url": "https://github.com/prassoai"
@@ -9,5 +9,5 @@
   "homepage": "https://github.com/prassoai/macroscope-local",
   "repository": "https://github.com/prassoai/macroscope-local",
   "license": "UNLICENSED",
-  "keywords": ["code-review", "macroscope", "local-dev"]
+  "keywords": ["code-review", "macroscope", "local-dev", "claude-code", "codex", "cursor", "opencode"]
 }
