@@ -73,6 +73,13 @@ check_dependencies() {
     echo "  RHEL/CentOS: sudo yum install ${missing_deps[*]}"
     exit 1
   fi
+
+  if [ -n "${MACROSCOPE_LOCAL_BACK_REPO:-}" ] && ! command -v go >/dev/null 2>&1; then
+    error "Missing required dependency for local installs: go"
+    echo ""
+    echo "Install Go first, or unset MACROSCOPE_LOCAL_BACK_REPO to use a released binary."
+    exit 1
+  fi
 }
 
 detect_platform() {
@@ -118,6 +125,39 @@ resolve_version() {
 
 install_binary() {
   step "Downloading Macroscope CLI..."
+
+  if [ -n "${MACROSCOPE_LOCAL_BINARY_SOURCE:-}" ]; then
+    if [ ! -f "${MACROSCOPE_LOCAL_BINARY_SOURCE}" ]; then
+      error "Local binary source not found: ${MACROSCOPE_LOCAL_BINARY_SOURCE}"
+      exit 1
+    fi
+
+    step "Installing local Macroscope CLI..."
+    cp "${MACROSCOPE_LOCAL_BINARY_SOURCE}" "$TMP_DIR/macroscope"
+    chmod +x "$TMP_DIR/macroscope"
+    mv "$TMP_DIR/macroscope" "$INSTALL_DIR/macroscope"
+    INSTALLED_BINARY="${INSTALL_DIR}/macroscope"
+    success "Installed local CLI from ${BOLD}${MACROSCOPE_LOCAL_BINARY_SOURCE}${RESET}"
+    return
+  fi
+
+  if [ -n "${MACROSCOPE_LOCAL_BACK_REPO:-}" ]; then
+    if [ ! -d "${MACROSCOPE_LOCAL_BACK_REPO}" ]; then
+      error "Local back repo not found: ${MACROSCOPE_LOCAL_BACK_REPO}"
+      exit 1
+    fi
+
+    step "Building local Macroscope CLI..."
+    (
+      cd "${MACROSCOPE_LOCAL_BACK_REPO}"
+      go build -buildvcs=false -o "$TMP_DIR/macroscope" ./tools/cmd/macrodaemon
+    )
+    chmod +x "$TMP_DIR/macroscope"
+    mv "$TMP_DIR/macroscope" "$INSTALL_DIR/macroscope"
+    INSTALLED_BINARY="${INSTALL_DIR}/macroscope"
+    success "Built and installed local CLI from ${BOLD}${MACROSCOPE_LOCAL_BACK_REPO}${RESET}"
+    return
+  fi
 
   local repo="prassoai/macroscope-local"
   local url=""
