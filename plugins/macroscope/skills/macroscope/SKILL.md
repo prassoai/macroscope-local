@@ -40,7 +40,7 @@ Treat the first argument as the mode selector:
 
 With no arguments, this command should behave like the local-review worker:
 
-1. Open `../local-review/SKILL.md`.
+1. Open `../macroscope-local-review/SKILL.md`.
 2. Follow that workflow exactly.
 3. Report only the issues you addressed.
 4. Do **not** commit or push in this default mode.
@@ -70,7 +70,7 @@ gh pr view --json number,title,url,headRefOid,statusCheckRollup 2>/dev/null
 
 Each iteration starts with the local CLI review path:
 
-1. Open `../local-review/SKILL.md`.
+1. Open `../macroscope-local-review/SKILL.md`.
 2. Follow it exactly.
 3. Record whether it actually changed code.
 
@@ -111,10 +111,11 @@ If the check finishes with a non-success conclusion, stop the loop and tell the 
 
 Once the current `HEAD` has a successful Macroscope correctness check:
 
-1. Open `../triage-pr-comments/SKILL.md`.
-2. Follow it exactly.
-3. If the triage finds believed-valid comments, immediately open `../respond-to-pr-comments/SKILL.md` and act on them in the same loop mode.
-4. Record whether the PR-comment response phase changed code.
+1. Open `../macroscope-triage-pr-comments/SKILL.md`.
+2. Follow its investigation and classification steps, but in `/macroscope loop` do **not** pause for its final user-confirmation prompt.
+3. Treat the believed-valid findings from that triage as the working set for this loop iteration.
+4. If the triage finds believed-valid comments, immediately open `../macroscope-respond-to-pr-comments/SKILL.md` and act on them in the same loop mode.
+5. Record whether the PR-comment response phase changed code.
 
 If the PR-comment response phase made changes:
 
@@ -136,5 +137,5 @@ When you stop, summarize the issues you addressed, the commits you pushed, and t
 
 ### 4. Respect explicit user intent when it is narrower than the top-level Macroscope entrypoint
 
-- If the user explicitly asks to act on a previously triaged PR comment list, skip this entrypoint and use `../respond-to-pr-comments/SKILL.md`.
-- If the user explicitly asks for a general review of the PR diff itself rather than local CLI review, use `../review-pr/SKILL.md`.
+- If the user explicitly asks to act on a previously triaged PR comment list, skip this entrypoint and use `../macroscope-respond-to-pr-comments/SKILL.md`.
+- If the user explicitly asks for a general review of the PR diff itself rather than local CLI review, use `../macroscope-review-pr/SKILL.md`.

@@ -24,7 +24,7 @@ Default behavior:
 
 With no arguments:
 
-1. Open `../skills/local-review/SKILL.md`.
+1. Open `../skills/macroscope-local-review/SKILL.md`.
 2. Follow that workflow exactly.
 3. Report only the issues you addressed.
 4. Do **not** commit or push in this default mode.
@@ -39,11 +39,12 @@ cycle until there is nothing left to address.
 
 Use the same autopilot flow as the `macroscope` skill:
 
-1. Run `../skills/local-review/SKILL.md` first on each iteration.
+1. Run `../skills/macroscope-local-review/SKILL.md` first on each iteration.
 2. If it changes code, verify, commit, and push.
 3. Wait for a successful `Macroscope - Correctness Check` or `Review for correctness` on the exact current `HEAD`, clamping every polling sleep to `60` seconds max and never compounding sleeps.
-4. Once the current `HEAD` has a successful check, run `../skills/triage-pr-comments/SKILL.md`.
-5. If there are believed-valid comments, immediately run `../skills/respond-to-pr-comments/SKILL.md`.
+4. Once the current `HEAD` has a successful check, run `../skills/macroscope-triage-pr-comments/SKILL.md`.
+5. Use that triage for investigation/classification, but do not pause for its final user-confirmation prompt in loop mode.
+6. If there are believed-valid comments, immediately run `../skills/macroscope-respond-to-pr-comments/SKILL.md`.
 6. If that phase changes code, verify, commit, push, and continue the loop.
 7. Stop when the current iteration makes no code changes and there are no believed-valid unresolved Macroscope comments left for the successful current `HEAD`.
 

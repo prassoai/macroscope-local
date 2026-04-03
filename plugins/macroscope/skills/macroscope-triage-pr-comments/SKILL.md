@@ -7,6 +7,8 @@ Investigate every unresolved review comment on the current branch's PR. Use this
 
 Present both valid and believed-invalid findings for the user to review. Do not resolve, comment on, or modify anything. This skill is read-only.
 
+If `/macroscope loop` invoked this skill, return the triage results to the caller without waiting for a separate user confirmation step. The caller may immediately hand the believed-valid findings to the response worker in the same loop iteration.
+
 <accuracy_priority>
 These comments affect production code. A wrong dismissal lets a bug ship; a wrong acceptance wastes developer time. Verify claims against the actual code before forming a verdict.
 </accuracy_priority>
@@ -138,4 +140,6 @@ Only include this if `--reviewer-stats` is in the arguments.
 
 **D) Prompt for action**
 
-Ask: "Do you want me to run `/macroscope-respond-to-pr-comments` in Claude Code or `/macroscope:macroscope-respond-to-pr-comments` in Codex for the believed valid comments now?"
+If you are running interactively, ask: "Do you want me to run `/macroscope-respond-to-pr-comments` in Claude Code or `/macroscope:macroscope-respond-to-pr-comments` in Codex for the believed valid comments now?"
+
+If `/macroscope loop` invoked this skill, do not ask that question. Return the triage results to the caller and stop.

@@ -24,16 +24,17 @@ if [ ! -d "$PLUGIN_SKILLS" ]; then
 fi
 
 copy_skill() {
-  local name="$1"
-  cp "$BACK_SKILLS/$name/SKILL.md" "$PLUGIN_SKILLS/$name/SKILL.md"
+  local src_name="$1"
+  local dst_name="$2"
+  cp "$BACK_SKILLS/$src_name/SKILL.md" "$PLUGIN_SKILLS/$dst_name/SKILL.md"
 }
 
-copy_skill "macroscope"
-copy_skill "triage-pr-comments"
-copy_skill "respond-to-pr-comments"
-copy_skill "review-pr"
+copy_skill "macroscope" "macroscope"
+copy_skill "macroscope-triage-pr-comments" "macroscope-triage-pr-comments"
+copy_skill "macroscope-respond-to-pr-comments" "macroscope-respond-to-pr-comments"
+copy_skill "macroscope-review-pr" "macroscope-review-pr"
 
-python3 - "$BACK_SKILLS/local-review/SKILL.md" "$PLUGIN_SKILLS/local-review/SKILL.md" <<'PY'
+python3 - "$BACK_SKILLS/macroscope-local-review/SKILL.md" "$PLUGIN_SKILLS/macroscope-local-review/SKILL.md" <<'PY'
 from pathlib import Path
 import sys
 
