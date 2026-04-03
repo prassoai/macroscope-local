@@ -1,9 +1,9 @@
 ---
-name: triage-pr-comments
-description: Internal PR comment triage worker. Use this only after the main router determines correctness review already ran for the current local HEAD, or when the user explicitly asks to triage unresolved PR review comments. Does not take any action. Use --reviewer-stats to include per-reviewer hit rates.
+name: macroscope-triage-pr-comments
+description: Explicit PR-comment triage worker for Macroscope-reviewed heads. Investigates unresolved PR review comments on the current branch's PR and presents findings for user review. Does not take any action.
 ---
 
-Investigate every unresolved review comment on the current branch's PR. This is the PR path used after the main router chooses comment triage for the current local `HEAD`.
+Investigate every unresolved review comment on the current branch's PR. Use this when the user explicitly asks for PR-comment triage, or when `/macroscope loop` reaches the PR-comment phase for a head that already has a successful Macroscope correctness check.
 
 Present both valid and believed-invalid findings for the user to review. Do not resolve, comment on, or modify anything. This skill is read-only.
 
@@ -138,4 +138,4 @@ Only include this if `--reviewer-stats` is in the arguments.
 
 **D) Prompt for action**
 
-Ask: "Do you want me to run `/respond-to-pr-comments` in Claude Code or `/macroscope:respond-to-pr-comments` in Codex for the believed valid comments now?"
+Ask: "Do you want me to run `/macroscope-respond-to-pr-comments` in Claude Code or `/macroscope:macroscope-respond-to-pr-comments` in Codex for the believed valid comments now?"

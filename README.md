@@ -15,9 +15,14 @@ If your `codex` CLI is too old to load local plugins, the installer will place a
 After installation:
 
 - Run `macroscope` to launch the interactive wizard.
-- Run the PR-aware review router from your editor:
+- Run the local Macroscope review from your editor:
   - Claude Code: `/macroscope`
+  - Claude Code autopilot: `/macroscope loop`
   - Codex: `/macroscope:macroscope`
+  - Codex autopilot: `/macroscope:macroscope loop`
   - Cursor: `/macroscope:macroscope`
+  - Cursor autopilot: `/macroscope:macroscope loop`
   - OpenCode: `/macroscope`
-- The router first checks whether the current local `HEAD` already has a successful `Macroscope - Correctness Check`; if not, it runs the local CLI path.
+  - OpenCode autopilot: `/macroscope loop`
+- `/macroscope` runs the local CLI review path by default and validates each streamed issue before acting.
+- `/macroscope loop` runs the full review-fix-push-re-review autopilot cycle.

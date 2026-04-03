@@ -130,6 +130,10 @@ fi
 for file in \
   "$OPENCODE_PLUGINS_DIR/macroscope.js" \
   "$OPENCODE_COMMANDS_DIR/macroscope.md" \
+  "$OPENCODE_COMMANDS_DIR/macroscope-local-review.md" \
+  "$OPENCODE_COMMANDS_DIR/macroscope-triage-pr-comments.md" \
+  "$OPENCODE_COMMANDS_DIR/macroscope-respond-to-pr-comments.md" \
+  "$OPENCODE_COMMANDS_DIR/macroscope-review-pr.md" \
   "$OPENCODE_COMMANDS_DIR/local-review.md" \
   "$OPENCODE_COMMANDS_DIR/triage-pr-comments.md" \
   "$OPENCODE_COMMANDS_DIR/respond-to-pr-comments.md" \

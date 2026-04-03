@@ -1,6 +1,6 @@
 ---
 name: macroscope-local-review
-description: Explicit local Macroscope CLI review worker. Use this when the user explicitly asks for the local path, or when `/macroscope` delegates here.
+description: Explicit local Macroscope CLI review worker. Use this when the user explicitly asks for the local path or when `/macroscope` delegates here.
 ---
 
 Run a code review using the installed `macroscope` CLI, then triage streaming issues as they arrive. This is the default workflow behind `/macroscope`.
@@ -117,12 +117,10 @@ Maintain a seen-set of issue fingerprints so you only process newly surfaced fin
 
 Don't wait for the review to finish. As soon as issues appear in a poll response, start triaging and fixing new findings.
 
-<triage_rules>
 For each issue, read the affected file and evaluate whether the finding is legitimate. Classify each as:
 
 - **Valid**: The issue is real and should be fixed.
 - **False positive**: The reviewer misunderstood the code or the issue was already addressed elsewhere.
-</triage_rules>
 
 Assume many streamed issues will be false positives until you validate them against the actual code.
 

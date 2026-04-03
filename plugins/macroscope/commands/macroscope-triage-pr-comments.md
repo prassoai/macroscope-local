@@ -1,9 +1,9 @@
 ---
-name: triage-pr-comments
-description: Internal PR comment triage worker for the router's PR path
+name: macroscope-triage-pr-comments
+description: Explicit PR-comment triage worker for Macroscope-reviewed heads
 ---
 
-Investigate every unresolved review comment on the current branch's PR. This is the PR path used by the top-level Macroscope router only when Macroscope correctness review has already run for the current local `HEAD`.
+Investigate every unresolved review comment on the current branch's PR. Use this when the user explicitly asks for PR-comment triage, or when `/macroscope loop` reaches the PR-comment phase for a head that already has a successful Macroscope correctness check.
 
 Present both valid and believed-invalid findings for the user to review. Do not resolve, comment on, or modify anything. This command is read-only.
 
@@ -107,4 +107,4 @@ Only include this if `--reviewer-stats` is in the arguments.
 
 **D) Prompt for action**
 
-Ask: "Do you want me to run `/respond-to-pr-comments` for the believed valid comments now?"
+Ask: "Do you want me to run `/macroscope-respond-to-pr-comments` for the believed valid comments now?"

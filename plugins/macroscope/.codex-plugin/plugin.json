@@ -1,6 +1,6 @@
 {
   "name": "macroscope",
-  "version": "1.2.1",
+  "version": "1.3.0",
   "description": "Macroscope review workflows for Codex, Claude Code, Cursor, and OpenCode.",
   "author": {
     "name": "Prasso",
@@ -21,8 +21,8 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "Macroscope",
-    "shortDescription": "PR-aware review routing for local and PR workflows",
-    "longDescription": "Routes branches with open PRs to GitHub review-comment triage and branches without an open PR to a streaming local Macroscope CLI review that fixes valid findings.",
+    "shortDescription": "Local Macroscope review plus optional autopilot loop",
+    "longDescription": "Runs a streaming local Macroscope CLI review by default and supports an optional loop mode that pushes fixes, waits for correctness checks, and addresses PR comments until the branch is clean.",
     "developerName": "Prasso",
     "category": "Development",
     "capabilities": [
@@ -34,8 +34,8 @@
     "termsOfServiceURL": "https://github.com/prassoai/macroscope-local",
     "defaultPrompt": [
       "Review this branch with Macroscope.",
-      "Triage my PR comments.",
-      "Run a local review and fix valid issues."
+      "Run a local review and fix valid issues.",
+      "Run Macroscope loop until this branch is clean."
     ],
     "brandColor": "#0F766E",
     "composerIcon": "./assets/macroscope-small.svg",

@@ -1,11 +1,11 @@
 ---
-name: respond-to-pr-comments
-description: Internal follow-up worker for acting on a prior PR triage
+name: macroscope-respond-to-pr-comments
+description: Explicit PR-comment response worker for Macroscope
 ---
 
 Act on a prior PR triage assessment that the user has reviewed and confirmed. Handle invalid and valid findings in two phases: reject the invalid ones first, then fix the valid ones one at a time.
 
-This command requires a prior triage in the current conversation. If none exists, tell the user to run `/triage-pr-comments` first and stop.
+This command requires a prior triage in the current conversation. If none exists, tell the user to run `/macroscope-triage-pr-comments` first and stop.
 
 ## Steps
 
@@ -19,7 +19,7 @@ Review what the user said after the triage. If the user moved any items between 
 gh pr view --json number,title,url,headRefName
 ```
 
-Extract `{owner}/{repo}` from the URL. Re-fetch the review threads using the same GraphQL query from `/triage-pr-comments` Step 1 to get the Thread ID and Comment ID for each item. Match threads to triage findings by file path and line number.
+Extract `{owner}/{repo}` from the URL. Re-fetch the review threads using the same GraphQL query from `/macroscope-triage-pr-comments` Step 1 to get the Thread ID and Comment ID for each item. Match threads to triage findings by file path and line number.
 
 ### 3. Reject and resolve invalid items
 

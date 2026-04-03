@@ -1,14 +1,14 @@
 ---
-name: review-pr
-description: Specialized PR diff review worker. Use this only when the user explicitly asks for a PR or diff review and does not mention macroscope. If the user mentions macroscope, use the main macroscope router instead.
+name: macroscope-review-pr
+description: Explicit PR diff review worker for Macroscope. Use this only when the user explicitly asks for a PR or diff review instead of the local CLI review path.
 argument-hint: [PR number]
 ---
 
 Review the code changes in a PR for correctness, codebase pattern adherence, idiomatic style, and test coverage. Present findings to the user and offer to fix them.
 
-If the user mentions `macroscope`, do not use this skill first. Use the main `macroscope` router instead.
+If the user asks for Macroscope generally and does not explicitly ask for a PR diff review, use the main `macroscope` entrypoint instead.
 
-If a PR number is provided, review that PR. Otherwise, review the PR for the current branch.
+If a PR number was provided, review that PR. Otherwise, review the PR for the current branch.
 
 <accuracy_priority>
 A wrong finding wastes developer time; a missed issue lets a bug ship. Verify claims against the actual code before reporting.

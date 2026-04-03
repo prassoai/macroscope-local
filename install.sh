@@ -693,7 +693,7 @@ install_opencode_support() {
 
   cp "$plugin_file" "$opencode_plugins/macroscope.js"
 
-  for command_name in macroscope local-review triage-pr-comments respond-to-pr-comments review-pr; do
+  for command_name in macroscope macroscope-local-review macroscope-triage-pr-comments macroscope-respond-to-pr-comments macroscope-review-pr; do
     cp "$commands_src/$command_name.md" "$opencode_commands/$command_name.md"
   done
 
@@ -774,7 +774,7 @@ PY
     warn "Cursor plugin install did not produce the expected local plugin entry"
   fi
 
-  if [ -f "$HOME/.config/opencode/plugins/macroscope.js" ] && [ -f "$HOME/.config/opencode/commands/macroscope.md" ] && [ -f "$HOME/.config/opencode/skills/macroscope/SKILL.md" ]; then
+  if [ -f "$HOME/.config/opencode/plugins/macroscope.js" ] && [ -f "$HOME/.config/opencode/commands/macroscope.md" ] && [ -f "$HOME/.config/opencode/commands/macroscope-local-review.md" ] && [ -f "$HOME/.config/opencode/skills/macroscope/SKILL.md" ]; then
     success "OpenCode plugin, commands, and skills installed"
   else
     warn "OpenCode install did not produce the expected plugin, command, and skill files"
@@ -802,15 +802,16 @@ print_installation_completion() {
   printf "${BOLD}Quick start:${RESET}\n"
   printf "  ${CYAN}macroscope${RESET}                     ${DIM}# Launch the interactive wizard${RESET}\n"
   printf "  ${CYAN}macroscope codereview --base staging${RESET} ${DIM}# Run the CLI directly${RESET}\n"
-  printf "  ${CYAN}/macroscope${RESET}                  ${DIM}# Main router in Claude Code${RESET}\n"
-  printf "  ${CYAN}/macroscope:macroscope${RESET}      ${DIM}# Main router in Codex${RESET}\n"
-  printf "  ${CYAN}/macroscope:macroscope${RESET}      ${DIM}# Main router in Cursor${RESET}\n"
-  printf "  ${CYAN}/macroscope${RESET}                  ${DIM}# Main router in OpenCode${RESET}\n"
+  printf "  ${CYAN}/macroscope${RESET}                  ${DIM}# Local review in Claude Code or OpenCode${RESET}\n"
+  printf "  ${CYAN}/macroscope loop${RESET}             ${DIM}# Autopilot loop in Claude Code or OpenCode${RESET}\n"
+  printf "  ${CYAN}/macroscope:macroscope${RESET}      ${DIM}# Local review in Codex or Cursor${RESET}\n"
+  printf "  ${CYAN}/macroscope:macroscope loop${RESET} ${DIM}# Autopilot loop in Codex or Cursor${RESET}\n"
   echo ""
   printf "${BOLD}Notes:${RESET}\n"
   printf "  Restart Codex, Claude Code, Cursor, or OpenCode if they were already open.\n"
-  printf "  The review router first checks whether the current local HEAD already has a successful Macroscope correctness check.\n"
-  printf "  Otherwise it runs a local streaming CLI review and fixes valid issues.\n"
+  printf "  /macroscope now defaults to the local streaming CLI review path.\n"
+  printf "  /macroscope loop runs the full review-fix-push-re-review autopilot cycle.\n"
+  printf "  Local review validates each issue before acting and keeps poll sleeps capped at 60 seconds.\n"
   if [ "$CODEX_SHIM_INSTALLED" = "1" ]; then
     printf "  ${BOLD}codex${RESET} now points at the bundled Codex.app CLI so plugins work from the terminal.\n"
   elif [ -n "$CODEX_PLUGIN_HOST_WARNING" ]; then
