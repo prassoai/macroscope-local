@@ -263,6 +263,14 @@ copy_tree() {
   cp -R "$src" "$dst"
 }
 
+copy_claude_plugin_tree() {
+  local src="$1"
+  local dst="$2"
+
+  copy_tree "$src" "$dst"
+  rm -rf "$dst/commands" "$dst/.codex-plugin" "$dst/.cursor-plugin" "$dst/opencode"
+}
+
 seed_local_build_config_if_needed() {
   if [ -z "${MACROSCOPE_LOCAL_BACK_REPO:-}" ] && [ -z "${MACROSCOPE_LOCAL_BINARY_SOURCE:-}" ]; then
     return
@@ -550,8 +558,8 @@ install_claude_plugin() {
   mkdir -p "$marketplace_root"
   copy_tree "$marketplace_src" "$marketplace_root/.claude-plugin"
   mkdir -p "$marketplace_root/plugins"
-  copy_tree "$plugin_src" "$marketplace_root/plugins/macroscope"
-  copy_tree "$plugin_src" "$cache_dst"
+  copy_claude_plugin_tree "$plugin_src" "$marketplace_root/plugins/macroscope"
+  copy_claude_plugin_tree "$plugin_src" "$cache_dst"
 
   now="$(python3 - <<'PY'
 from datetime import datetime, timezone
@@ -821,7 +829,7 @@ launch_wizard() {
     return
   fi
 
-  if [ ! -t 0 ] || [ ! -t 1 ] || [ ! -e /dev/tty ]; then
+  if [ ! -e /dev/tty ] || [ ! -r /dev/tty ] || [ ! -w /dev/tty ]; then
     info "No TTY available; run 'macroscope' later to start the setup wizard."
     return
   fi
@@ -838,7 +846,7 @@ launch_wizard() {
 
   echo ""
   step "Launching Macroscope setup wizard..."
-  if ! "$bin_path" < /dev/tty; then
+  if ! "$bin_path" < /dev/tty > /dev/tty 2>&1; then
     warn "Wizard exited with a non-zero status. You can rerun it anytime with: macroscope"
   fi
 }

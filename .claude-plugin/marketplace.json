@@ -13,7 +13,7 @@
     {
       "name": "macroscope",
       "description": "PR-aware Macroscope review workflows.",
-      "version": "1.2.0",
+      "version": "1.2.1",
       "author": {
         "name": "Prasso",
         "url": "https://github.com/prassoai"
