@@ -1,9 +1,11 @@
 ---
 name: macroscope
-description: Route the current branch through the right Macroscope review workflow
+description: Primary entrypoint for this plugin. Use this whenever the user says "macroscope" or asks to review a branch with Macroscope
 ---
 
 Use this as the canonical Macroscope router.
+
+If the user mentions `macroscope` at all, start here unless they are explicitly asking for one of the narrower follow-up workers by name.
 
 This command chooses between two different workflows:
 

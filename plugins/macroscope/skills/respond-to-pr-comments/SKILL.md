@@ -1,6 +1,6 @@
 ---
 name: respond-to-pr-comments
-description: Rejects invalid PR comments and fixes valid ones based on a prior triage from the PR triage skill or the PR path of the top-level Macroscope router. Replies to each thread, resolves it, and fixes code for valid findings.
+description: Internal follow-up worker for acting on a prior PR triage. Reject invalid PR comments and fix valid ones only after a triage already exists in the conversation or the user explicitly asks for this step.
 ---
 
 Act on a prior PR triage assessment that the user has reviewed and confirmed. Handle invalid and valid findings in two phases: reject the invalid ones first, then fix the valid ones one at a time.

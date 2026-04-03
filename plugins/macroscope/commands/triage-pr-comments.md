@@ -1,6 +1,6 @@
 ---
 name: triage-pr-comments
-description: Triage unresolved PR review comments on the current branch
+description: Internal PR comment triage worker for the router's PR path
 ---
 
 Investigate every unresolved review comment on the current branch's PR. This is the PR path used by the top-level Macroscope router only when Macroscope correctness review has already run for the current local `HEAD`.

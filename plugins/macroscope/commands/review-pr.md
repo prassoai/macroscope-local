@@ -1,9 +1,11 @@
 ---
 name: review-pr
-description: Review a pull request for correctness, codebase patterns, and missing coverage
+description: Specialized PR diff review worker. Use this only when the user explicitly asks for a PR or diff review and does not mention macroscope
 ---
 
 Review the code changes in a PR for correctness, codebase pattern adherence, idiomatic style, and test coverage. Present findings to the user and offer to fix them.
+
+If the user mentions `macroscope`, use `/macroscope` instead of this command.
 
 If a PR number is provided, review that PR. Otherwise, review the PR for the current branch.
 

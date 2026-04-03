@@ -1,6 +1,6 @@
 ---
 name: local-review
-description: Run a local Macroscope review, triage findings, and fix the valid ones
+description: Internal local CLI review worker for the router's CLI path
 ---
 
 Run a code review using the installed `macroscope` CLI, then triage streaming issues as they arrive. This is the local path for the top-level Macroscope router whenever Macroscope correctness review has not already run for the current local `HEAD`.

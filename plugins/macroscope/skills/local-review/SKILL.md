@@ -1,9 +1,9 @@
 ---
 name: local-review
-description: Run a local Macroscope review with the installed CLI, triage streaming findings, fix the valid ones, and report only the issues you addressed.
+description: Internal local CLI review worker. Use this only after the main router determines correctness review has not already run for the current local HEAD, or when the user explicitly asks for the local CLI path.
 ---
 
-Run a code review using the installed `macroscope` CLI, then triage streaming issues as they arrive. This is the local path for the top-level Macroscope router (`/macroscope` in Claude Code, `/macroscope:macroscope` in Codex) whenever Macroscope correctness review has not already run for the current local `HEAD`.
+Run a code review using the installed `macroscope` CLI, then triage streaming issues as they arrive. This is the local path used after the main router chooses the CLI workflow for the current local `HEAD`.
 
 This workflow is **closed-loop**:
 

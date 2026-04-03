@@ -1,9 +1,11 @@
 ---
 name: macroscope
-description: Main Macroscope entrypoint. First check whether Macroscope correctness review already ran for the current local HEAD. If it did, triage unresolved PR comments. If it did not, run a local Macroscope review, triage streaming findings, fix the valid ones, and report what was addressed.
+description: Primary entrypoint for this plugin. Use this whenever the user says "macroscope", asks to "use macroscope", or asks to review a branch with Macroscope. First check whether correctness review already ran for the current local HEAD. If it did, triage unresolved PR comments. If it did not, run the local CLI review, fix valid findings, and report what was addressed.
 ---
 
 Use this as the canonical Macroscope router.
+
+If the user mentions `macroscope` at all, start here unless they are explicitly asking for one of the narrower follow-up workers by name.
 
 In Claude Code, this skill is `/macroscope`.
 

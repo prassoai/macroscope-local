@@ -1,10 +1,12 @@
 ---
 name: review-pr
-description: Reviews a PR's code changes for correctness, codebase pattern adherence, idiomatic style, and test coverage. Use when the user says "review PR", "review this PR", "review this branch", or specifies a PR number.
+description: Specialized PR diff review worker. Use this only when the user explicitly asks for a PR or diff review and does not mention macroscope. If the user mentions macroscope, use the main macroscope router instead.
 argument-hint: [PR number]
 ---
 
 Review the code changes in a PR for correctness, codebase pattern adherence, idiomatic style, and test coverage. Present findings to the user and offer to fix them.
+
+If the user mentions `macroscope`, do not use this skill first. Use the main `macroscope` router instead.
 
 If a PR number is provided, review that PR. Otherwise, review the PR for the current branch.
 

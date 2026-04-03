@@ -1,6 +1,6 @@
 ---
 name: respond-to-pr-comments
-description: Reject invalid PR comments and fix the valid ones
+description: Internal follow-up worker for acting on a prior PR triage
 ---
 
 Act on a prior PR triage assessment that the user has reviewed and confirmed. Handle invalid and valid findings in two phases: reject the invalid ones first, then fix the valid ones one at a time.

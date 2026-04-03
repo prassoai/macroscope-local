@@ -1,9 +1,9 @@
 ---
 name: triage-pr-comments
-description: Investigates unresolved PR review comments on the current branch's PR and presents findings for user review. Does not take any action. Use --reviewer-stats to include per-reviewer hit rates.
+description: Internal PR comment triage worker. Use this only after the main router determines correctness review already ran for the current local HEAD, or when the user explicitly asks to triage unresolved PR review comments. Does not take any action. Use --reviewer-stats to include per-reviewer hit rates.
 ---
 
-Investigate every unresolved review comment on the current branch's PR. This is the PR path used by the top-level Macroscope router (`/macroscope` in Claude Code, `/macroscope:macroscope` in Codex) only when Macroscope correctness review has already run for the current local `HEAD`.
+Investigate every unresolved review comment on the current branch's PR. This is the PR path used after the main router chooses comment triage for the current local `HEAD`.
 
 Present both valid and believed-invalid findings for the user to review. Do not resolve, comment on, or modify anything. This skill is read-only.
 
