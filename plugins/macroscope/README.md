@@ -2,6 +2,14 @@
 
 Packaged review workflows for Codex, Claude Code, Cursor, and OpenCode.
 
+The canonical Macroscope skill instructions live in the `back` repo. The files under `plugins/macroscope/skills/` in this repo are the packaged copies used for plugin installation.
+
+When the workflow logic changes, update `back` first, then refresh this packaged copy with:
+
+```bash
+scripts/sync-back-skills.sh /path/to/back-worktree
+```
+
 The primary entrypoint is:
 
 ```text

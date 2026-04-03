@@ -246,6 +246,19 @@ fetch_plugin_bundle() {
     exit 1
   fi
 
+  if [ -n "${MACROSCOPE_LOCAL_BACK_REPO:-}" ]; then
+    local sync_script="$CHECKOUT_DIR/scripts/sync-back-skills.sh"
+    if [ ! -f "$sync_script" ]; then
+      error "Expected packaged skill sync script at $sync_script"
+      exit 1
+    fi
+    if ! bash "$sync_script" "$MACROSCOPE_LOCAL_BACK_REPO" "$CHECKOUT_DIR" >/dev/null; then
+      error "Failed to sync packaged skills from ${MACROSCOPE_LOCAL_BACK_REPO}"
+      exit 1
+    fi
+    success "Synced packaged skills from ${BOLD}${MACROSCOPE_LOCAL_BACK_REPO}${RESET}"
+  fi
+
   PLUGIN_VERSION="$(python3 - "$CHECKOUT_DIR/plugins/macroscope/.claude-plugin/plugin.json" <<'PY'
 import json, sys
 with open(sys.argv[1], "r", encoding="utf-8") as f:
