@@ -25,4 +25,4 @@ fi
 
 cp "$BACK_SKILL" "$PLUGIN_SKILL"
 
-echo "Synced packaged skills from $BACK_REPO"
+echo "Overlaid the public plugin skill from $BACK_REPO"

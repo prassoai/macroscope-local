@@ -32,7 +32,7 @@ Loop behavior:
 Treat the first argument as the mode selector:
 
 - If it is exactly `loop`, run the autopilot flow from Step 6.
-- Otherwise, run the default local-review flow from Steps 2 through 5.
+- Otherwise, run the default local CLI review flow from Steps 2 through 5.
 
 ### 2. Detect the local review scope
 
@@ -49,7 +49,7 @@ git merge-base --is-ancestor HEAD origin/staging && echo "ON_STAGING" || echo "F
 
 If the host supports sub-agents, delegated workers, or background agents, open one here.
 
-That worker owns the full local-review lifecycle:
+That worker owns the full review lifecycle:
 
 **start review -> extract review_id -> poll -> narrate -> validate -> reject/confirm -> fix -> verify**
 
@@ -134,7 +134,7 @@ When you report back in the default mode:
 - List only the issues you actually addressed.
 - Summarize the concrete fix for each addressed issue.
 - Include the verification you ran.
-- Omit rejected findings, ignored findings, and internal triage counts.
+- Omit rejected findings and findings you took no action on.
 
 Do not commit or push in the default mode.
 

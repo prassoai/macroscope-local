@@ -2,13 +2,7 @@
 
 Packaged Macroscope plugin files for Codex, Claude Code, Cursor, and OpenCode.
 
-The public Macroscope skill instructions live in the `back` repo under `tools/cmd/macrodaemon/public-plugin/`. The file under `plugins/macroscope/skills/macroscope/` in this repo is the packaged copy used for plugin installation.
-
-When the public workflow logic changes, update `back` first, then refresh this packaged copy with:
-
-```bash
-scripts/sync-back-skills.sh /path/to/back-worktree
-```
+The public Macroscope skill instructions live in the `back` repo under `tools/cmd/macrodaemon/public-plugin/`. The file under `plugins/macroscope/skills/macroscope/` in this repo is the packaged release copy used for plugin installation.
 
 The primary entrypoint is:
 
@@ -47,3 +41,9 @@ curl -sSL https://raw.githubusercontent.com/prassoai/macroscope-local/main/insta
 ```
 
 For Codex terminal sessions, the installer will automatically prefer the newer Codex.app CLI when the `codex` command on your PATH is too old to load local plugins.
+
+For local previews of unpublished plugin-skill changes from `back`, install with:
+
+```bash
+MACROSCOPE_LOCAL_BACK_REPO=/path/to/back-worktree ./install.sh
+```
