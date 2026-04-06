@@ -827,7 +827,7 @@ print_installation_completion() {
   echo ""
   printf "${BOLD}Quick start:${RESET}\n"
   printf "  ${CYAN}macroscope${RESET}                     ${DIM}# Launch the interactive wizard${RESET}\n"
-  printf "  ${CYAN}macroscope codereview --base staging${RESET} ${DIM}# Run the CLI directly${RESET}\n"
+  printf "  ${CYAN}macroscope codereview --base <base_branch>${RESET} ${DIM}# Run the CLI directly${RESET}\n"
   printf "  ${CYAN}/macroscope${RESET}                  ${DIM}# Local review in Claude Code or OpenCode${RESET}\n"
   printf "  ${CYAN}/macroscope loop${RESET}             ${DIM}# Autopilot loop in Claude Code or OpenCode${RESET}\n"
   printf "  ${CYAN}/macroscope:macroscope${RESET}      ${DIM}# Local review in Codex or Cursor${RESET}\n"

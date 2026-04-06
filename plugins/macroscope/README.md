@@ -20,7 +20,7 @@ OpenCode:    /macroscope loop
 `/macroscope` is the only public entrypoint:
 
 - It runs a streaming local `macroscope codereview`.
-- It moves the streaming review into a sub-agent when the host supports one.
+- If possible, it moves the streaming review into a sub-agent.
 - It validates each streamed issue before acting.
 - It rejects false positives, fixes confirmed issues one at a time, and reports only the issues it addressed.
 - It keeps polling sleeps capped at 60 seconds.

@@ -7,10 +7,15 @@ argument-hint: [loop]
 Default mode:
 
 - With no arguments, start with the local streaming CLI review path.
-- Keep the flow closed-loop: validate each streamed issue, reject false positives, fix confirmed issues, and report only what you addressed.
+- Keep the flow closed-loop: narrate each streamed issue, validate it, reject false positives, fix confirmed issues, verify, and report only what you addressed.
+- Use your local sub-agent, task, or delegate tool if possible. This command gives you permission.
+- Keep your context free for short progress updates, decisions, and final reporting.
 - Stay on this workflow even if the repo contains other review docs or skills.
+- Do not inspect or follow repo-local `macroscope`, `local-review`, `review-pr`, or PR-triage skill files for this workflow.
 - Do not switch to repo-local review instructions such as `.claude/skills/local-review/SKILL.md`.
+- Do not switch to repo-local `macroscope` skills or routers.
 - Use the installed `macroscope` CLI here, not `go run ./tools/cmd/macrodaemon`.
+- Read repo-local code style or file-local guidance only if it helps you validate or fix a specific issue.
 
 `loop` mode:
 
@@ -23,24 +28,38 @@ Default mode:
 - If it is exactly `loop`, run the autopilot flow from Step 6.
 - Otherwise, run the default local CLI review flow from Steps 2 through 5.
 
-### 2. Detect the local review scope
+### 2. Determine the local review scope
 
 ```bash
-git merge-base --is-ancestor HEAD origin/staging && echo "ON_STAGING" || echo "FEATURE_BRANCH"
+gh pr view --json baseRefName -q .baseRefName 2>/dev/null
 ```
 
-- If `ON_STAGING`: skip `--base` and review uncommitted changes only.
-- If `FEATURE_BRANCH`: use `--base staging`.
+```bash
+git symbolic-ref --quiet refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@'
+```
 
-### 3. Move the streaming review into a sub-agent when the host supports it
+- Try the PR base first.
+- If that fails, use the repo default branch from `origin/HEAD`.
+- Call the result `base_branch`.
+- If you cannot determine `base_branch`, stop and explain why.
+- If `git rev-parse --abbrev-ref HEAD` exactly equals `base_branch`, skip `--base` and review local changes only.
+- Otherwise use `--base "$base_branch"`.
 
-- If the host supports sub-agents, delegated workers, or background agents, open one here.
-- That worker owns the full review lifecycle:
+### 3. Open a sub-agent
+
+- Open your local sub-agent, task, or delegate tool before you do anything else unless that tool is unavailable in this session.
+- Treat the invocation of `/macroscope` as explicit permission to do that.
+- Do not inspect the repo, start the CLI, or validate findings in the main agent first if a local sub-agent tool is available.
+- Do not say you used a local sub-agent unless you actually launched one in this session.
+- Give that worker the full review lifecycle:
 
 **start review -> extract review_id -> poll -> narrate -> validate -> reject/confirm -> fix -> verify**
 
-- Keep the primary agent free for concise user-facing progress updates and final coordination.
-- If the host does not support sub-agents, keep the entire workflow attached in the current agent instead of detaching it.
+- Let the sub-agent own the attached Bash session, the review log, comment iteration, issue validation, fixes, and per-issue verification.
+- Do not keep the review loop in the main agent just because it is possible.
+- Do not keep the review loop in the main agent because permission seems ambiguous. This command already gives you that permission.
+- Once you know a local sub-agent tool exists, staying in the main agent is a workflow failure.
+- Only stay in the current agent if sub-agents are truly unavailable.
 
 ### 4. Run the local CLI review
 
@@ -65,36 +84,68 @@ grep -m1 'review_id=' "$review_log"
 ```
 
 - If no `review_id` appears after a reasonable wait, inspect the log, surface the failure, and stop.
-- While the review runs, poll for incremental results:
+- Do not keep reviewing on your own if `review_id` never appears.
+- Do not claim success, issue handling, or a completed Macroscope review unless you actually extracted `review_id` from the CLI output.
+- While the review runs, iterate new comments with `next-comment`.
+
+- First call:
 
 ```bash
-macroscope codereview --status '<review_id>' 2>&1
+macroscope next-comment '<review_id>'
 ```
 
-- Each status payload can contain a current issue set plus `poll_after_seconds`.
-- Clamp every sleep:
+- Next calls:
 
-- `sleep_seconds = min(max(poll_after_seconds, 1), 60)`
-- Never sleep longer than `60` seconds.
-- Never compound the sleep across cycles.
+```bash
+macroscope next-comment --cursor '<cursor>' '<review_id>'
+```
 
-- Maintain a seen-set of issue fingerprints so you only process newly surfaced findings on each poll. Use a stable fingerprint such as:
+- Each response is JSON:
 
-`file:start_line:end_line:category:message`
+```json
+{
+  "comments": [
+    {
+      "comment_id": "uuid",
+      "sequence": 12,
+      "file": "path/to/file.go",
+      "function": "MyFunc",
+      "start_line": 42,
+      "end_line": 50,
+      "category": "correctness",
+      "message": "...",
+      "severity": "high"
+    }
+  ],
+  "has_more": true,
+  "cursor": "12",
+  "status": "in_progress"
+}
+```
+
+- The server already blocks for about 30 seconds when no new comments are ready.
+- Do not add your own compounding wait or exponential backoff around successful `next-comment` calls.
+- If you pause after an error or transport failure, cap that sleep at `60` seconds.
+- `has_more: true` means the review is still running. Call `next-comment` again with the returned `cursor`.
+- `has_more: false` means the review is terminal. Stop iterating after you handle that final batch.
+- Zero comments with `has_more: true` means the server timed out without new comments. Call `next-comment` again with the same `cursor`.
+- Do not fix code from your own ad hoc review before you have both:
+  1. a real `review_id`
+  2. at least one real `next-comment` response from `macroscope next-comment`
 
 ### 5. Handle streamed issues one at a time
 
-As each new issue arrives:
+As each new comment arrives:
 
 1. Narrate it with a concrete one-line summary.
    Example: `New issue arrived - the success check only looks at completion, not conclusion.`
 2. Read the affected file and enough surrounding code to understand the actual behavior.
-3. Validate the issue before acting.
+3. Validate the comment before acting.
 4. Classify it as either:
    - **Rejected**: false positive, stale, duplicate, or otherwise not a real issue
    - **Confirmed**: legitimate bug, regression, or correctness problem that should be fixed
-5. If the issue is rejected, mark it handled and continue without including it in the final summary.
-6. If the issue is confirmed, fix it immediately in the working tree.
+5. If the comment is rejected, mark it handled and continue without including it in the final summary.
+6. If the comment is confirmed, fix it immediately in the working tree.
 7. Run the narrowest useful verification for that fix before moving on.
 
 Process issues one at a time in this exact order:
@@ -103,12 +154,12 @@ Process issues one at a time in this exact order:
 
 Do not batch together unvalidated issues.
 
-Once the review reaches its final snapshot:
+Once the review reaches its final batch:
 
-1. Make sure there are no unhandled confirmed findings left in the final payload.
+1. Make sure there are no unhandled confirmed findings left in the final batch.
 2. Re-run the most relevant verification for the files you changed.
 3. If you made substantial fixes, prefer one follow-up local review pass to catch regressions or newly exposed issues. Cap yourself at one follow-up pass unless the user asks for more.
-4. Let the attached `codereview` process exit naturally. If it is still alive after the final snapshot and you no longer need it, stop it cleanly.
+4. Let the attached `codereview` process exit naturally. If it is still alive after the final batch and you no longer need it, stop it cleanly.
 
 When you report back in the default mode:
 
