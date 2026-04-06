@@ -219,6 +219,8 @@ fetch_plugin_bundle() {
 
   local repo_url="https://github.com/prassoai/macroscope-local.git"
   CHECKOUT_DIR="$TMP_DIR/macroscope-local"
+  local bundle_url=""
+  local bundle_archive="$TMP_DIR/macroscope-plugin-bundle.tar.gz"
 
   if [ -n "${MACROSCOPE_PLUGIN_BUNDLE_SOURCE:-}" ]; then
     if [ -d "${MACROSCOPE_PLUGIN_BUNDLE_SOURCE}" ]; then
@@ -228,16 +230,32 @@ fetch_plugin_bundle() {
       git clone --depth 1 "${MACROSCOPE_PLUGIN_BUNDLE_SOURCE}" "$CHECKOUT_DIR" >/dev/null 2>&1
       success "Fetched plugin bundle from ${BOLD}${MACROSCOPE_PLUGIN_BUNDLE_SOURCE}${RESET}"
     fi
-  elif [ "$INSTALL_VERSION" = "latest" ]; then
-    git clone --depth 1 "$repo_url" "$CHECKOUT_DIR" >/dev/null 2>&1
-    success "Fetched latest plugin bundle from ${BOLD}main${RESET}"
   else
-    if git clone --depth 1 --branch "$INSTALL_VERSION" "$repo_url" "$CHECKOUT_DIR" >/dev/null 2>&1; then
-      success "Fetched plugin bundle for ${BOLD}${INSTALL_VERSION}${RESET}"
+    if [ "$INSTALL_VERSION" = "latest" ]; then
+      bundle_url="https://github.com/prassoai/macroscope-local/releases/latest/download/macroscope-plugin-bundle.tar.gz"
     else
-      warn "Could not fetch plugin bundle at ref '${INSTALL_VERSION}'. Falling back to the default branch for plugin files."
+      bundle_url="https://github.com/prassoai/macroscope-local/releases/download/${INSTALL_VERSION}/macroscope-plugin-bundle.tar.gz"
+    fi
+
+    info "Downloading plugin bundle from: ${DIM}${bundle_url}${RESET}"
+
+    mkdir -p "$CHECKOUT_DIR"
+    if curl -fL --progress-bar "$bundle_url" -o "$bundle_archive"; then
+      tar -xzf "$bundle_archive" -C "$CHECKOUT_DIR"
+      success "Fetched plugin bundle from ${BOLD}${INSTALL_VERSION}${RESET}"
+    elif [ "$INSTALL_VERSION" = "latest" ]; then
+      warn "Could not download a released plugin bundle. Falling back to the default branch for plugin files."
       git clone --depth 1 "$repo_url" "$CHECKOUT_DIR" >/dev/null 2>&1
       success "Fetched fallback plugin bundle from ${BOLD}main${RESET}"
+    else
+      warn "Could not download a released plugin bundle for '${INSTALL_VERSION}'. Falling back to the repo ref for plugin files."
+      if git clone --depth 1 --branch "$INSTALL_VERSION" "$repo_url" "$CHECKOUT_DIR" >/dev/null 2>&1; then
+        success "Fetched fallback plugin bundle for ${BOLD}${INSTALL_VERSION}${RESET}"
+      else
+        warn "Could not fetch plugin bundle at ref '${INSTALL_VERSION}'. Falling back to the default branch for plugin files."
+        git clone --depth 1 "$repo_url" "$CHECKOUT_DIR" >/dev/null 2>&1
+        success "Fetched fallback plugin bundle from ${BOLD}main${RESET}"
+      fi
     fi
   fi
 
@@ -706,13 +724,8 @@ install_opencode_support() {
 
   cp "$plugin_file" "$opencode_plugins/macroscope.js"
 
-  for command_name in macroscope macroscope-local-review macroscope-triage-pr-comments macroscope-respond-to-pr-comments macroscope-review-pr; do
-    cp "$commands_src/$command_name.md" "$opencode_commands/$command_name.md"
-  done
-
-  for skill_name in macroscope local-review triage-pr-comments respond-to-pr-comments review-pr; do
-    copy_tree "$skills_src/$skill_name" "$opencode_skills/$skill_name"
-  done
+  cp "$commands_src/macroscope.md" "$opencode_commands/macroscope.md"
+  copy_tree "$skills_src/macroscope" "$opencode_skills/macroscope"
 
   success "Installed OpenCode plugin to ${BOLD}${opencode_plugins}/macroscope.js${RESET}"
   success "Installed OpenCode commands to ${BOLD}${opencode_commands}${RESET}"
@@ -787,7 +800,7 @@ PY
     warn "Cursor plugin install did not produce the expected local plugin entry"
   fi
 
-  if [ -f "$HOME/.config/opencode/plugins/macroscope.js" ] && [ -f "$HOME/.config/opencode/commands/macroscope.md" ] && [ -f "$HOME/.config/opencode/commands/macroscope-local-review.md" ] && [ -f "$HOME/.config/opencode/skills/macroscope/SKILL.md" ]; then
+  if [ -f "$HOME/.config/opencode/plugins/macroscope.js" ] && [ -f "$HOME/.config/opencode/commands/macroscope.md" ] && [ -f "$HOME/.config/opencode/skills/macroscope/SKILL.md" ]; then
     success "OpenCode plugin, commands, and skills installed"
   else
     warn "OpenCode install did not produce the expected plugin, command, and skill files"

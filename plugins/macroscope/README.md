@@ -1,10 +1,10 @@
 # macroscope plugin
 
-Packaged review workflows for Codex, Claude Code, Cursor, and OpenCode.
+Packaged Macroscope plugin files for Codex, Claude Code, Cursor, and OpenCode.
 
-The canonical Macroscope skill instructions live in the `back` repo. The files under `plugins/macroscope/skills/` in this repo are the packaged copies used for plugin installation.
+The public Macroscope skill instructions live in the `back` repo under `tools/cmd/macrodaemon/public-plugin/`. The file under `plugins/macroscope/skills/macroscope/` in this repo is the packaged copy used for plugin installation.
 
-When the workflow logic changes, update `back` first, then refresh this packaged copy with:
+When the public workflow logic changes, update `back` first, then refresh this packaged copy with:
 
 ```bash
 scripts/sync-back-skills.sh /path/to/back-worktree
@@ -23,11 +23,12 @@ OpenCode:    /macroscope
 OpenCode:    /macroscope loop
 ```
 
-`/macroscope` now defaults to the local CLI review path:
+`/macroscope` is the only public entrypoint:
 
 - It runs a streaming local `macroscope codereview`.
+- It moves the streaming review into a sub-agent when the host supports one.
 - It validates each streamed issue before acting.
-- It fixes only the valid findings and reports only the issues it addressed.
+- It rejects false positives, fixes confirmed issues one at a time, and reports only the issues it addressed.
 - It keeps polling sleeps capped at 60 seconds.
 
 `/macroscope loop` is the autopilot path:
@@ -46,12 +47,3 @@ curl -sSL https://raw.githubusercontent.com/prassoai/macroscope-local/main/insta
 ```
 
 For Codex terminal sessions, the installer will automatically prefer the newer Codex.app CLI when the `codex` command on your PATH is too old to load local plugins.
-
-The explicit worker entrypoints are also installed:
-
-```text
-Claude Code: /macroscope-local-review, /macroscope-triage-pr-comments, /macroscope-respond-to-pr-comments, /macroscope-review-pr
-Codex:       /macroscope:macroscope-local-review, /macroscope:macroscope-triage-pr-comments, /macroscope:macroscope-respond-to-pr-comments, /macroscope:macroscope-review-pr
-Cursor:      /macroscope:macroscope-local-review, /macroscope:macroscope-triage-pr-comments, /macroscope:macroscope-respond-to-pr-comments, /macroscope:macroscope-review-pr
-OpenCode:    /macroscope-local-review, /macroscope-triage-pr-comments, /macroscope-respond-to-pr-comments, /macroscope-review-pr
-```

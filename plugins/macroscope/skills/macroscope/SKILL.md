@@ -1,12 +1,10 @@
 ---
 name: macroscope
-description: Main Macroscope entrypoint. `/macroscope` runs the local CLI review path by default. `/macroscope loop` runs the full review-fix-push-re-review autopilot cycle until there is nothing left to address.
+description: Main Macroscope entrypoint. `/macroscope` runs the local CLI review path by default. `/macroscope loop` runs the full review-fix-push-re-review cycle until the branch is clean.
 argument-hint: [loop]
 ---
 
-Use this as the canonical Macroscope entrypoint.
-
-If the user mentions `macroscope` at all, start here unless they are explicitly asking for one of the narrower follow-up workers by name.
+Use this as the single public Macroscope skill.
 
 Invocation:
 
@@ -19,13 +17,13 @@ Invocation:
 
 Default behavior:
 
-- With no arguments, run the local CLI review workflow immediately.
-- Do **not** skip straight to PR comment triage just because there is an open PR or a successful check.
-- The explicit PR workers are `macroscope-triage-pr-comments`, `macroscope-respond-to-pr-comments`, and `macroscope-review-pr`.
+- With no arguments, always start with the local streaming CLI review path.
+- Do not route directly to PR comments just because an open PR exists.
+- Keep the default mode closed-loop: validate streamed issues, fix the real ones, ignore the false positives, and report only what you addressed.
 
 Loop behavior:
 
-- If the first argument is `loop`, run the autopilot cycle in this skill instead of the default local-review path.
+- If the first argument is `loop`, keep iterating through local review, push, remote correctness review, and PR-comment handling until there is nothing left to address or you hit a hard stop.
 
 ## Steps
 
@@ -33,29 +31,122 @@ Loop behavior:
 
 Treat the first argument as the mode selector:
 
-- If it is exactly `loop`, run the autopilot flow from Step 3.
-- Otherwise, run the default local-review flow from Step 2.
+- If it is exactly `loop`, run the autopilot flow from Step 6.
+- Otherwise, run the default local-review flow from Steps 2 through 5.
 
-### 2. Default to the local CLI review workflow
+### 2. Detect the local review scope
 
-With no arguments, this command should behave like the local-review worker:
+Auto-detect whether you are on a feature branch so the review covers all local changes, including uncommitted edits:
 
-1. Open `../macroscope-local-review/SKILL.md`.
-2. Follow that workflow exactly.
-3. Report only the issues you addressed.
-4. Do **not** commit or push in this default mode.
+```bash
+git merge-base --is-ancestor HEAD origin/staging && echo "ON_STAGING" || echo "FEATURE_BRANCH"
+```
 
-### 3. `loop` mode: full autopilot
+- If `ON_STAGING`: skip `--base` and review uncommitted changes only.
+- If `FEATURE_BRANCH`: use `--base staging`.
 
-Use this mode for the full iterative cycle:
+### 3. Move the streaming review into a sub-agent when the host supports it
 
-**review -> fix -> push -> wait for Macroscope correctness check -> triage PR comments -> fix -> push -> repeat**
+If the host supports sub-agents, delegated workers, or background agents, open one here.
 
-This mode is allowed to commit and push. Stay in the loop until there is nothing left to address or you hit a hard stop.
+That worker owns the full local-review lifecycle:
 
-#### 3a. Establish the loop state
+**start review -> extract review_id -> poll -> narrate -> validate -> reject/confirm -> fix -> verify**
 
-At the start:
+Keep the primary agent free for concise user-facing progress updates and final coordination.
+
+If the host does not support sub-agents, keep the entire workflow attached in the current agent instead of detaching it.
+
+### 4. Run the local CLI review
+
+The `codereview` command is blocking. Keep it in an attached session for the full lifetime of the review.
+
+Do not use `nohup`, shell `&`, or any other detached background process that can lose the tool-call loop.
+
+Before launch, allocate a unique log file for this run so concurrent sessions do not clobber one another:
+
+```bash
+review_log="$(mktemp /tmp/macroscope-review.XXXXXX.log)"
+```
+
+Start the review:
+
+```bash
+macroscope codereview --base <base_branch> 2>&1 | tee "$review_log"
+```
+
+Wait for the review to emit a `review_id`, then extract it:
+
+```bash
+grep -m1 'review_id=' "$review_log"
+```
+
+If no `review_id` appears after a reasonable wait, inspect the log, surface the failure, and stop.
+
+While the review runs, poll for incremental results:
+
+```bash
+macroscope codereview --status '<review_id>' 2>&1
+```
+
+Each status payload can contain a current issue set plus `poll_after_seconds`.
+
+Clamp every sleep:
+
+- `sleep_seconds = min(max(poll_after_seconds, 1), 60)`
+- Never sleep longer than `60` seconds.
+- Never compound the sleep across cycles.
+
+Maintain a seen-set of issue fingerprints so you only process newly surfaced findings on each poll. Use a stable fingerprint such as:
+
+`file:start_line:end_line:category:message`
+
+### 5. Handle streamed issues one at a time
+
+As each new issue arrives:
+
+1. Narrate it with a concrete one-line summary.
+   Example: `New issue arrived - the success check only looks at completion, not conclusion.`
+2. Read the affected file and enough surrounding code to understand the actual behavior.
+3. Validate the issue before acting.
+4. Classify it as either:
+   - **Rejected**: false positive, stale, duplicate, or otherwise not a real issue
+   - **Confirmed**: legitimate bug, regression, or correctness problem that should be fixed
+5. If the issue is rejected, mark it handled and continue without including it in the final summary.
+6. If the issue is confirmed, fix it immediately in the working tree.
+7. Run the narrowest useful verification for that fix before moving on.
+
+Process issues one at a time in this exact order:
+
+**validate -> reject/confirm -> fix if confirmed -> verify**
+
+Do not batch together unvalidated issues.
+
+Once the review reaches its final snapshot:
+
+1. Make sure there are no unhandled confirmed findings left in the final payload.
+2. Re-run the most relevant verification for the files you changed.
+3. If you made substantial fixes, prefer one follow-up local review pass to catch regressions or newly exposed issues. Cap yourself at one follow-up pass unless the user asks for more.
+4. Let the attached `codereview` process exit naturally. If it is still alive after the final snapshot and you no longer need it, stop it cleanly.
+
+When you report back in the default mode:
+
+- List only the issues you actually addressed.
+- Summarize the concrete fix for each addressed issue.
+- Include the verification you ran.
+- Omit rejected findings, ignored findings, and internal triage counts.
+
+Do not commit or push in the default mode.
+
+### 6. `loop` mode: full autopilot
+
+In `loop` mode, run the full cycle:
+
+**local review -> fix -> verify -> commit -> push -> wait for correctness check -> handle PR comments -> repeat**
+
+This mode is allowed to commit and push.
+
+At the start of `loop` mode:
 
 1. Capture the current branch name and `HEAD`.
 2. Determine whether the branch has an open PR:
@@ -64,26 +155,18 @@ At the start:
 gh pr view --json number,title,url,headRefOid,statusCheckRollup 2>/dev/null
 ```
 
-3. Keep an iteration counter and cap the loop at **5** iterations so you do not spin forever.
+3. Keep an iteration counter and cap the loop at **5** iterations.
 
-#### 3b. Run the local-review worker first
+Each iteration starts with the local CLI review flow from Steps 2 through 5.
 
-Each iteration starts with the local CLI review path:
-
-1. Open `../macroscope-local-review/SKILL.md`.
-2. Follow it exactly.
-3. Record whether it actually changed code.
-
-If the local-review worker made changes:
+If the local review changed code:
 
 1. Re-run the most relevant verification.
 2. Commit the fixes intentionally.
 3. Push the branch.
 4. Refresh the current `HEAD`.
 
-#### 3c. Wait for Macroscope correctness review on the current HEAD
-
-After every push in loop mode, wait for the current pushed `HEAD` to receive a successful Macroscope correctness check before using the PR-comment workers.
+After every push, wait for the current `HEAD` to receive a successful Macroscope correctness review before acting on PR comments.
 
 Poll:
 
@@ -91,51 +174,34 @@ Poll:
 gh pr view --json number,title,url,headRefOid,statusCheckRollup 2>/dev/null
 ```
 
-Treat the check as ready only when all of these are true for the current local `HEAD`:
+Treat the check as ready only when all of these are true:
 
 1. `gh pr view` succeeds.
 2. `headRefOid` exactly matches the current local `HEAD`.
-3. `statusCheckRollup` contains a GitHub check run named `Macroscope - Correctness Check`.
+3. `statusCheckRollup` contains a check run named `Macroscope - Correctness Check`.
    For compatibility, also accept `Review for correctness`.
 4. That check has `status == "COMPLETED"`, `conclusion == "SUCCESS"`, and a non-null `completedAt`.
 
-Use a simple polling cadence:
+Once the current `HEAD` has a successful correctness review:
 
-- If the host or workflow gives you a suggested sleep, clamp it to `60` seconds max.
-- Never compound the sleep across cycles.
-- Default to `30` seconds when no better signal is available.
+1. Fetch unresolved review threads on the PR.
+2. Focus on comments attributable to the Macroscope correctness review for the current `HEAD`.
+3. Validate each unresolved comment before acting.
+4. If a comment is invalid, reply briefly, reject it, and resolve the thread.
+5. If a comment is valid, fix it, verify the fix, reply with what changed, and resolve the thread.
 
-If the check finishes with a non-success conclusion, stop the loop and tell the user the remote review failed instead of guessing.
-
-#### 3d. Triage and respond to PR comments for the current successful HEAD
-
-Once the current `HEAD` has a successful Macroscope correctness check:
-
-1. Open `../macroscope-triage-pr-comments/SKILL.md`.
-2. Follow its investigation and classification steps, but in `/macroscope loop` do **not** pause for its final user-confirmation prompt.
-3. Treat the believed-valid findings from that triage as the working set for this loop iteration.
-4. If the triage finds believed-valid comments, immediately open `../macroscope-respond-to-pr-comments/SKILL.md` and act on them in the same loop mode.
-5. Record whether the PR-comment response phase changed code.
-
-If the PR-comment response phase made changes:
+If PR-comment handling changes code:
 
 1. Re-run the most relevant verification.
 2. Commit the fixes intentionally.
 3. Push the branch.
 4. Continue to the next iteration so the new `HEAD` gets reviewed.
 
-#### 3e. Stop conditions
-
 Stop the loop when all of the following are true in the same iteration:
 
-1. The local-review phase did not change code.
-2. The PR-comment response phase did not change code.
-3. The current local `HEAD` already has a successful Macroscope correctness check.
-4. There are no believed-valid unresolved Macroscope comments left to address for that `HEAD`.
+1. The local CLI review phase did not change code.
+2. The PR-comment handling phase did not change code.
+3. The current local `HEAD` already has a successful Macroscope correctness review.
+4. There are no unresolved confirmed Macroscope comments left to address for that `HEAD`.
 
-When you stop, summarize the issues you addressed, the commits you pushed, and the verification you ran.
-
-### 4. Respect explicit user intent when it is narrower than the top-level Macroscope entrypoint
-
-- If the user explicitly asks to act on a previously triaged PR comment list, skip this entrypoint and use `../macroscope-respond-to-pr-comments/SKILL.md`.
-- If the user explicitly asks for a general review of the PR diff itself rather than local CLI review, use `../macroscope-review-pr/SKILL.md`.
+When the loop stops, summarize the issues you addressed, the commits you pushed, and the verification you ran.

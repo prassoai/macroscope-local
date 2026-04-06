@@ -1,8 +1,8 @@
 {
   "name": "macroscope",
   "displayName": "Macroscope",
-  "version": "1.3.0",
-  "description": "Macroscope review workflows for Cursor.",
+  "version": "1.4.0",
+  "description": "Macroscope local-first review for Cursor.",
   "author": {
     "name": "Prasso",
     "email": "macroscope@prasso.ai",

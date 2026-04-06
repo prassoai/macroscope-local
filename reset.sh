@@ -147,6 +147,10 @@ done
 
 for dir in \
   "$OPENCODE_SKILLS_DIR/macroscope" \
+  "$OPENCODE_SKILLS_DIR/macroscope-local-review" \
+  "$OPENCODE_SKILLS_DIR/macroscope-triage-pr-comments" \
+  "$OPENCODE_SKILLS_DIR/macroscope-respond-to-pr-comments" \
+  "$OPENCODE_SKILLS_DIR/macroscope-review-pr" \
   "$OPENCODE_SKILLS_DIR/local-review" \
   "$OPENCODE_SKILLS_DIR/triage-pr-comments" \
   "$OPENCODE_SKILLS_DIR/respond-to-pr-comments" \
