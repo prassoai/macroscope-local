@@ -4,24 +4,15 @@ description: Main Macroscope entrypoint. `/macroscope` runs the local CLI review
 argument-hint: [loop]
 ---
 
-Use this as the single public Macroscope skill.
+Default mode:
 
-Invocation:
+- With no arguments, start with the local streaming CLI review path.
+- Keep the flow closed-loop: validate each streamed issue, reject false positives, fix confirmed issues, and report only what you addressed.
+- Stay on this workflow even if the repo contains other review docs or skills.
+- Do not switch to repo-local review instructions such as `.claude/skills/local-review/SKILL.md`.
+- Use the installed `macroscope` CLI here, not `go run ./tools/cmd/macrodaemon`.
 
-- Claude Code: `/macroscope`
-- Claude Code autopilot: `/macroscope loop`
-- Codex and Cursor: `/macroscope:macroscope`
-- Codex and Cursor autopilot: `/macroscope:macroscope loop`
-- OpenCode: `/macroscope`
-- OpenCode autopilot: `/macroscope loop`
-
-Default behavior:
-
-- With no arguments, always start with the local streaming CLI review path.
-- Do not route directly to PR comments just because an open PR exists.
-- Keep the default mode closed-loop: validate streamed issues, fix the real ones, ignore the false positives, and report only what you addressed.
-
-Loop behavior:
+`loop` mode:
 
 - If the first argument is `loop`, keep iterating through local review, push, remote correctness review, and PR-comment handling until there is nothing left to address or you hit a hard stop.
 
@@ -29,14 +20,10 @@ Loop behavior:
 
 ### 1. Parse the invocation mode
 
-Treat the first argument as the mode selector:
-
 - If it is exactly `loop`, run the autopilot flow from Step 6.
 - Otherwise, run the default local CLI review flow from Steps 2 through 5.
 
 ### 2. Detect the local review scope
-
-Auto-detect whether you are on a feature branch so the review covers all local changes, including uncommitted edits:
 
 ```bash
 git merge-base --is-ancestor HEAD origin/staging && echo "ON_STAGING" || echo "FEATURE_BRANCH"
@@ -47,57 +34,51 @@ git merge-base --is-ancestor HEAD origin/staging && echo "ON_STAGING" || echo "F
 
 ### 3. Move the streaming review into a sub-agent when the host supports it
 
-If the host supports sub-agents, delegated workers, or background agents, open one here.
-
-That worker owns the full review lifecycle:
+- If the host supports sub-agents, delegated workers, or background agents, open one here.
+- That worker owns the full review lifecycle:
 
 **start review -> extract review_id -> poll -> narrate -> validate -> reject/confirm -> fix -> verify**
 
-Keep the primary agent free for concise user-facing progress updates and final coordination.
-
-If the host does not support sub-agents, keep the entire workflow attached in the current agent instead of detaching it.
+- Keep the primary agent free for concise user-facing progress updates and final coordination.
+- If the host does not support sub-agents, keep the entire workflow attached in the current agent instead of detaching it.
 
 ### 4. Run the local CLI review
 
-The `codereview` command is blocking. Keep it in an attached session for the full lifetime of the review.
-
-Do not use `nohup`, shell `&`, or any other detached background process that can lose the tool-call loop.
-
-Before launch, allocate a unique log file for this run so concurrent sessions do not clobber one another:
+- `codereview` is blocking. Keep it in an attached session for the full lifetime of the review.
+- Never use `nohup`, shell `&`, or any detached background process that can lose the tool-call loop.
+- Before launch, allocate a unique log file for this run so concurrent sessions do not clobber one another:
 
 ```bash
-review_log="$(mktemp /tmp/macroscope-review.XXXXXX.log)"
+review_log="$(mktemp "${TMPDIR:-/tmp}/macroscope-review.XXXXXX")"
 ```
 
-Start the review:
+- Start the review:
 
 ```bash
 macroscope codereview --base <base_branch> 2>&1 | tee "$review_log"
 ```
 
-Wait for the review to emit a `review_id`, then extract it:
+- Wait for the review to emit a `review_id`, then extract it:
 
 ```bash
 grep -m1 'review_id=' "$review_log"
 ```
 
-If no `review_id` appears after a reasonable wait, inspect the log, surface the failure, and stop.
-
-While the review runs, poll for incremental results:
+- If no `review_id` appears after a reasonable wait, inspect the log, surface the failure, and stop.
+- While the review runs, poll for incremental results:
 
 ```bash
 macroscope codereview --status '<review_id>' 2>&1
 ```
 
-Each status payload can contain a current issue set plus `poll_after_seconds`.
-
-Clamp every sleep:
+- Each status payload can contain a current issue set plus `poll_after_seconds`.
+- Clamp every sleep:
 
 - `sleep_seconds = min(max(poll_after_seconds, 1), 60)`
 - Never sleep longer than `60` seconds.
 - Never compound the sleep across cycles.
 
-Maintain a seen-set of issue fingerprints so you only process newly surfaced findings on each poll. Use a stable fingerprint such as:
+- Maintain a seen-set of issue fingerprints so you only process newly surfaced findings on each poll. Use a stable fingerprint such as:
 
 `file:start_line:end_line:category:message`
 
