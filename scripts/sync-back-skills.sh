@@ -23,7 +23,7 @@ if [ ! -d "$PLUGIN_ROOT" ]; then
   exit 1
 fi
 
-rm -rf "$PLUGIN_ROOT/skills/macroscope" "$PLUGIN_ROOT/commands" "$PLUGIN_ROOT/host-overlays"
+rm -rf "$PLUGIN_ROOT/skills" "$PLUGIN_ROOT/commands" "$PLUGIN_ROOT/host-overlays"
 mkdir -p "$PLUGIN_ROOT/skills"
 cp -R "$BACK_PLUGIN_ROOT/skills/macroscope" "$PLUGIN_ROOT/skills/macroscope"
 
@@ -35,4 +35,4 @@ if [ -d "$BACK_PLUGIN_ROOT/host-overlays" ]; then
   cp -R "$BACK_PLUGIN_ROOT/host-overlays" "$PLUGIN_ROOT/host-overlays"
 fi
 
-echo "Overlaid the public plugin tree from $BACK_REPO"
+echo "Synced the public plugin tree from $BACK_REPO"
