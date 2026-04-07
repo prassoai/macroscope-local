@@ -13,7 +13,7 @@
     {
       "name": "macroscope",
       "description": "Local-first Macroscope review with an optional autopilot loop.",
-      "version": "1.4.0",
+      "version": "1.4.3",
       "author": {
         "name": "Prasso",
         "url": "https://github.com/prassoai"

@@ -270,11 +270,11 @@ fetch_plugin_bundle() {
       error "Expected public skill sync script at $sync_script"
       exit 1
     fi
-    if ! bash "$sync_script" "$MACROSCOPE_LOCAL_BACK_REPO" "$CHECKOUT_DIR" >/dev/null; then
+  if ! bash "$sync_script" "$MACROSCOPE_LOCAL_BACK_REPO" "$CHECKOUT_DIR" >/dev/null; then
       error "Failed to overlay the public plugin skill from ${MACROSCOPE_LOCAL_BACK_REPO}"
       exit 1
     fi
-    success "Overlaid the public plugin skill from ${BOLD}${MACROSCOPE_LOCAL_BACK_REPO}${RESET}"
+    success "Overlaid the public plugin tree from ${BOLD}${MACROSCOPE_LOCAL_BACK_REPO}${RESET}"
   fi
 
   PLUGIN_VERSION="$(python3 - "$CHECKOUT_DIR/plugins/macroscope/.claude-plugin/plugin.json" <<'PY'
@@ -300,6 +300,23 @@ copy_claude_plugin_tree() {
 
   copy_tree "$src" "$dst"
   rm -rf "$dst/commands" "$dst/.codex-plugin" "$dst/.cursor-plugin" "$dst/opencode"
+}
+
+strip_host_overlays() {
+  local dst="$1"
+  rm -rf "$dst/host-overlays"
+}
+
+apply_claude_overlay() {
+  local src="$1"
+  local dst="$2"
+  local overlay_src="$src/host-overlays/claude"
+
+  if [ -d "$overlay_src" ]; then
+    cp -R "$overlay_src/." "$dst/"
+  fi
+
+  strip_host_overlays "$dst"
 }
 
 seed_local_build_config_if_needed() {
@@ -405,8 +422,8 @@ install_codex_cli_shim() {
   CODEX_SHIM_PATH="$shim_path"
   current_codex="$(command -v codex || true)"
 
-  if [ -n "$current_codex" ] && codex_supports_plugins "$current_codex"; then
-    success "Codex CLI already supports plugins: ${BOLD}${current_codex}${RESET}"
+  if [ -n "$current_codex" ] && [ "$current_codex" = "$CODEX_BUNDLED_BINARY" ] && codex_supports_plugins "$current_codex"; then
+    success "Codex CLI already uses the bundled Codex.app binary: ${BOLD}${current_codex}${RESET}"
     return
   fi
 
@@ -436,9 +453,9 @@ EOF
   chmod +x "$shim_path"
   CODEX_SHIM_INSTALLED=1
 
-  if [ -n "$current_codex" ]; then
+  if [ -n "$current_codex" ] && [ "$current_codex" != "$shim_path" ]; then
     success "Installed Codex CLI shim at ${BOLD}${shim_path}${RESET}"
-    info "Your previous Codex CLI at ${current_codex} does not support local plugins; ${BOLD}codex${RESET} will now use the bundled Codex.app binary."
+    info "${BOLD}codex${RESET} will now use the bundled Codex.app binary instead of ${current_codex}."
   else
     success "Installed Codex CLI shim at ${BOLD}${shim_path}${RESET}"
     info "${BOLD}codex${RESET} is now available via the bundled Codex.app binary."
@@ -510,6 +527,8 @@ PY
   codex_cache_dst="$codex_cache_root/$marketplace_name/macroscope/$CODEX_LOCAL_PLUGIN_VERSION"
   plugin_key="macroscope@$marketplace_name"
   copy_tree "$plugin_src" "$codex_cache_dst"
+  strip_host_overlays "$plugin_dst"
+  strip_host_overlays "$codex_cache_dst"
 
   python3 - "$codex_config" "$plugin_key" <<'PY'
 import os
@@ -591,6 +610,8 @@ install_claude_plugin() {
   mkdir -p "$marketplace_root/plugins"
   copy_claude_plugin_tree "$plugin_src" "$marketplace_root/plugins/macroscope"
   copy_claude_plugin_tree "$plugin_src" "$cache_dst"
+  apply_claude_overlay "$plugin_src" "$marketplace_root/plugins/macroscope"
+  apply_claude_overlay "$plugin_src" "$cache_dst"
 
   now="$(python3 - <<'PY'
 from datetime import datetime, timezone
@@ -697,6 +718,7 @@ install_cursor_plugin() {
 
   mkdir -p "$HOME/.cursor/plugins/local"
   copy_tree "$plugin_src" "$cursor_dst"
+  strip_host_overlays "$cursor_dst"
 
   success "Installed Cursor plugin to ${BOLD}${cursor_dst}${RESET}"
 }
@@ -788,8 +810,11 @@ PY
     warn "Codex plugin cache install did not produce the expected cache entry"
   fi
 
-  if [ -f "$HOME/.claude/plugins/cache/macroscope-local/macroscope/$PLUGIN_VERSION/.claude-plugin/plugin.json" ]; then
-    success "Claude Code plugin installed"
+  if [ -f "$HOME/.claude/plugins/cache/macroscope-local/macroscope/$PLUGIN_VERSION/.claude-plugin/plugin.json" ] && \
+     [ -f "$HOME/.claude/plugins/cache/macroscope-local/macroscope/$PLUGIN_VERSION/skills/macroscope/SKILL.md" ] && \
+     [ -f "$HOME/.claude/plugins/cache/macroscope-local/macroscope/$PLUGIN_VERSION/commands/macroscope.md" ] && \
+     [ -f "$HOME/.claude/plugins/cache/macroscope-local/macroscope/$PLUGIN_VERSION/agents/macroscope-review-worker.md" ]; then
+    success "Claude Code plugin installed with forked worker"
   else
     warn "Claude Code plugin install did not produce the expected cache entry"
   fi
@@ -836,6 +861,7 @@ print_installation_completion() {
   printf "${BOLD}Notes:${RESET}\n"
   printf "  Restart Codex, Claude Code, Cursor, or OpenCode if they were already open.\n"
   printf "  /macroscope now defaults to the local streaming CLI review path.\n"
+  printf "  Claude Code runs /macroscope in a forked worker before the review starts.\n"
   printf "  /macroscope loop runs the full review-fix-push-re-review autopilot cycle.\n"
   printf "  Local review validates each issue before acting and keeps poll sleeps capped at 60 seconds.\n"
   if [ "$CODEX_SHIM_INSTALLED" = "1" ]; then

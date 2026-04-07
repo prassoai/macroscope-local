@@ -20,7 +20,8 @@ OpenCode:    /macroscope loop
 `/macroscope` is the only public entrypoint:
 
 - It runs a streaming local `macroscope codereview`.
-- If possible, it moves the streaming review into a sub-agent.
+- In Claude Code, the plugin forks into a dedicated review worker before the CLI starts.
+- In other hosts, the installed skill remains responsible for opening a sub-agent when available.
 - It validates each streamed issue before acting.
 - It rejects false positives, fixes confirmed issues one at a time, and reports only the issues it addressed.
 - It keeps polling sleeps capped at 60 seconds.

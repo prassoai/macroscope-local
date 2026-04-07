@@ -26,7 +26,7 @@ After installation:
   - Cursor autopilot: `/macroscope:macroscope loop`
   - OpenCode: `/macroscope`
   - OpenCode autopilot: `/macroscope loop`
-- `/macroscope` runs the local CLI review path by default and validates each streamed issue before acting.
+- `/macroscope` runs the local CLI review path by default, uses a forked worker in Claude Code, and validates each streamed issue before acting.
 - `/macroscope loop` runs the full review-fix-push-re-review autopilot cycle.
 
 Normal installs fetch the packaged plugin bundle from GitHub release assets, so the shipped plugin skill and released CLI come from the same `back/macroscope-local` release pipeline.

@@ -10,19 +10,29 @@ BACK_REPO="$(cd "$1" && pwd)"
 REPO_ROOT="${2:-$(cd "$(dirname "$0")/.." && pwd)}"
 REPO_ROOT="$(cd "$REPO_ROOT" && pwd)"
 
-BACK_SKILL="$BACK_REPO/tools/cmd/macrodaemon/public-plugin/macroscope/skills/macroscope/SKILL.md"
-PLUGIN_SKILL="$REPO_ROOT/plugins/macroscope/skills/macroscope/SKILL.md"
+BACK_PLUGIN_ROOT="$BACK_REPO/tools/cmd/macrodaemon/public-plugin/macroscope"
+PLUGIN_ROOT="$REPO_ROOT/plugins/macroscope"
 
-if [ ! -f "$BACK_SKILL" ]; then
-  echo "Back public plugin skill not found: $BACK_SKILL" >&2
+if [ ! -d "$BACK_PLUGIN_ROOT" ]; then
+  echo "Back public plugin root not found: $BACK_PLUGIN_ROOT" >&2
   exit 1
 fi
 
-if [ ! -f "$PLUGIN_SKILL" ]; then
-  echo "Plugin skill destination not found: $PLUGIN_SKILL" >&2
+if [ ! -d "$PLUGIN_ROOT" ]; then
+  echo "Plugin destination root not found: $PLUGIN_ROOT" >&2
   exit 1
 fi
 
-cp "$BACK_SKILL" "$PLUGIN_SKILL"
+rm -rf "$PLUGIN_ROOT/skills/macroscope" "$PLUGIN_ROOT/commands" "$PLUGIN_ROOT/host-overlays"
+mkdir -p "$PLUGIN_ROOT/skills"
+cp -R "$BACK_PLUGIN_ROOT/skills/macroscope" "$PLUGIN_ROOT/skills/macroscope"
 
-echo "Overlaid the public plugin skill from $BACK_REPO"
+if [ -d "$BACK_PLUGIN_ROOT/commands" ]; then
+  cp -R "$BACK_PLUGIN_ROOT/commands" "$PLUGIN_ROOT/commands"
+fi
+
+if [ -d "$BACK_PLUGIN_ROOT/host-overlays" ]; then
+  cp -R "$BACK_PLUGIN_ROOT/host-overlays" "$PLUGIN_ROOT/host-overlays"
+fi
+
+echo "Overlaid the public plugin tree from $BACK_REPO"
