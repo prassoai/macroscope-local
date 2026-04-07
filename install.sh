@@ -217,12 +217,28 @@ install_binary() {
 fetch_plugin_bundle() {
   step "Fetching plugin bundle..."
 
-  local repo_url="https://github.com/prassoai/macroscope-local.git"
   CHECKOUT_DIR="$TMP_DIR/macroscope-local"
   local bundle_url=""
   local bundle_archive="$TMP_DIR/macroscope-plugin-bundle.tar.gz"
+  local local_back_plugin_root=""
 
-  if [ -n "${MACROSCOPE_PLUGIN_BUNDLE_SOURCE:-}" ]; then
+  is_plugin_bundle_root() {
+    local root="$1"
+    [ -f "$root/.claude-plugin/marketplace.json" ] && \
+      [ -f "$root/plugins/macroscope/.claude-plugin/plugin.json" ] && \
+      [ -f "$root/plugins/macroscope/.codex-plugin/plugin.json" ] && \
+      [ -f "$root/plugins/macroscope/.cursor-plugin/plugin.json" ]
+  }
+
+  if [ -n "${MACROSCOPE_LOCAL_BACK_REPO:-}" ]; then
+    local_back_plugin_root="${MACROSCOPE_LOCAL_BACK_REPO}/tools/cmd/macrodaemon/public-plugin"
+    if ! is_plugin_bundle_root "$local_back_plugin_root"; then
+      error "Back repo is missing the public plugin bundle at ${local_back_plugin_root}"
+      exit 1
+    fi
+    copy_tree "$local_back_plugin_root" "$CHECKOUT_DIR"
+    success "Using public plugin bundle from ${BOLD}${MACROSCOPE_LOCAL_BACK_REPO}${RESET}"
+  elif [ -n "${MACROSCOPE_PLUGIN_BUNDLE_SOURCE:-}" ]; then
     if [ -d "${MACROSCOPE_PLUGIN_BUNDLE_SOURCE}" ]; then
       copy_tree "${MACROSCOPE_PLUGIN_BUNDLE_SOURCE}" "$CHECKOUT_DIR"
       success "Using local plugin bundle from ${BOLD}${MACROSCOPE_PLUGIN_BUNDLE_SOURCE}${RESET}"
@@ -243,38 +259,17 @@ fetch_plugin_bundle() {
     if curl -fL --progress-bar "$bundle_url" -o "$bundle_archive"; then
       tar -xzf "$bundle_archive" -C "$CHECKOUT_DIR"
       success "Fetched plugin bundle from ${BOLD}${INSTALL_VERSION}${RESET}"
-    elif [ "$INSTALL_VERSION" = "latest" ]; then
-      warn "Could not download a released plugin bundle. Falling back to the default branch for plugin files."
-      git clone --depth 1 "$repo_url" "$CHECKOUT_DIR" >/dev/null 2>&1
-      success "Fetched fallback plugin bundle from ${BOLD}main${RESET}"
     else
-      warn "Could not download a released plugin bundle for '${INSTALL_VERSION}'. Falling back to the repo ref for plugin files."
-      if git clone --depth 1 --branch "$INSTALL_VERSION" "$repo_url" "$CHECKOUT_DIR" >/dev/null 2>&1; then
-        success "Fetched fallback plugin bundle for ${BOLD}${INSTALL_VERSION}${RESET}"
-      else
-        warn "Could not fetch plugin bundle at ref '${INSTALL_VERSION}'. Falling back to the default branch for plugin files."
-        git clone --depth 1 "$repo_url" "$CHECKOUT_DIR" >/dev/null 2>&1
-        success "Fetched fallback plugin bundle from ${BOLD}main${RESET}"
-      fi
+      error "Failed to download the released plugin bundle."
+      echo ""
+      echo "Try again in a minute, or set MACROSCOPE_LOCAL_BACK_REPO for a local branch install."
+      exit 1
     fi
   fi
 
-  if [ ! -f "$CHECKOUT_DIR/plugins/macroscope/.claude-plugin/plugin.json" ] || [ ! -f "$CHECKOUT_DIR/plugins/macroscope/.codex-plugin/plugin.json" ]; then
-    error "Fetched repo is missing the packaged macroscope plugin files."
+  if ! is_plugin_bundle_root "$CHECKOUT_DIR"; then
+    error "Fetched plugin bundle is missing the required Macroscope plugin files."
     exit 1
-  fi
-
-  if [ -n "${MACROSCOPE_LOCAL_BACK_REPO:-}" ]; then
-    local sync_script="$CHECKOUT_DIR/scripts/sync-back-skills.sh"
-    if [ ! -f "$sync_script" ]; then
-      error "Expected public skill sync script at $sync_script"
-      exit 1
-    fi
-  if ! bash "$sync_script" "$MACROSCOPE_LOCAL_BACK_REPO" "$CHECKOUT_DIR" >/dev/null; then
-      error "Failed to overlay the public plugin skill from ${MACROSCOPE_LOCAL_BACK_REPO}"
-      exit 1
-    fi
-    success "Overlaid the public plugin tree from ${BOLD}${MACROSCOPE_LOCAL_BACK_REPO}${RESET}"
   fi
 
   PLUGIN_VERSION="$(python3 - "$CHECKOUT_DIR/plugins/macroscope/.claude-plugin/plugin.json" <<'PY'
