@@ -217,10 +217,28 @@ install_binary() {
 fetch_plugin_bundle() {
   step "Fetching plugin bundle..."
 
-  local repo_url="https://github.com/prassoai/macroscope-local.git"
   CHECKOUT_DIR="$TMP_DIR/macroscope-local"
+  local bundle_url=""
+  local bundle_archive="$TMP_DIR/macroscope-plugin-bundle.tar.gz"
+  local local_back_plugin_root=""
 
-  if [ -n "${MACROSCOPE_PLUGIN_BUNDLE_SOURCE:-}" ]; then
+  is_plugin_bundle_root() {
+    local root="$1"
+    [ -f "$root/.claude-plugin/marketplace.json" ] && \
+      [ -f "$root/plugins/macroscope/.claude-plugin/plugin.json" ] && \
+      [ -f "$root/plugins/macroscope/.codex-plugin/plugin.json" ] && \
+      [ -f "$root/plugins/macroscope/.cursor-plugin/plugin.json" ]
+  }
+
+  if [ -n "${MACROSCOPE_LOCAL_BACK_REPO:-}" ]; then
+    local_back_plugin_root="${MACROSCOPE_LOCAL_BACK_REPO}/tools/cmd/macrodaemon/public-plugin"
+    if ! is_plugin_bundle_root "$local_back_plugin_root"; then
+      error "Back repo is missing the public plugin bundle at ${local_back_plugin_root}"
+      exit 1
+    fi
+    copy_tree "$local_back_plugin_root" "$CHECKOUT_DIR"
+    success "Using public plugin bundle from ${BOLD}${MACROSCOPE_LOCAL_BACK_REPO}${RESET}"
+  elif [ -n "${MACROSCOPE_PLUGIN_BUNDLE_SOURCE:-}" ]; then
     if [ -d "${MACROSCOPE_PLUGIN_BUNDLE_SOURCE}" ]; then
       copy_tree "${MACROSCOPE_PLUGIN_BUNDLE_SOURCE}" "$CHECKOUT_DIR"
       success "Using local plugin bundle from ${BOLD}${MACROSCOPE_PLUGIN_BUNDLE_SOURCE}${RESET}"
@@ -228,21 +246,29 @@ fetch_plugin_bundle() {
       git clone --depth 1 "${MACROSCOPE_PLUGIN_BUNDLE_SOURCE}" "$CHECKOUT_DIR" >/dev/null 2>&1
       success "Fetched plugin bundle from ${BOLD}${MACROSCOPE_PLUGIN_BUNDLE_SOURCE}${RESET}"
     fi
-  elif [ "$INSTALL_VERSION" = "latest" ]; then
-    git clone --depth 1 "$repo_url" "$CHECKOUT_DIR" >/dev/null 2>&1
-    success "Fetched latest plugin bundle from ${BOLD}main${RESET}"
   else
-    if git clone --depth 1 --branch "$INSTALL_VERSION" "$repo_url" "$CHECKOUT_DIR" >/dev/null 2>&1; then
-      success "Fetched plugin bundle for ${BOLD}${INSTALL_VERSION}${RESET}"
+    if [ "$INSTALL_VERSION" = "latest" ]; then
+      bundle_url="https://github.com/prassoai/macroscope-local/releases/latest/download/macroscope-plugin-bundle.tar.gz"
     else
-      warn "Could not fetch plugin bundle at ref '${INSTALL_VERSION}'. Falling back to the default branch for plugin files."
-      git clone --depth 1 "$repo_url" "$CHECKOUT_DIR" >/dev/null 2>&1
-      success "Fetched fallback plugin bundle from ${BOLD}main${RESET}"
+      bundle_url="https://github.com/prassoai/macroscope-local/releases/download/${INSTALL_VERSION}/macroscope-plugin-bundle.tar.gz"
+    fi
+
+    info "Downloading plugin bundle from: ${DIM}${bundle_url}${RESET}"
+
+    mkdir -p "$CHECKOUT_DIR"
+    if curl -fL --progress-bar "$bundle_url" -o "$bundle_archive"; then
+      tar -xzf "$bundle_archive" -C "$CHECKOUT_DIR"
+      success "Fetched plugin bundle from ${BOLD}${INSTALL_VERSION}${RESET}"
+    else
+      error "Failed to download the released plugin bundle."
+      echo ""
+      echo "Try again in a minute, or set MACROSCOPE_LOCAL_BACK_REPO for a local branch install."
+      exit 1
     fi
   fi
 
-  if [ ! -f "$CHECKOUT_DIR/plugins/macroscope/.claude-plugin/plugin.json" ] || [ ! -f "$CHECKOUT_DIR/plugins/macroscope/.codex-plugin/plugin.json" ]; then
-    error "Fetched repo is missing the packaged macroscope plugin files."
+  if ! is_plugin_bundle_root "$CHECKOUT_DIR"; then
+    error "Fetched plugin bundle is missing the required Macroscope plugin files."
     exit 1
   fi
 
@@ -261,6 +287,31 @@ copy_tree() {
   rm -rf "$dst"
   mkdir -p "$(dirname "$dst")"
   cp -R "$src" "$dst"
+}
+
+copy_claude_plugin_tree() {
+  local src="$1"
+  local dst="$2"
+
+  copy_tree "$src" "$dst"
+  rm -rf "$dst/commands" "$dst/.codex-plugin" "$dst/.cursor-plugin" "$dst/opencode"
+}
+
+strip_host_overlays() {
+  local dst="$1"
+  rm -rf "$dst/host-overlays"
+}
+
+apply_claude_overlay() {
+  local src="$1"
+  local dst="$2"
+  local overlay_src="$src/host-overlays/claude"
+
+  if [ -d "$overlay_src" ]; then
+    cp -R "$overlay_src/." "$dst/"
+  fi
+
+  strip_host_overlays "$dst"
 }
 
 seed_local_build_config_if_needed() {
@@ -366,8 +417,8 @@ install_codex_cli_shim() {
   CODEX_SHIM_PATH="$shim_path"
   current_codex="$(command -v codex || true)"
 
-  if [ -n "$current_codex" ] && codex_supports_plugins "$current_codex"; then
-    success "Codex CLI already supports plugins: ${BOLD}${current_codex}${RESET}"
+  if [ -n "$current_codex" ] && [ "$current_codex" = "$CODEX_BUNDLED_BINARY" ] && codex_supports_plugins "$current_codex"; then
+    success "Codex CLI already uses the bundled Codex.app binary: ${BOLD}${current_codex}${RESET}"
     return
   fi
 
@@ -397,9 +448,9 @@ EOF
   chmod +x "$shim_path"
   CODEX_SHIM_INSTALLED=1
 
-  if [ -n "$current_codex" ]; then
+  if [ -n "$current_codex" ] && [ "$current_codex" != "$shim_path" ]; then
     success "Installed Codex CLI shim at ${BOLD}${shim_path}${RESET}"
-    info "Your previous Codex CLI at ${current_codex} does not support local plugins; ${BOLD}codex${RESET} will now use the bundled Codex.app binary."
+    info "${BOLD}codex${RESET} will now use the bundled Codex.app binary instead of ${current_codex}."
   else
     success "Installed Codex CLI shim at ${BOLD}${shim_path}${RESET}"
     info "${BOLD}codex${RESET} is now available via the bundled Codex.app binary."
@@ -471,6 +522,8 @@ PY
   codex_cache_dst="$codex_cache_root/$marketplace_name/macroscope/$CODEX_LOCAL_PLUGIN_VERSION"
   plugin_key="macroscope@$marketplace_name"
   copy_tree "$plugin_src" "$codex_cache_dst"
+  strip_host_overlays "$plugin_dst"
+  strip_host_overlays "$codex_cache_dst"
 
   python3 - "$codex_config" "$plugin_key" <<'PY'
 import os
@@ -550,8 +603,10 @@ install_claude_plugin() {
   mkdir -p "$marketplace_root"
   copy_tree "$marketplace_src" "$marketplace_root/.claude-plugin"
   mkdir -p "$marketplace_root/plugins"
-  copy_tree "$plugin_src" "$marketplace_root/plugins/macroscope"
-  copy_tree "$plugin_src" "$cache_dst"
+  copy_claude_plugin_tree "$plugin_src" "$marketplace_root/plugins/macroscope"
+  copy_claude_plugin_tree "$plugin_src" "$cache_dst"
+  apply_claude_overlay "$plugin_src" "$marketplace_root/plugins/macroscope"
+  apply_claude_overlay "$plugin_src" "$cache_dst"
 
   now="$(python3 - <<'PY'
 from datetime import datetime, timezone
@@ -658,6 +713,7 @@ install_cursor_plugin() {
 
   mkdir -p "$HOME/.cursor/plugins/local"
   copy_tree "$plugin_src" "$cursor_dst"
+  strip_host_overlays "$cursor_dst"
 
   success "Installed Cursor plugin to ${BOLD}${cursor_dst}${RESET}"
 }
@@ -685,13 +741,8 @@ install_opencode_support() {
 
   cp "$plugin_file" "$opencode_plugins/macroscope.js"
 
-  for command_name in macroscope local-review triage-pr-comments respond-to-pr-comments review-pr; do
-    cp "$commands_src/$command_name.md" "$opencode_commands/$command_name.md"
-  done
-
-  for skill_name in macroscope local-review triage-pr-comments respond-to-pr-comments review-pr; do
-    copy_tree "$skills_src/$skill_name" "$opencode_skills/$skill_name"
-  done
+  cp "$commands_src/macroscope.md" "$opencode_commands/macroscope.md"
+  copy_tree "$skills_src/macroscope" "$opencode_skills/macroscope"
 
   success "Installed OpenCode plugin to ${BOLD}${opencode_plugins}/macroscope.js${RESET}"
   success "Installed OpenCode commands to ${BOLD}${opencode_commands}${RESET}"
@@ -754,8 +805,10 @@ PY
     warn "Codex plugin cache install did not produce the expected cache entry"
   fi
 
-  if [ -f "$HOME/.claude/plugins/cache/macroscope-local/macroscope/$PLUGIN_VERSION/.claude-plugin/plugin.json" ]; then
-    success "Claude Code plugin installed"
+  if [ -f "$HOME/.claude/plugins/cache/macroscope-local/macroscope/$PLUGIN_VERSION/.claude-plugin/plugin.json" ] && \
+     [ -f "$HOME/.claude/plugins/cache/macroscope-local/macroscope/$PLUGIN_VERSION/skills/macroscope/SKILL.md" ] && \
+     [ -f "$HOME/.claude/plugins/cache/macroscope-local/macroscope/$PLUGIN_VERSION/agents/macroscope-review-worker.md" ]; then
+    success "Claude Code plugin installed with background worker"
   else
     warn "Claude Code plugin install did not produce the expected cache entry"
   fi
@@ -793,16 +846,18 @@ print_installation_completion() {
   echo ""
   printf "${BOLD}Quick start:${RESET}\n"
   printf "  ${CYAN}macroscope${RESET}                     ${DIM}# Launch the interactive wizard${RESET}\n"
-  printf "  ${CYAN}macroscope codereview --base staging${RESET} ${DIM}# Run the CLI directly${RESET}\n"
-  printf "  ${CYAN}/macroscope${RESET}                  ${DIM}# Main router in Claude Code${RESET}\n"
-  printf "  ${CYAN}/macroscope:macroscope${RESET}      ${DIM}# Main router in Codex${RESET}\n"
-  printf "  ${CYAN}/macroscope:macroscope${RESET}      ${DIM}# Main router in Cursor${RESET}\n"
-  printf "  ${CYAN}/macroscope${RESET}                  ${DIM}# Main router in OpenCode${RESET}\n"
+  printf "  ${CYAN}macroscope codereview --base <base_branch>${RESET} ${DIM}# Run the CLI directly${RESET}\n"
+  printf "  ${CYAN}/macroscope${RESET}                  ${DIM}# Local review in Claude Code or OpenCode${RESET}\n"
+  printf "  ${CYAN}/macroscope loop${RESET}             ${DIM}# Autopilot loop in Claude Code or OpenCode${RESET}\n"
+  printf "  ${CYAN}/macroscope:macroscope${RESET}      ${DIM}# Local review in Codex or Cursor${RESET}\n"
+  printf "  ${CYAN}/macroscope:macroscope loop${RESET} ${DIM}# Autopilot loop in Codex or Cursor${RESET}\n"
   echo ""
   printf "${BOLD}Notes:${RESET}\n"
   printf "  Restart Codex, Claude Code, Cursor, or OpenCode if they were already open.\n"
-  printf "  The review router first checks whether the current local HEAD already has a successful Macroscope correctness check.\n"
-  printf "  Otherwise it runs a local streaming CLI review and fixes valid issues.\n"
+  printf "  /macroscope now defaults to the local streaming CLI review path.\n"
+  printf "  Claude Code launches /macroscope in a background worker by default.\n"
+  printf "  /macroscope loop runs the full review-fix-push-re-review autopilot cycle.\n"
+  printf "  Local review validates each issue before acting and keeps poll sleeps capped at 60 seconds.\n"
   if [ "$CODEX_SHIM_INSTALLED" = "1" ]; then
     printf "  ${BOLD}codex${RESET} now points at the bundled Codex.app CLI so plugins work from the terminal.\n"
   elif [ -n "$CODEX_PLUGIN_HOST_WARNING" ]; then
@@ -821,7 +876,7 @@ launch_wizard() {
     return
   fi
 
-  if [ ! -t 0 ] || [ ! -t 1 ] || [ ! -e /dev/tty ]; then
+  if [ ! -e /dev/tty ] || [ ! -r /dev/tty ] || [ ! -w /dev/tty ]; then
     info "No TTY available; run 'macroscope' later to start the setup wizard."
     return
   fi
@@ -838,7 +893,7 @@ launch_wizard() {
 
   echo ""
   step "Launching Macroscope setup wizard..."
-  if ! "$bin_path" < /dev/tty; then
+  if ! "$bin_path" < /dev/tty > /dev/tty 2>&1; then
     warn "Wizard exited with a non-zero status. You can rerun it anytime with: macroscope"
   fi
 }

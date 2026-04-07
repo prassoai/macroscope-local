@@ -1,6 +1,6 @@
 # macroscope-local
 
-Macroscope CLI release artifacts, installer, and packaged review workflows for Codex, Claude Code, Cursor, and OpenCode.
+Macroscope CLI release artifacts plus the installer and reset scripts for Codex, Claude Code, Cursor, and OpenCode.
 
 ## Install Macroscope
 
@@ -8,16 +8,31 @@ Macroscope CLI release artifacts, installer, and packaged review workflows for C
 curl -sSL https://raw.githubusercontent.com/prassoai/macroscope-local/main/install.sh | bash
 ```
 
-The installer downloads `macroscope`, auto-configures your shell PATH, and installs the packaged Macroscope integrations for supported Codex, Claude Code, Cursor, and OpenCode setups.
+The installer downloads `macroscope`, auto-configures your shell PATH, and installs the released Macroscope integration for supported Codex, Claude Code, Cursor, and OpenCode setups.
 
 If your `codex` CLI is too old to load local plugins, the installer will place a small wrapper in `~/.local/bin/codex` that forwards to the newer Codex.app bundled binary.
+
+The full public Macroscope plugin bundle is authored in the `back` repo under `tools/cmd/macrodaemon/public-plugin/`. This repo distributes the released CLI and the installer/reset scripts. For local development, set `MACROSCOPE_LOCAL_BACK_REPO` and the installer will load the full plugin bundle directly from that back worktree.
 
 After installation:
 
 - Run `macroscope` to launch the interactive wizard.
-- Run the PR-aware review router from your editor:
+- Run the local Macroscope review from your editor:
   - Claude Code: `/macroscope`
+  - Claude Code autopilot: `/macroscope loop`
   - Codex: `/macroscope:macroscope`
+  - Codex autopilot: `/macroscope:macroscope loop`
   - Cursor: `/macroscope:macroscope`
+  - Cursor autopilot: `/macroscope:macroscope loop`
   - OpenCode: `/macroscope`
-- The router first checks whether the current local `HEAD` already has a successful `Macroscope - Correctness Check`; if not, it runs the local CLI path.
+  - OpenCode autopilot: `/macroscope loop`
+- `/macroscope` runs the local CLI review path by default, launches a background worker in Claude Code, and validates each streamed issue before acting.
+- `/macroscope loop` runs the full review-fix-push-re-review autopilot cycle.
+
+Normal installs fetch the plugin bundle from GitHub release assets, so the shipped plugin bundle and released CLI come from the same `back/macroscope-local` release pipeline.
+
+For local development previews, point the installer at a back worktree:
+
+```bash
+MACROSCOPE_LOCAL_BACK_REPO=/path/to/back-worktree ./install.sh
+```
