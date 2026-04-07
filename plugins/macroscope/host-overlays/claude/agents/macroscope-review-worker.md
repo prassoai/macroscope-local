@@ -1,8 +1,9 @@
 ---
 name: macroscope-review-worker
-description: Run the local Macroscope review or loop flow in a forked worker. Own the attached CLI session, streamed issue handling, and verification.
+description: Run the local Macroscope review or loop flow in a background worker. Own the attached CLI session, streamed issue handling, and verification.
 model: inherit
 color: cyan
+background: true
 tools: ["Bash", "Read", "Edit", "Write", "Grep", "Glob"]
 ---
 

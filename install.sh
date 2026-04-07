@@ -812,9 +812,8 @@ PY
 
   if [ -f "$HOME/.claude/plugins/cache/macroscope-local/macroscope/$PLUGIN_VERSION/.claude-plugin/plugin.json" ] && \
      [ -f "$HOME/.claude/plugins/cache/macroscope-local/macroscope/$PLUGIN_VERSION/skills/macroscope/SKILL.md" ] && \
-     [ -f "$HOME/.claude/plugins/cache/macroscope-local/macroscope/$PLUGIN_VERSION/commands/macroscope.md" ] && \
      [ -f "$HOME/.claude/plugins/cache/macroscope-local/macroscope/$PLUGIN_VERSION/agents/macroscope-review-worker.md" ]; then
-    success "Claude Code plugin installed with forked worker"
+    success "Claude Code plugin installed with background worker"
   else
     warn "Claude Code plugin install did not produce the expected cache entry"
   fi
@@ -861,7 +860,7 @@ print_installation_completion() {
   printf "${BOLD}Notes:${RESET}\n"
   printf "  Restart Codex, Claude Code, Cursor, or OpenCode if they were already open.\n"
   printf "  /macroscope now defaults to the local streaming CLI review path.\n"
-  printf "  Claude Code runs /macroscope in a forked worker before the review starts.\n"
+  printf "  Claude Code launches /macroscope in a background worker by default.\n"
   printf "  /macroscope loop runs the full review-fix-push-re-review autopilot cycle.\n"
   printf "  Local review validates each issue before acting and keeps poll sleeps capped at 60 seconds.\n"
   if [ "$CODEX_SHIM_INSTALLED" = "1" ]; then
