@@ -62,6 +62,10 @@ CODEX_LOCAL_PLUGIN_VERSION="local"
 CODEX_BUNDLED_BINARY="/Applications/Codex.app/Contents/Resources/codex"
 CODEX_SHIM_PATH=""
 
+repair_only_requested() {
+  [ "${MACROSCOPE_REPAIR_ONLY:-0}" = "1" ]
+}
+
 get_codex_home() {
   printf '%s' "${CODEX_HOME:-$HOME/.codex}"
 }
@@ -518,8 +522,13 @@ repair_existing_install() {
 
 check_dependencies() {
   local missing_deps=()
+  local deps=(python3)
 
-  for cmd in curl git python3; do
+  if ! repair_only_requested; then
+    deps=(curl git python3)
+  fi
+
+  for cmd in "${deps[@]}"; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
       missing_deps+=("$cmd")
     fi
@@ -1337,13 +1346,22 @@ launch_wizard() {
 }
 
 main() {
-  if command -v clear >/dev/null 2>&1 && [ -t 1 ]; then
+  if ! repair_only_requested && command -v clear >/dev/null 2>&1 && [ -t 1 ]; then
     clear || true
   fi
-  print_banner
+  if ! repair_only_requested; then
+    print_banner
+  fi
 
   step "Checking system requirements..."
   check_dependencies
+
+  if repair_only_requested; then
+    repair_existing_install
+    info "Repair cleanup complete (MACROSCOPE_REPAIR_ONLY=1)."
+    return
+  fi
+
   detect_platform
   determine_install_dir
   prepare_tmp_dir
