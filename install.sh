@@ -66,6 +66,21 @@ repair_only_requested() {
   [ "${MACROSCOPE_REPAIR_ONLY:-0}" = "1" ]
 }
 
+extract_tarball() {
+  local archive="$1"
+  local destination="$2"
+
+  # BSD tar warns on inherited locales like C.UTF-8 on macOS. Extract under a
+  # minimal known-good locale so release installs stay quiet across shells.
+  env -i \
+    PATH="$PATH" \
+    HOME="$HOME" \
+    TMPDIR="${TMPDIR:-/tmp}" \
+    LANG=C \
+    LC_ALL=C \
+    tar -xzf "$archive" -C "$destination"
+}
+
 get_codex_home() {
   printf '%s' "${CODEX_HOME:-$HOME/.codex}"
 }
@@ -728,7 +743,7 @@ fetch_plugin_bundle() {
 
     mkdir -p "$CHECKOUT_DIR"
     if curl -fL --progress-bar "$bundle_url" -o "$bundle_archive"; then
-      tar -xzf "$bundle_archive" -C "$CHECKOUT_DIR"
+      extract_tarball "$bundle_archive" "$CHECKOUT_DIR"
       success "Fetched plugin bundle from ${BOLD}${INSTALL_VERSION}${RESET}"
     else
       error "Failed to download the released plugin bundle."
