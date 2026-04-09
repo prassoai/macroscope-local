@@ -78,6 +78,444 @@ is_managed_codex_shim() {
   grep -Fq "Macroscope-managed Codex shim" "$path"
 }
 
+remove_file_if_present() {
+  local path="$1"
+  [ -f "$path" ] || return 1
+  if rm -f "$path" 2>/dev/null; then
+    success "Removed $path"
+    return 0
+  fi
+  warn "Could not remove $path"
+  return 1
+}
+
+remove_dir_if_present() {
+  local path="$1"
+  [ -d "$path" ] || return 1
+  if rm -rf "$path" 2>/dev/null; then
+    success "Removed $path"
+    return 0
+  fi
+  warn "Could not remove $path"
+  return 1
+}
+
+kill_running_processes() {
+  local found=0
+  local name=""
+  local pids=""
+  local pid=""
+  local deadline=""
+
+  if ! command -v pgrep >/dev/null 2>&1; then
+    info "pgrep not available; skipping process cleanup"
+    return
+  fi
+
+  for name in macroscope macroscope-mcp; do
+    pids="$(pgrep -x "$name" 2>/dev/null || true)"
+    [ -n "$pids" ] || continue
+    found=1
+
+    while IFS= read -r pid; do
+      [ -n "$pid" ] || continue
+      kill "$pid" 2>/dev/null || true
+    done <<< "$pids"
+
+    deadline=$((SECONDS + 3))
+    while pgrep -x "$name" >/dev/null 2>&1 && [ "$SECONDS" -lt "$deadline" ]; do
+      sleep 0.1
+    done
+
+    if pgrep -x "$name" >/dev/null 2>&1; then
+      pkill -9 -x "$name" 2>/dev/null || true
+      sleep 0.2
+    fi
+  done
+
+  if [ "$found" -eq 0 ]; then
+    info "No running Macroscope processes found"
+  else
+    success "Stopped running Macroscope processes"
+  fi
+}
+
+cleanup_binaries() {
+  local removed=0
+  local path=""
+  local shim_path="$HOME/.local/bin/codex"
+
+  for path in \
+    "$HOME/.local/bin/macroscope" \
+    "$HOME/.local/bin/macroscope.old" \
+    "$HOME/.local/bin/macroscope-mcp" \
+    "$HOME/go/bin/macroscope" \
+    "$HOME/go/bin/macroscope.old" \
+    "$HOME/go/bin/macroscope-mcp" \
+    "/usr/local/bin/macroscope" \
+    "/usr/local/bin/macroscope-mcp" \
+    "/opt/homebrew/bin/macroscope" \
+    "/opt/homebrew/bin/macroscope-mcp"
+  do
+    if remove_file_if_present "$path"; then
+      removed=1
+    fi
+  done
+
+  for path in \
+    "$HOME/.local/bin/macroscope-"* \
+    "$HOME/.local/bin/macroscope-update-"* \
+    "$HOME/go/bin/macroscope-"* \
+    "$HOME/go/bin/macroscope-update-"*
+  do
+    [ -e "$path" ] || continue
+    if rm -f "$path" 2>/dev/null; then
+      success "Removed $path"
+      removed=1
+    else
+      warn "Could not remove $path"
+    fi
+  done
+
+  if is_managed_codex_shim "$shim_path"; then
+    if remove_file_if_present "$shim_path"; then
+      removed=1
+    fi
+  fi
+
+  if [ "$removed" -eq 0 ]; then
+    info "No stale Macroscope binaries found"
+  fi
+}
+
+remove_plugin_directories() {
+  local removed=0
+  local codex_home=""
+  local codex_plugin_cache_root=""
+  local dir=""
+  local file=""
+
+  codex_home="$(get_codex_home)"
+  codex_plugin_cache_root="$codex_home/plugins/cache"
+
+  for dir in \
+    "$HOME/plugins/macroscope" \
+    "$HOME/plugins/macroscope-codereview" \
+    "$codex_home/plugins/macroscope" \
+    "$codex_home/plugins/macroscope-codereview" \
+    "$HOME/.claude/plugins/marketplaces/macroscope-local" \
+    "$HOME/.claude/plugins/cache/macroscope-local" \
+    "$HOME/.cursor/plugins/local/macroscope" \
+    "$HOME/.cursor/plugins/local/macroscope-codereview" \
+    "$HOME/.config/opencode/skills/macroscope" \
+    "$HOME/.config/opencode/skills/macroscope-local-review" \
+    "$HOME/.config/opencode/skills/macroscope-triage-pr-comments" \
+    "$HOME/.config/opencode/skills/macroscope-respond-to-pr-comments" \
+    "$HOME/.config/opencode/skills/macroscope-review-pr" \
+    "$HOME/.config/opencode/skills/local-review" \
+    "$HOME/.config/opencode/skills/triage-pr-comments" \
+    "$HOME/.config/opencode/skills/respond-to-pr-comments" \
+    "$HOME/.config/opencode/skills/review-pr"
+  do
+    if remove_dir_if_present "$dir"; then
+      removed=1
+    fi
+  done
+
+  if [ -d "$codex_plugin_cache_root" ]; then
+    while IFS= read -r -d '' dir; do
+      if rm -rf "$dir" 2>/dev/null; then
+        success "Removed $dir"
+        removed=1
+      else
+        warn "Could not remove $dir"
+      fi
+    done < <(
+      find "$codex_plugin_cache_root" -mindepth 2 -maxdepth 4 \
+        \( -type d -o -type f \) \
+        \( -iname "macroscope" -o -iname "macroscope-*" -o -iname "*macroscope*" \) \
+        -print0 2>/dev/null || true
+    )
+  fi
+
+  if [ -d "$HOME/.claude/plugins" ]; then
+    while IFS= read -r -d '' dir; do
+      if rm -rf "$dir" 2>/dev/null; then
+        success "Removed $dir"
+        removed=1
+      else
+        warn "Could not remove $dir"
+      fi
+    done < <(
+      find "$HOME/.claude/plugins" -mindepth 1 -maxdepth 4 -type d -iname "*macroscope*" \
+        -print0 2>/dev/null || true
+    )
+  fi
+
+  for file in \
+    "$HOME/.config/opencode/plugins/macroscope.js" \
+    "$HOME/.config/opencode/commands/macroscope.md" \
+    "$HOME/.config/opencode/commands/macroscope-local-review.md" \
+    "$HOME/.config/opencode/commands/macroscope-triage-pr-comments.md" \
+    "$HOME/.config/opencode/commands/macroscope-respond-to-pr-comments.md" \
+    "$HOME/.config/opencode/commands/macroscope-review-pr.md" \
+    "$HOME/.config/opencode/commands/local-review.md" \
+    "$HOME/.config/opencode/commands/triage-pr-comments.md" \
+    "$HOME/.config/opencode/commands/respond-to-pr-comments.md" \
+    "$HOME/.config/opencode/commands/review-pr.md"
+  do
+    if remove_file_if_present "$file"; then
+      removed=1
+    fi
+  done
+
+  if [ "$removed" -eq 0 ]; then
+    info "No stale plugin directories or command files found"
+  fi
+}
+
+clean_json_and_toml_state() {
+  local codex_home=""
+
+  codex_home="$(get_codex_home)"
+
+  python3 - \
+    "$HOME/.agents/plugins/marketplace.json" \
+    "$codex_home/config.toml" \
+    "$HOME/.claude.json" \
+    "$HOME/.claude/plugins/known_marketplaces.json" \
+    "$HOME/.claude/plugins/installed_plugins.json" \
+    "$HOME/.claude/settings.json" \
+    "$HOME/.claude/settings.local.json" \
+    "$HOME/.cursor/mcp.json" <<'PY'
+import json
+import os
+import re
+import sys
+
+(
+    codex_marketplace,
+    codex_config,
+    claude_json,
+    claude_known_marketplaces,
+    claude_installed_plugins,
+    claude_settings,
+    claude_settings_local,
+    cursor_mcp_json,
+) = sys.argv[1:9]
+
+
+def contains_macroscope(value):
+    return isinstance(value, str) and "macroscope" in value.lower()
+
+
+def scrub_macroscope(value):
+    if isinstance(value, dict):
+        changed = False
+        result = {}
+        for key, item in value.items():
+            if contains_macroscope(key):
+                changed = True
+                continue
+            new_item, item_changed = scrub_macroscope(item)
+            if item_changed:
+                changed = True
+            result[key] = new_item
+        return result, changed
+
+    if isinstance(value, list):
+        changed = False
+        result = []
+        for item in value:
+            if contains_macroscope(item):
+                changed = True
+                continue
+            new_item, item_changed = scrub_macroscope(item)
+            if item_changed:
+                changed = True
+            result.append(new_item)
+        return result, changed
+
+    return value, False
+
+
+def load_json(path):
+    if not os.path.exists(path):
+        return None, None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f), os.stat(path).st_mode
+    except Exception:
+        return None, None
+
+
+def write_json(path, data, mode):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")
+    if mode is not None:
+        os.chmod(path, mode)
+
+
+marketplace_data, marketplace_mode = load_json(codex_marketplace)
+if isinstance(marketplace_data, dict):
+    plugins = marketplace_data.get("plugins")
+    if isinstance(plugins, list):
+        filtered = []
+        for item in plugins:
+            if not isinstance(item, dict):
+                filtered.append(item)
+                continue
+            name = item.get("name")
+            source = item.get("source")
+            source_path = source.get("path") if isinstance(source, dict) else None
+            if contains_macroscope(name) or contains_macroscope(source_path):
+                continue
+            filtered.append(item)
+        if filtered != plugins:
+            marketplace_data["plugins"] = filtered
+            write_json(codex_marketplace, marketplace_data, marketplace_mode)
+
+
+if os.path.exists(codex_config):
+    mode = os.stat(codex_config).st_mode
+    with open(codex_config, "r", encoding="utf-8") as f:
+        text = f.read()
+
+    new_text = re.sub(r'(?ms)^\[plugins\."[^"]*macroscope[^"]*"\]\n.*?(?=^\[|\Z)', "", text)
+    new_text = re.sub(r'(?ms)^\[mcp_servers\.macroscope-codereview\]\n.*?(?=^\[|\Z)', "", new_text)
+    new_text = re.sub(r'(?m)^# Added by Macroscope installer\n?', "", new_text)
+    new_text = re.sub(r'\n{3,}', '\n\n', new_text).strip()
+    if new_text:
+        new_text += "\n"
+
+    if new_text != text:
+        with open(codex_config, "w", encoding="utf-8") as f:
+            f.write(new_text)
+        os.chmod(codex_config, mode)
+
+
+claude_data, claude_mode = load_json(claude_json)
+if isinstance(claude_data, dict):
+    changed = False
+
+    servers = claude_data.get("mcpServers")
+    if isinstance(servers, dict):
+        to_delete = [key for key in servers if contains_macroscope(key)]
+        for key in to_delete:
+            del servers[key]
+            changed = True
+
+    projects = claude_data.get("projects")
+    if isinstance(projects, dict):
+        for project in projects.values():
+            if not isinstance(project, dict):
+                continue
+            project_servers = project.get("mcpServers")
+            if isinstance(project_servers, dict):
+                to_delete = [key for key in project_servers if contains_macroscope(key)]
+                for key in to_delete:
+                    del project_servers[key]
+                    changed = True
+
+    claude_data, scrubbed = scrub_macroscope(claude_data)
+    if scrubbed:
+        changed = True
+
+    if changed:
+        write_json(claude_json, claude_data, claude_mode)
+
+
+known_marketplaces_data, known_marketplaces_mode = load_json(claude_known_marketplaces)
+if isinstance(known_marketplaces_data, dict):
+    to_delete = [key for key in known_marketplaces_data if contains_macroscope(key)]
+    if to_delete:
+        for key in to_delete:
+            del known_marketplaces_data[key]
+        write_json(claude_known_marketplaces, known_marketplaces_data, known_marketplaces_mode)
+
+
+installed_plugins_data, installed_plugins_mode = load_json(claude_installed_plugins)
+if isinstance(installed_plugins_data, dict):
+    plugins = installed_plugins_data.get("plugins")
+    if isinstance(plugins, dict):
+        to_delete = [key for key in plugins if contains_macroscope(key)]
+        if to_delete:
+            for key in to_delete:
+                del plugins[key]
+            write_json(claude_installed_plugins, installed_plugins_data, installed_plugins_mode)
+
+
+for path in (claude_settings, claude_settings_local):
+    data, mode = load_json(path)
+    if not isinstance(data, dict):
+        continue
+
+    changed = False
+
+    extra = data.get("extraKnownMarketplaces")
+    if isinstance(extra, dict):
+        to_delete = [key for key in extra if contains_macroscope(key)]
+        for key in to_delete:
+            del extra[key]
+            changed = True
+        if not extra:
+            data.pop("extraKnownMarketplaces", None)
+
+    enabled = data.get("enabledPlugins")
+    if isinstance(enabled, dict):
+        to_delete = [key for key in enabled if contains_macroscope(key)]
+        for key in to_delete:
+            del enabled[key]
+            changed = True
+        if not enabled:
+            data.pop("enabledPlugins", None)
+
+    data, scrubbed = scrub_macroscope(data)
+    if scrubbed:
+        changed = True
+
+    if changed:
+        write_json(path, data, mode)
+
+
+cursor_data, cursor_mode = load_json(cursor_mcp_json)
+if isinstance(cursor_data, dict):
+    servers = cursor_data.get("mcpServers")
+    if isinstance(servers, dict):
+        to_delete = [key for key in servers if contains_macroscope(key)]
+        if to_delete:
+            for key in to_delete:
+                del servers[key]
+            write_json(cursor_mcp_json, cursor_data, cursor_mode)
+PY
+}
+
+cleanup_cli_registrations() {
+  if command -v claude >/dev/null 2>&1; then
+    if claude mcp remove macroscope-codereview -s user >/dev/null 2>&1; then
+      success "Removed legacy Claude Code MCP registration"
+    fi
+  fi
+
+  if command -v gemini >/dev/null 2>&1; then
+    if gemini mcp remove macroscope-codereview >/dev/null 2>&1; then
+      success "Removed legacy Gemini MCP registration"
+    fi
+  fi
+}
+
+repair_existing_install() {
+  step "Repairing prior Macroscope install..."
+
+  kill_running_processes
+  cleanup_binaries
+  remove_plugin_directories
+  clean_json_and_toml_state
+  cleanup_cli_registrations
+  kill_running_processes
+}
+
 check_dependencies() {
   local missing_deps=()
 
@@ -910,6 +1348,7 @@ main() {
   determine_install_dir
   prepare_tmp_dir
   resolve_version "$@"
+  repair_existing_install
 
   install_binary
   fetch_plugin_bundle
