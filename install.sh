@@ -203,7 +203,11 @@ remove_plugin_directories() {
     "$HOME/.config/opencode/skills/macroscope-local-review" \
     "$HOME/.config/opencode/skills/macroscope-triage-pr-comments" \
     "$HOME/.config/opencode/skills/macroscope-respond-to-pr-comments" \
-    "$HOME/.config/opencode/skills/macroscope-review-pr"
+    "$HOME/.config/opencode/skills/macroscope-review-pr" \
+    "$HOME/.config/opencode/skills/local-review" \
+    "$HOME/.config/opencode/skills/triage-pr-comments" \
+    "$HOME/.config/opencode/skills/respond-to-pr-comments" \
+    "$HOME/.config/opencode/skills/review-pr"
   do
     if remove_dir_if_present "$dir"; then
       removed=1
@@ -269,7 +273,11 @@ PY
     "$HOME/.config/opencode/commands/macroscope-local-review.md" \
     "$HOME/.config/opencode/commands/macroscope-triage-pr-comments.md" \
     "$HOME/.config/opencode/commands/macroscope-respond-to-pr-comments.md" \
-    "$HOME/.config/opencode/commands/macroscope-review-pr.md"
+    "$HOME/.config/opencode/commands/macroscope-review-pr.md" \
+    "$HOME/.config/opencode/commands/local-review.md" \
+    "$HOME/.config/opencode/commands/triage-pr-comments.md" \
+    "$HOME/.config/opencode/commands/respond-to-pr-comments.md" \
+    "$HOME/.config/opencode/commands/review-pr.md"
   do
     if remove_file_if_present "$file"; then
       removed=1
