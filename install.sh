@@ -166,21 +166,6 @@ cleanup_binaries() {
     fi
   done
 
-  for path in \
-    "$HOME/.local/bin/macroscope-"* \
-    "$HOME/.local/bin/macroscope-update-"* \
-    "$HOME/go/bin/macroscope-"* \
-    "$HOME/go/bin/macroscope-update-"*
-  do
-    [ -e "$path" ] || continue
-    if rm -f "$path" 2>/dev/null; then
-      success "Removed $path"
-      removed=1
-    else
-      warn "Could not remove $path"
-    fi
-  done
-
   if is_managed_codex_shim "$shim_path"; then
     if remove_file_if_present "$shim_path"; then
       removed=1
@@ -196,11 +181,14 @@ remove_plugin_directories() {
   local removed=0
   local codex_home=""
   local codex_plugin_cache_root=""
+  local codex_marketplace_json=""
   local dir=""
   local file=""
+  local marketplace_name=""
 
   codex_home="$(get_codex_home)"
   codex_plugin_cache_root="$codex_home/plugins/cache"
+  codex_marketplace_json="$HOME/.agents/plugins/marketplace.json"
 
   for dir in \
     "$HOME/plugins/macroscope" \
@@ -223,32 +211,55 @@ remove_plugin_directories() {
   done
 
   if [ -d "$codex_plugin_cache_root" ]; then
-    while IFS= read -r -d '' dir; do
-      if rm -rf "$dir" 2>/dev/null; then
-        success "Removed $dir"
-        removed=1
-      else
-        warn "Could not remove $dir"
-      fi
+    while IFS= read -r marketplace_name; do
+      [ -n "$marketplace_name" ] || continue
+      for dir in \
+        "$codex_plugin_cache_root/$marketplace_name/macroscope" \
+        "$codex_plugin_cache_root/$marketplace_name/macroscope-codereview"
+      do
+        if remove_dir_if_present "$dir"; then
+          removed=1
+        fi
+      done
     done < <(
-      find "$codex_plugin_cache_root" -mindepth 2 -maxdepth 4 \
-        \( -type d -o -type f \) \
-        \( -iname "macroscope" -o -iname "macroscope-*" -o -iname "*macroscope*" \) \
-        -print0 2>/dev/null || true
-    )
-  fi
+      python3 - "$codex_marketplace_json" <<'PY'
+import json
+import os
+import sys
 
-  if [ -d "$HOME/.claude/plugins" ]; then
-    while IFS= read -r -d '' dir; do
-      if rm -rf "$dir" 2>/dev/null; then
-        success "Removed $dir"
-        removed=1
-      else
-        warn "Could not remove $dir"
-      fi
-    done < <(
-      find "$HOME/.claude/plugins" -mindepth 1 -maxdepth 4 -type d -iname "*macroscope*" \
-        -print0 2>/dev/null || true
+path = sys.argv[1]
+names = {"local-user-plugins"}
+owned_names = {"macroscope", "macroscope-codereview"}
+owned_paths = {
+    "./plugins/macroscope",
+    "plugins/macroscope",
+    "./plugins/macroscope-codereview",
+    "plugins/macroscope-codereview",
+}
+
+if os.path.exists(path):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        data = None
+    if isinstance(data, dict):
+        marketplace_name = data.get("name")
+        plugins = data.get("plugins")
+        if isinstance(marketplace_name, str) and isinstance(plugins, list):
+            for item in plugins:
+                if not isinstance(item, dict):
+                    continue
+                name = item.get("name")
+                source = item.get("source")
+                source_path = source.get("path") if isinstance(source, dict) else None
+                if name in owned_names and source_path in owned_paths:
+                    names.add(marketplace_name.strip())
+                    break
+
+for name in sorted(name for name in names if name):
+    print(name)
+PY
     )
   fi
 
@@ -301,76 +312,79 @@ import sys
 ) = sys.argv[1:9]
 
 
-OWNED_EXACT = {
-    "macroscope",
-    ".macroscope",
-    ".macroscope.yaml",
-    "macroscope-local",
-    "macroscope-codereview",
+OWNED_RELATIVE_PLUGIN_PATHS = {
+    "./plugins/macroscope",
+    "plugins/macroscope",
+    "./plugins/macroscope-codereview",
+    "plugins/macroscope-codereview",
 }
-OWNED_PREFIXES = (
-    "macroscope-",
-    "macroscope@",
-    "mcp__macroscope-",
-    "mcp__macroscope@",
-)
 
 
-def mentions_macroscope(value):
-    return isinstance(value, str) and "macroscope" in value.lower()
-
-
-def is_owned_name(value):
+def normalized_string(value):
     if not isinstance(value, str):
-        return False
-    value = value.strip().lower()
-    if not value:
-        return False
-    return value in OWNED_EXACT or any(value.startswith(prefix) for prefix in OWNED_PREFIXES)
+        return ""
+    return value.strip().lower()
 
 
-def is_owned_path(value):
-    if not isinstance(value, str):
-        return False
-    value = value.strip().lower()
-    if not value:
-        return False
-    if is_owned_name(value):
-        return True
-    tokens = [token for token in re.split(r"[\\\\/]+", value) if token]
-    if not tokens:
-        return False
-    return is_owned_name(tokens[-1])
+def is_owned_relative_plugin_path(value):
+    value = normalized_string(value)
+    return value in OWNED_RELATIVE_PLUGIN_PATHS
 
 
-def scrub_macroscope(value):
-    if isinstance(value, dict):
-        changed = False
-        result = {}
-        for key, item in value.items():
-            if is_owned_name(key):
-                changed = True
-                continue
-            new_item, item_changed = scrub_macroscope(item)
-            if item_changed:
-                changed = True
-            result[key] = new_item
-        return result, changed
+def get_owned_marketplace_names(data):
+    names = {"local-user-plugins"}
+    if not isinstance(data, dict):
+        return names
 
-    if isinstance(value, list):
-        changed = False
-        result = []
-        for item in value:
-            if is_owned_name(item):
-                changed = True
-                continue
-            new_item, item_changed = scrub_macroscope(item)
-            if item_changed:
-                changed = True
-            result.append(new_item)
-        return result, changed
+    marketplace_name = normalized_string(data.get("name"))
+    plugins = data.get("plugins")
+    if not marketplace_name or not isinstance(plugins, list):
+        return names
 
-    return value, False
+    for item in plugins:
+        if not isinstance(item, dict):
+            continue
+        name = normalized_string(item.get("name"))
+        source = item.get("source")
+        source_path = source.get("path") if isinstance(source, dict) else None
+        if name in {"macroscope", "macroscope-codereview"} and is_owned_relative_plugin_path(source_path):
+            names.add(marketplace_name)
+            break
+
+    return names
+
+
+def get_owned_plugin_keys(marketplace_names):
+    keys = set()
+    for marketplace_name in marketplace_names:
+        if not marketplace_name:
+            continue
+        keys.add(f'macroscope@{marketplace_name}')
+        keys.add(f'macroscope-codereview@{marketplace_name}')
+    return keys
+
+
+def drop_owned_marketplace_plugins(entries):
+    if not isinstance(entries, list):
+        return entries, False
+
+    changed = False
+    filtered = []
+    for item in entries:
+        if not isinstance(item, dict):
+            filtered.append(item)
+            continue
+
+        name = normalized_string(item.get("name"))
+        source = item.get("source")
+        source_path = source.get("path") if isinstance(source, dict) else None
+        if name in {"macroscope", "macroscope-codereview"} and is_owned_relative_plugin_path(source_path):
+            changed = True
+            continue
+
+        filtered.append(item)
+
+    return filtered, changed
 
 
 def load_json(path):
@@ -392,23 +406,14 @@ def write_json(path, data, mode):
 
 
 marketplace_data, marketplace_mode = load_json(codex_marketplace)
+owned_marketplace_names = get_owned_marketplace_names(marketplace_data)
+owned_plugin_keys = get_owned_plugin_keys(owned_marketplace_names)
 if isinstance(marketplace_data, dict):
     plugins = marketplace_data.get("plugins")
-    if isinstance(plugins, list):
-        filtered = []
-        for item in plugins:
-            if not isinstance(item, dict):
-                filtered.append(item)
-                continue
-            name = item.get("name")
-            source = item.get("source")
-            source_path = source.get("path") if isinstance(source, dict) else None
-            if is_owned_name(name) or is_owned_path(source_path):
-                continue
-            filtered.append(item)
-        if filtered != plugins:
-            marketplace_data["plugins"] = filtered
-            write_json(codex_marketplace, marketplace_data, marketplace_mode)
+    filtered, changed = drop_owned_marketplace_plugins(plugins)
+    if changed:
+        marketplace_data["plugins"] = filtered
+        write_json(codex_marketplace, marketplace_data, marketplace_mode)
 
 
 if os.path.exists(codex_config):
@@ -416,8 +421,13 @@ if os.path.exists(codex_config):
     with open(codex_config, "r", encoding="utf-8") as f:
         text = f.read()
 
-    owned_plugin = r'(?:macroscope(?:[-@][^"]*)?|mcp__macroscope(?:[-@][^"]*)?)'
-    new_text = re.sub(rf'(?ms)^\[plugins\."{owned_plugin}"\]\n.*?(?=^\[|\Z)', "", text)
+    new_text = text
+    for plugin_key in sorted(owned_plugin_keys):
+        new_text = re.sub(
+            rf'(?ms)^\[plugins\."{re.escape(plugin_key)}"\]\n.*?(?=^\[|\Z)',
+            "",
+            new_text,
+        )
     new_text = re.sub(r'(?ms)^\[mcp_servers\.macroscope-codereview\]\n.*?(?=^\[|\Z)', "", new_text)
     new_text = re.sub(r'(?m)^# Added by Macroscope installer\n?', "", new_text)
     new_text = re.sub(r'\n{3,}', '\n\n', new_text).strip()
@@ -435,11 +445,9 @@ if isinstance(claude_data, dict):
     changed = False
 
     servers = claude_data.get("mcpServers")
-    if isinstance(servers, dict):
-        to_delete = [key for key in servers if is_owned_name(key)]
-        for key in to_delete:
-            del servers[key]
-            changed = True
+    if isinstance(servers, dict) and "macroscope-codereview" in servers:
+        del servers["macroscope-codereview"]
+        changed = True
 
     projects = claude_data.get("projects")
     if isinstance(projects, dict):
@@ -447,38 +455,26 @@ if isinstance(claude_data, dict):
             if not isinstance(project, dict):
                 continue
             project_servers = project.get("mcpServers")
-            if isinstance(project_servers, dict):
-                to_delete = [key for key in project_servers if is_owned_name(key)]
-                for key in to_delete:
-                    del project_servers[key]
-                    changed = True
-
-    claude_data, scrubbed = scrub_macroscope(claude_data)
-    if scrubbed:
-        changed = True
+            if isinstance(project_servers, dict) and "macroscope-codereview" in project_servers:
+                del project_servers["macroscope-codereview"]
+                changed = True
 
     if changed:
         write_json(claude_json, claude_data, claude_mode)
 
 
 known_marketplaces_data, known_marketplaces_mode = load_json(claude_known_marketplaces)
-if isinstance(known_marketplaces_data, dict):
-    to_delete = [key for key in known_marketplaces_data if is_owned_name(key)]
-    if to_delete:
-        for key in to_delete:
-            del known_marketplaces_data[key]
-        write_json(claude_known_marketplaces, known_marketplaces_data, known_marketplaces_mode)
+if isinstance(known_marketplaces_data, dict) and "macroscope-local" in known_marketplaces_data:
+    del known_marketplaces_data["macroscope-local"]
+    write_json(claude_known_marketplaces, known_marketplaces_data, known_marketplaces_mode)
 
 
 installed_plugins_data, installed_plugins_mode = load_json(claude_installed_plugins)
 if isinstance(installed_plugins_data, dict):
     plugins = installed_plugins_data.get("plugins")
-    if isinstance(plugins, dict):
-        to_delete = [key for key in plugins if is_owned_name(key)]
-        if to_delete:
-            for key in to_delete:
-                del plugins[key]
-            write_json(claude_installed_plugins, installed_plugins_data, installed_plugins_mode)
+    if isinstance(plugins, dict) and "macroscope@macroscope-local" in plugins:
+        del plugins["macroscope@macroscope-local"]
+        write_json(claude_installed_plugins, installed_plugins_data, installed_plugins_mode)
 
 
 for path in (claude_settings, claude_settings_local):
@@ -489,26 +485,18 @@ for path in (claude_settings, claude_settings_local):
     changed = False
 
     extra = data.get("extraKnownMarketplaces")
-    if isinstance(extra, dict):
-        to_delete = [key for key in extra if is_owned_name(key)]
-        for key in to_delete:
-            del extra[key]
-            changed = True
+    if isinstance(extra, dict) and "macroscope-local" in extra:
+        del extra["macroscope-local"]
+        changed = True
         if not extra:
             data.pop("extraKnownMarketplaces", None)
 
     enabled = data.get("enabledPlugins")
-    if isinstance(enabled, dict):
-        to_delete = [key for key in enabled if is_owned_name(key)]
-        for key in to_delete:
-            del enabled[key]
-            changed = True
+    if isinstance(enabled, dict) and "macroscope@macroscope-local" in enabled:
+        del enabled["macroscope@macroscope-local"]
+        changed = True
         if not enabled:
             data.pop("enabledPlugins", None)
-
-    data, scrubbed = scrub_macroscope(data)
-    if scrubbed:
-        changed = True
 
     if changed:
         write_json(path, data, mode)
@@ -517,12 +505,9 @@ for path in (claude_settings, claude_settings_local):
 cursor_data, cursor_mode = load_json(cursor_mcp_json)
 if isinstance(cursor_data, dict):
     servers = cursor_data.get("mcpServers")
-    if isinstance(servers, dict):
-        to_delete = [key for key in servers if is_owned_name(key)]
-        if to_delete:
-            for key in to_delete:
-                del servers[key]
-            write_json(cursor_mcp_json, cursor_data, cursor_mode)
+    if isinstance(servers, dict) and "macroscope-codereview" in servers:
+        del servers["macroscope-codereview"]
+        write_json(cursor_mcp_json, cursor_data, cursor_mode)
 PY
 }
 
@@ -541,7 +526,7 @@ cleanup_cli_registrations() {
 }
 
 repair_existing_install() {
-  step "Repairing prior Macroscope install..."
+  step "Repairing install-owned Macroscope state..."
 
   kill_running_processes
   cleanup_binaries
@@ -1389,7 +1374,7 @@ main() {
 
   if repair_only_requested; then
     repair_existing_install
-    info "Repair cleanup complete (MACROSCOPE_REPAIR_ONLY=1)."
+    info "Repair cleanup complete (MACROSCOPE_REPAIR_ONLY=1). Preserved ~/.macroscope and saved credentials."
     return
   fi
 

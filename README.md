@@ -10,6 +10,8 @@ curl -sSL https://raw.githubusercontent.com/prassoai/macroscope-local/main/insta
 
 The installer downloads `macroscope`, auto-configures your shell PATH, and installs the released Macroscope integration for supported Codex, Claude Code, Cursor, and OpenCode setups.
 It also repairs stale Macroscope-owned binaries, plugin state, and legacy MCP registrations before laying down the fresh install.
+Normal installs preserve `~/.macroscope` and saved credentials; they do not perform a destructive wipe.
+For a full local removal after the CLI is available, run `macroscope uninstall`.
 
 If your `codex` CLI is too old to load local plugins, the installer will place a small wrapper in `~/.local/bin/codex` that forwards to the newer Codex.app bundled binary.
 
