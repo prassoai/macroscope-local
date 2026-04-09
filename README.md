@@ -1,6 +1,6 @@
 # macroscope-local
 
-Macroscope CLI release artifacts plus the installer and reset scripts for Codex, Claude Code, Cursor, and OpenCode.
+Macroscope CLI release artifacts plus the installer for Codex, Claude Code, Cursor, and OpenCode.
 
 ## Install Macroscope
 
@@ -12,7 +12,7 @@ The installer downloads `macroscope`, auto-configures your shell PATH, and insta
 
 If your `codex` CLI is too old to load local plugins, the installer will place a small wrapper in `~/.local/bin/codex` that forwards to the newer Codex.app bundled binary.
 
-The full public Macroscope plugin bundle is authored in the `back` repo under `tools/cmd/macrodaemon/public-plugin/`. This repo distributes the released CLI and the installer/reset scripts. For local development, set `MACROSCOPE_LOCAL_BACK_REPO` and the installer will load the full plugin bundle directly from that back worktree.
+The full public Macroscope plugin bundle is authored in the `back` repo under `tools/cmd/macrodaemon/public-plugin/`. This repo distributes the released CLI and installer. For local development, set `MACROSCOPE_LOCAL_BACK_REPO` and the installer will load the full plugin bundle directly from that back worktree.
 
 After installation:
 
