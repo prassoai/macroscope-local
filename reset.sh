@@ -194,6 +194,11 @@ remove_config_and_logs() {
     removed=1
   fi
 
+  cfg="$HOME/Documents/.macroscope.yaml"
+  if remove_file_if_present "$cfg"; then
+    removed=1
+  fi
+
   current="$PWD"
   while :; do
     cfg="$current/.macroscope.yaml"
@@ -210,7 +215,7 @@ remove_config_and_logs() {
     current="$parent"
   done
 
-  for search_root in "$HOME/Documents/GitHub" "$HOME/.codex"; do
+  for search_root in "$HOME/Documents/GitHub" "$CODEX_HOME_DIR"; do
     [ -d "$search_root" ] || continue
     while IFS= read -r -d '' cfg; do
       rm -f "$cfg"
