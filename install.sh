@@ -524,6 +524,13 @@ cleanup_cli_registrations() {
     if claude mcp remove macroscope-codereview -s user >/dev/null 2>&1; then
       success "Removed legacy Claude Code MCP registration"
     fi
+    # Claude Code maintains internal plugin state beyond the JSON config files
+    # on disk — disable + uninstall via CLI to reach that internal state.
+    for plugin_id in macroscope@macroscope-local macroscope-codereview@macroscope-local; do
+      claude plugins disable "$plugin_id" >/dev/null 2>&1 || true
+      claude plugins uninstall "$plugin_id" >/dev/null 2>&1 || true
+    done
+    claude plugins marketplace remove macroscope-local >/dev/null 2>&1 || true
   fi
 
   if command -v gemini >/dev/null 2>&1; then
