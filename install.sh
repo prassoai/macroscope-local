@@ -524,6 +524,21 @@ cleanup_cli_registrations() {
     if claude mcp remove macroscope-codereview -s user >/dev/null 2>&1; then
       success "Removed legacy Claude Code MCP registration"
     fi
+    # Claude Code maintains internal plugin state beyond the JSON config files
+    # on disk — disable + uninstall via CLI to reach that internal state.
+    # No timeout wrapper: macOS lacks `timeout` in base install; the Go
+    # uninstaller (primary path) already uses 10s timeouts per call.
+    local _plugin_removed=0
+    for plugin_id in macroscope@macroscope-local macroscope-codereview@macroscope-local; do
+      claude plugins disable "$plugin_id" >/dev/null 2>&1 || true
+      if claude plugins uninstall "$plugin_id" >/dev/null 2>&1; then
+        _plugin_removed=1
+      fi
+    done
+    if claude plugins marketplace remove macroscope-local >/dev/null 2>&1; then
+      _plugin_removed=1
+    fi
+    [ "$_plugin_removed" -eq 1 ] && success "Removed plugin from Claude Code CLI"
   fi
 
   if command -v gemini >/dev/null 2>&1; then
