@@ -910,10 +910,10 @@ install_codex_cli_shim() {
 
   if [ ! -x "$CODEX_BUNDLED_BINARY" ] || ! codex_supports_plugins "$CODEX_BUNDLED_BINARY"; then
     if [ -n "$current_codex" ]; then
-      CODEX_PLUGIN_HOST_WARNING="Codex CLI at ${current_codex} does not support local plugins. Install or update Codex.app to use /macroscope:macroscope from the CLI."
+      CODEX_PLUGIN_HOST_WARNING="Codex CLI at ${current_codex} does not support local plugins. Install or update Codex.app to use /macroscope:review from the CLI."
       warn "$CODEX_PLUGIN_HOST_WARNING"
     else
-      CODEX_PLUGIN_HOST_WARNING="Codex CLI is not installed. Install Codex.app to use /macroscope:macroscope from the CLI."
+      CODEX_PLUGIN_HOST_WARNING="Codex CLI is not installed. Install Codex.app to use /macroscope:review from the CLI."
       warn "$CODEX_PLUGIN_HOST_WARNING"
     fi
     return
@@ -1292,7 +1292,7 @@ PY
   fi
 
   if [ -f "$HOME/.claude/plugins/cache/macroscope-local/macroscope/$PLUGIN_VERSION/.claude-plugin/plugin.json" ] && \
-     [ -f "$HOME/.claude/plugins/cache/macroscope-local/macroscope/$PLUGIN_VERSION/skills/macroscope/SKILL.md" ] && \
+     [ -f "$HOME/.claude/plugins/cache/macroscope-local/macroscope/$PLUGIN_VERSION/skills/review/SKILL.md" ] && \
      [ -f "$HOME/.claude/plugins/cache/macroscope-local/macroscope/$PLUGIN_VERSION/agents/macroscope-review-worker.md" ]; then
     success "Claude Code plugin installed with background worker"
   else
@@ -1305,7 +1305,7 @@ PY
     warn "Cursor plugin install did not produce the expected local plugin entry"
   fi
 
-  if [ -f "$HOME/.config/opencode/plugins/macroscope.js" ] && [ -f "$HOME/.config/opencode/commands/macroscope.md" ] && [ -f "$HOME/.config/opencode/skills/macroscope/SKILL.md" ]; then
+  if [ -f "$HOME/.config/opencode/plugins/macroscope.js" ] && [ -f "$HOME/.config/opencode/commands/macroscope.md" ] && [ -f "$HOME/.config/opencode/skills/review/SKILL.md" ]; then
     success "OpenCode plugin, commands, and skills installed"
   else
     warn "OpenCode install did not produce the expected plugin, command, and skill files"
@@ -1333,17 +1333,14 @@ print_installation_completion() {
   printf "${BOLD}Quick start:${RESET}\n"
   printf "  ${CYAN}macroscope${RESET}                     ${DIM}# Launch the interactive wizard${RESET}\n"
   printf "  ${CYAN}macroscope codereview --base <base_branch>${RESET} ${DIM}# Run the CLI directly${RESET}\n"
-  printf "  ${CYAN}/macroscope${RESET}                  ${DIM}# Local review in Claude Code or OpenCode${RESET}\n"
-  printf "  ${CYAN}/macroscope loop${RESET}             ${DIM}# Autopilot loop in Claude Code or OpenCode${RESET}\n"
-  printf "  ${CYAN}/macroscope:macroscope${RESET}      ${DIM}# Local review in Codex or Cursor${RESET}\n"
-  printf "  ${CYAN}/macroscope:macroscope loop${RESET} ${DIM}# Autopilot loop in Codex or Cursor${RESET}\n"
+  printf "  ${CYAN}/macroscope:review${RESET}           ${DIM}# Local review${RESET}\n"
+  printf "  ${CYAN}/macroscope:loop${RESET}             ${DIM}# Autopilot review-fix-push cycle${RESET}\n"
   echo ""
   printf "${BOLD}Notes:${RESET}\n"
   printf "  Restart Codex, Claude Code, Cursor, or OpenCode if they were already open.\n"
-  printf "  /macroscope now defaults to the local streaming CLI review path.\n"
-  printf "  Claude Code launches /macroscope in a background worker by default.\n"
-  printf "  /macroscope loop runs the full review-fix-push-re-review autopilot cycle.\n"
-  printf "  Local review validates each issue before acting and keeps poll sleeps capped at 60 seconds.\n"
+  printf "  /macroscope:review runs a local streaming CLI review.\n"
+  printf "  /macroscope:loop runs the full review-fix-push-re-review autopilot cycle.\n"
+  printf "  Claude Code launches reviews in a background worker.\n"
   if [ "$CODEX_SHIM_INSTALLED" = "1" ]; then
     printf "  ${BOLD}codex${RESET} now points at the bundled Codex.app CLI so plugins work from the terminal.\n"
   elif [ -n "$CODEX_PLUGIN_HOST_WARNING" ]; then
@@ -1385,8 +1382,8 @@ launch_wizard() {
 }
 
 main() {
-  if ! repair_only_requested && command -v clear >/dev/null 2>&1 && [ -t 1 ]; then
-    clear || true
+  if ! repair_only_requested && [ -t 1 ]; then
+    printf '\033[H\033[2J'
   fi
   if ! repair_only_requested; then
     print_banner
