@@ -200,6 +200,8 @@ remove_plugin_directories() {
     "$HOME/.cursor/plugins/local/macroscope" \
     "$HOME/.cursor/plugins/local/macroscope-codereview" \
     "$HOME/.config/opencode/skills/macroscope" \
+    "$HOME/.config/opencode/skills/review" \
+    "$HOME/.config/opencode/skills/loop" \
     "$HOME/.config/opencode/skills/macroscope-local-review" \
     "$HOME/.config/opencode/skills/macroscope-triage-pr-comments" \
     "$HOME/.config/opencode/skills/macroscope-respond-to-pr-comments" \
@@ -270,6 +272,7 @@ PY
   for file in \
     "$HOME/.config/opencode/plugins/macroscope.js" \
     "$HOME/.config/opencode/commands/macroscope.md" \
+    "$HOME/.config/opencode/commands/macroscope-loop.md" \
     "$HOME/.config/opencode/commands/macroscope-local-review.md" \
     "$HOME/.config/opencode/commands/macroscope-triage-pr-comments.md" \
     "$HOME/.config/opencode/commands/macroscope-respond-to-pr-comments.md" \
@@ -505,6 +508,17 @@ for path in (claude_settings, claude_settings_local):
         changed = True
         if not enabled:
             data.pop("enabledPlugins", None)
+
+    permissions = data.get("permissions")
+    if isinstance(permissions, dict):
+        allow = permissions.get("allow")
+        if isinstance(allow, list) and "Bash(macroscope *)" in allow:
+            permissions["allow"] = [x for x in allow if x != "Bash(macroscope *)"]
+            changed = True
+            if not permissions["allow"]:
+                del permissions["allow"]
+            if not permissions:
+                data.pop("permissions", None)
 
     if changed:
         write_json(path, data, mode)
@@ -1145,6 +1159,15 @@ extra["macroscope-local"] = {
 enabled = data.setdefault("enabledPlugins", {})
 enabled["macroscope@macroscope-local"] = True
 
+# Auto-allow the macroscope CLI so /macroscope:review and /macroscope:loop
+# don't stall on a permission prompt for every invocation of the tool. We
+# only add the entry if it's not already present — we never remove or
+# modify existing user entries.
+permissions = data.setdefault("permissions", {})
+allow = permissions.setdefault("allow", [])
+if "Bash(macroscope *)" not in allow:
+    allow.append("Bash(macroscope *)")
+
 with open(path, "w", encoding="utf-8") as f:
     json.dump(data, f, indent=2)
     f.write("\n")
@@ -1228,7 +1251,11 @@ install_opencode_support() {
   cp "$plugin_file" "$opencode_plugins/macroscope.js"
 
   cp "$commands_src/macroscope.md" "$opencode_commands/macroscope.md"
-  copy_tree "$skills_src/macroscope" "$opencode_skills/macroscope"
+  if [ -f "$commands_src/macroscope-loop.md" ]; then
+    cp "$commands_src/macroscope-loop.md" "$opencode_commands/macroscope-loop.md"
+  fi
+  copy_tree "$skills_src/review" "$opencode_skills/review"
+  copy_tree "$skills_src/loop" "$opencode_skills/loop"
 
   success "Installed OpenCode plugin to ${BOLD}${opencode_plugins}/macroscope.js${RESET}"
   success "Installed OpenCode commands to ${BOLD}${opencode_commands}${RESET}"
