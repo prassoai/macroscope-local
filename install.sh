@@ -200,8 +200,8 @@ remove_plugin_directories() {
     "$HOME/.cursor/plugins/local/macroscope" \
     "$HOME/.cursor/plugins/local/macroscope-codereview" \
     "$HOME/.config/opencode/skills/macroscope" \
-    "$HOME/.config/opencode/skills/review" \
-    "$HOME/.config/opencode/skills/loop" \
+    "$HOME/.config/opencode/skills/macroscope-review" \
+    "$HOME/.config/opencode/skills/macroscope-loop" \
     "$HOME/.config/opencode/skills/macroscope-local-review" \
     "$HOME/.config/opencode/skills/macroscope-triage-pr-comments" \
     "$HOME/.config/opencode/skills/macroscope-respond-to-pr-comments" \
@@ -1466,8 +1466,15 @@ install_opencode_support() {
   if [ -f "$commands_src/macroscope-loop.md" ]; then
     cp "$commands_src/macroscope-loop.md" "$opencode_commands/macroscope-loop.md"
   fi
-  copy_tree "$skills_src/review" "$opencode_skills/review"
-  copy_tree "$skills_src/loop" "$opencode_skills/loop"
+  # Install OpenCode skills under macroscope-prefixed directory names.
+  # OpenCode's skill namespace is flat (~/.config/opencode/skills/<name>/),
+  # so bare names like `review` and `loop` would collide with skills any
+  # other OpenCode plugin installs under the same names. Claude Code,
+  # Cursor, and Codex all scope skills under a plugin directory, so they
+  # use the source names directly. The OpenCode command files point at
+  # the prefixed paths (see plugins/macroscope/commands/macroscope{,-loop}.md).
+  copy_tree "$skills_src/review" "$opencode_skills/macroscope-review"
+  copy_tree "$skills_src/loop" "$opencode_skills/macroscope-loop"
 
   # Auto-allow the macroscope CLI in OpenCode so the skill does not stall on
   # per-argv approval prompts. OpenCode reads `~/.config/opencode/opencode.json`
@@ -1575,7 +1582,7 @@ PY
     warn "Cursor plugin install did not produce the expected local plugin entry"
   fi
 
-  if [ -f "$HOME/.config/opencode/plugins/macroscope.js" ] && [ -f "$HOME/.config/opencode/commands/macroscope.md" ] && [ -f "$HOME/.config/opencode/skills/review/SKILL.md" ]; then
+  if [ -f "$HOME/.config/opencode/plugins/macroscope.js" ] && [ -f "$HOME/.config/opencode/commands/macroscope.md" ] && [ -f "$HOME/.config/opencode/skills/macroscope-review/SKILL.md" ]; then
     success "OpenCode plugin, commands, and skills installed"
   else
     warn "OpenCode install did not produce the expected plugin, command, and skill files"
