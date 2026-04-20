@@ -280,7 +280,8 @@ PY
     "$HOME/.config/opencode/commands/local-review.md" \
     "$HOME/.config/opencode/commands/triage-pr-comments.md" \
     "$HOME/.config/opencode/commands/respond-to-pr-comments.md" \
-    "$HOME/.config/opencode/commands/review-pr.md"
+    "$HOME/.config/opencode/commands/review-pr.md" \
+    "$HOME/.claude/hooks/macroscope-bash-autoallow.sh"
   do
     if remove_file_if_present "$file"; then
       removed=1
@@ -512,13 +513,41 @@ for path in (claude_settings, claude_settings_local):
     permissions = data.get("permissions")
     if isinstance(permissions, dict):
         allow = permissions.get("allow")
-        if isinstance(allow, list) and "Bash(macroscope *)" in allow:
-            permissions["allow"] = [x for x in allow if x != "Bash(macroscope *)"]
+        _owned = {"Bash(macroscope)", "Bash(macroscope *)", "Bash(macroscope:*)", "Bash(mktemp)", "Bash(mktemp *)", "Bash(mktemp:*)"}
+        if isinstance(allow, list) and any(x in _owned for x in allow):
+            permissions["allow"] = [x for x in allow if x not in _owned]
             changed = True
             if not permissions["allow"]:
                 del permissions["allow"]
             if not permissions:
                 data.pop("permissions", None)
+
+    # Remove the PreToolUse Bash hook we installed, preserving any other
+    # hooks the user configured. Only the macroscope-owned entry is dropped.
+    hooks_cfg = data.get("hooks")
+    if isinstance(hooks_cfg, dict):
+        pre_tool_use = hooks_cfg.get("PreToolUse")
+        if isinstance(pre_tool_use, list):
+            filtered = []
+            for entry in pre_tool_use:
+                ours = False
+                if isinstance(entry, dict):
+                    for h in entry.get("hooks", []) or []:
+                        if isinstance(h, dict):
+                            cmd = h.get("command", "")
+                            if "macroscope-bash-autoallow" in cmd or "macroscope-installer" in cmd:
+                                ours = True
+                                break
+                if not ours:
+                    filtered.append(entry)
+            if filtered != pre_tool_use:
+                changed = True
+                if filtered:
+                    hooks_cfg["PreToolUse"] = filtered
+                else:
+                    del hooks_cfg["PreToolUse"]
+        if not hooks_cfg:
+            data.pop("hooks", None)
 
     if changed:
         write_json(path, data, mode)
@@ -536,11 +565,12 @@ cursor_cli_config = os.path.expanduser("~/.cursor/cli-config.json")
 cursor_cli_data, cursor_cli_mode = load_json(cursor_cli_config)
 if isinstance(cursor_cli_data, dict):
     changed = False
+    _owned_shell = {"Shell(macroscope)", "Shell(macroscope *)", "Shell(mktemp)", "Shell(mktemp *)"}
     permissions = cursor_cli_data.get("permissions")
     if isinstance(permissions, dict):
         allow = permissions.get("allow")
         if isinstance(allow, list):
-            filtered = [r for r in allow if r not in ("Shell(macroscope)", "Shell(macroscope *)")]
+            filtered = [r for r in allow if r not in _owned_shell]
             if filtered != allow:
                 permissions["allow"] = filtered
                 changed = True
@@ -556,7 +586,7 @@ if isinstance(opencode_data, dict):
     if isinstance(permission, dict):
         bash = permission.get("bash")
         if isinstance(bash, dict):
-            for key in ("macroscope", "macroscope *"):
+            for key in ("macroscope", "macroscope *", "mktemp", "mktemp *"):
                 if key in bash:
                     del bash[key]
                     changed = True
@@ -1195,14 +1225,25 @@ extra["macroscope-local"] = {
 enabled = data.setdefault("enabledPlugins", {})
 enabled["macroscope@macroscope-local"] = True
 
-# Auto-allow the macroscope CLI so /macroscope:review and /macroscope:loop
-# don't stall on a permission prompt for every invocation of the tool. We
-# only add the entry if it's not already present — we never remove or
-# modify existing user entries.
+# Auto-allow the macroscope CLI + mktemp. The plain allow rules cover
+# bare invocations (`macroscope codereview --base staging`). Claude Code's
+# allow-list pattern matcher tokenizes on shell operators, so commands
+# like `macroscope codereview > /tmp/foo 2>&1` or `review_log="$(mktemp
+# ...)"` do not match glob rules. For those cases the installer also
+# registers a PreToolUse hook (see register_claude_bash_autoallow_hook)
+# that inspects the raw tool_input and auto-approves any Bash command
+# whose first token is `macroscope` or `mktemp`, regardless of shell
+# operators that follow.
 permissions = data.setdefault("permissions", {})
 allow = permissions.setdefault("allow", [])
-if "Bash(macroscope *)" not in allow:
-    allow.append("Bash(macroscope *)")
+for rule in (
+    "Bash(macroscope *)",
+    "Bash(macroscope:*)",
+    "Bash(mktemp *)",
+    "Bash(mktemp:*)",
+):
+    if rule not in allow:
+        allow.append(rule)
 
 with open(path, "w", encoding="utf-8") as f:
     json.dump(data, f, indent=2)
@@ -1242,7 +1283,105 @@ with open(path, "w", encoding="utf-8") as f:
     f.write("\n")
 PY
 
+  register_claude_bash_autoallow_hook
   success "Installed Claude Code plugin to ${BOLD}${cache_dst}${RESET}"
+}
+
+# register_claude_bash_autoallow_hook installs the PreToolUse hook script
+# and registers it in ~/.claude/settings.json. This closes a gap in the
+# plain allow-list patterns: Claude Code's Bash matcher tokenizes on
+# shell operators, so `Bash(macroscope *)` stops matching as soon as the
+# command contains `|`, `>`, `$(...)`, or `&&`. The hook inspects the
+# raw command string and approves any macroscope/mktemp invocation,
+# regardless of shell operators around it.
+register_claude_bash_autoallow_hook() {
+  local script_src="$(dirname "$0")/scripts/claude-bash-autoallow.sh"
+  if [ ! -f "$script_src" ]; then
+    script_src="$CHECKOUT_DIR/scripts/claude-bash-autoallow.sh"
+  fi
+  # When installed via `curl | bash`, the installer has no $0 path to
+  # resolve a sibling script from — in that case we embed the script
+  # via a HEREDOC below instead of copying from disk.
+  local hook_dst="$HOME/.claude/hooks/macroscope-bash-autoallow.sh"
+  mkdir -p "$HOME/.claude/hooks"
+
+  if [ -f "$script_src" ]; then
+    cp "$script_src" "$hook_dst"
+  else
+    cat > "$hook_dst" <<'EMBED'
+#!/usr/bin/env python3
+"""PreToolUse hook that auto-approves Bash calls whose effective command
+word is macroscope or mktemp, regardless of shell operators around it."""
+import json, re, sys
+
+def main() -> int:
+    try:
+        payload = json.load(sys.stdin)
+    except Exception:
+        return 0
+    if payload.get("tool_name") != "Bash":
+        return 0
+    command = str(payload.get("tool_input", {}).get("command", "")).strip()
+    if not command:
+        return 0
+    for name in ("macroscope", "mktemp"):
+        pattern = r"(?:^|[\s;|&=(]|[$]\()" + re.escape(name) + r"(?:\s|$|;|\||&|>|<)"
+        if re.search(pattern, command):
+            print(json.dumps({
+                "permissionDecision": "allow",
+                "permissionDecisionReason": f"macroscope-installer: auto-approve {name}",
+            }))
+            return 0
+    return 0
+
+if __name__ == "__main__":
+    sys.exit(main())
+EMBED
+  fi
+  chmod +x "$hook_dst"
+
+  python3 - "$HOME/.claude/settings.json" "$hook_dst" <<'PY'
+import json, os, sys
+
+settings_path, hook_path = sys.argv[1:3]
+
+if os.path.exists(settings_path):
+    with open(settings_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    mode = os.stat(settings_path).st_mode
+else:
+    data = {}
+    mode = None
+
+hooks = data.setdefault("hooks", {})
+pre_tool_use = hooks.setdefault("PreToolUse", [])
+
+marker = "macroscope-installer: auto-approve"
+# Replace any prior entry we installed, preserve entries the user added.
+def is_ours(entry):
+    if not isinstance(entry, dict):
+        return False
+    for h in entry.get("hooks", []):
+        if not isinstance(h, dict):
+            continue
+        cmd = h.get("command", "")
+        if "macroscope-bash-autoallow" in cmd or marker in cmd:
+            return True
+    return False
+
+pre_tool_use[:] = [e for e in pre_tool_use if not is_ours(e)]
+pre_tool_use.append({
+    "matcher": "Bash",
+    "hooks": [{"type": "command", "command": hook_path}],
+})
+
+os.makedirs(os.path.dirname(settings_path), exist_ok=True)
+with open(settings_path, "w", encoding="utf-8") as f:
+    json.dump(data, f, indent=2)
+    f.write("\n")
+if mode is not None:
+    os.chmod(settings_path, mode)
+PY
 }
 
 install_cursor_plugin() {
@@ -1280,7 +1419,12 @@ permissions = data.setdefault("permissions", {})
 allow = permissions.setdefault("allow", [])
 permissions.setdefault("deny", [])
 
-for rule in ("Shell(macroscope)", "Shell(macroscope *)"):
+for rule in (
+    "Shell(macroscope)",
+    "Shell(macroscope *)",
+    "Shell(mktemp)",
+    "Shell(mktemp *)",
+):
     if rule not in allow:
         allow.append(rule)
 
@@ -1345,6 +1489,8 @@ permission = data.setdefault("permission", {})
 bash = permission.setdefault("bash", {})
 bash.setdefault("macroscope *", "allow")
 bash.setdefault("macroscope", "allow")
+bash.setdefault("mktemp *", "allow")
+bash.setdefault("mktemp", "allow")
 
 os.makedirs(os.path.dirname(path), exist_ok=True)
 with open(path, "w", encoding="utf-8") as f:
