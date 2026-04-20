@@ -530,6 +530,42 @@ if isinstance(cursor_data, dict):
     if isinstance(servers, dict) and "macroscope-codereview" in servers:
         del servers["macroscope-codereview"]
         write_json(cursor_mcp_json, cursor_data, cursor_mode)
+
+
+cursor_cli_config = os.path.expanduser("~/.cursor/cli-config.json")
+cursor_cli_data, cursor_cli_mode = load_json(cursor_cli_config)
+if isinstance(cursor_cli_data, dict):
+    changed = False
+    permissions = cursor_cli_data.get("permissions")
+    if isinstance(permissions, dict):
+        allow = permissions.get("allow")
+        if isinstance(allow, list):
+            filtered = [r for r in allow if r not in ("Shell(macroscope)", "Shell(macroscope *)")]
+            if filtered != allow:
+                permissions["allow"] = filtered
+                changed = True
+    if changed:
+        write_json(cursor_cli_config, cursor_cli_data, cursor_cli_mode)
+
+
+opencode_config = os.path.expanduser("~/.config/opencode/opencode.json")
+opencode_data, opencode_mode = load_json(opencode_config)
+if isinstance(opencode_data, dict):
+    changed = False
+    permission = opencode_data.get("permission")
+    if isinstance(permission, dict):
+        bash = permission.get("bash")
+        if isinstance(bash, dict):
+            for key in ("macroscope", "macroscope *"):
+                if key in bash:
+                    del bash[key]
+                    changed = True
+            if not bash:
+                del permission["bash"]
+        if not permission:
+            del opencode_data["permission"]
+    if changed:
+        write_json(opencode_config, opencode_data, opencode_mode)
 PY
 }
 
@@ -1224,6 +1260,38 @@ install_cursor_plugin() {
   copy_tree "$plugin_src" "$cursor_dst"
   strip_host_overlays "$cursor_dst"
 
+  # Auto-allow the macroscope CLI in Cursor's CLI agent so the skill does not
+  # stall on per-argv approval prompts. Cursor's allowlist pattern is
+  # `Shell(<command>)`; we add the wildcard form matching any arguments and
+  # preserve any existing user rules.
+  python3 - "$HOME/.cursor/cli-config.json" <<'PY'
+import json, os, sys
+
+path = sys.argv[1]
+if os.path.exists(path):
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    mode = os.stat(path).st_mode
+else:
+    data = {}
+    mode = None
+
+permissions = data.setdefault("permissions", {})
+allow = permissions.setdefault("allow", [])
+permissions.setdefault("deny", [])
+
+for rule in ("Shell(macroscope)", "Shell(macroscope *)"):
+    if rule not in allow:
+        allow.append(rule)
+
+os.makedirs(os.path.dirname(path), exist_ok=True)
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(data, f, indent=2)
+    f.write("\n")
+if mode is not None:
+    os.chmod(path, mode)
+PY
+
   success "Installed Cursor plugin to ${BOLD}${cursor_dst}${RESET}"
 }
 
@@ -1256,6 +1324,35 @@ install_opencode_support() {
   fi
   copy_tree "$skills_src/review" "$opencode_skills/review"
   copy_tree "$skills_src/loop" "$opencode_skills/loop"
+
+  # Auto-allow the macroscope CLI in OpenCode so the skill does not stall on
+  # per-argv approval prompts. OpenCode reads `~/.config/opencode/opencode.json`
+  # and matches bash rules by pattern with last-match-wins semantics. We only
+  # set the macroscope key, leaving any catch-all or existing rules untouched.
+  python3 - "$opencode_root/opencode.json" <<'PY'
+import json, os, sys
+
+path = sys.argv[1]
+if os.path.exists(path):
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    mode = os.stat(path).st_mode
+else:
+    data = {}
+    mode = None
+
+permission = data.setdefault("permission", {})
+bash = permission.setdefault("bash", {})
+bash.setdefault("macroscope *", "allow")
+bash.setdefault("macroscope", "allow")
+
+os.makedirs(os.path.dirname(path), exist_ok=True)
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(data, f, indent=2)
+    f.write("\n")
+if mode is not None:
+    os.chmod(path, mode)
+PY
 
   success "Installed OpenCode plugin to ${BOLD}${opencode_plugins}/macroscope.js${RESET}"
   success "Installed OpenCode commands to ${BOLD}${opencode_commands}${RESET}"
