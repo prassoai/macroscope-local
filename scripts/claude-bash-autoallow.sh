@@ -3,7 +3,7 @@
 command starts with `macroscope` or `mktemp` (optionally followed by args,
 pipes, redirects, or command substitution). Claude Code's permission
 allow-list patterns stop matching as soon as a shell operator appears in
-the command, so the /macroscope:review and /macroscope:loop skills would
+the command, so the /macroscope:codereview and /macroscope:autoloop skills would
 otherwise stall on every piped / redirected / substituted invocation even
 after the installer writes `Bash(macroscope *)`.
 

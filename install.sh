@@ -200,8 +200,8 @@ remove_plugin_directories() {
     "$HOME/.cursor/plugins/local/macroscope" \
     "$HOME/.cursor/plugins/local/macroscope-codereview" \
     "$HOME/.config/opencode/skills/macroscope" \
-    "$HOME/.config/opencode/skills/macroscope-review" \
-    "$HOME/.config/opencode/skills/macroscope-loop" \
+    "$HOME/.config/opencode/skills/codereview" \
+    "$HOME/.config/opencode/skills/autoloop" \
     "$HOME/.config/opencode/skills/macroscope-local-review" \
     "$HOME/.config/opencode/skills/macroscope-triage-pr-comments" \
     "$HOME/.config/opencode/skills/macroscope-respond-to-pr-comments" \
@@ -272,7 +272,8 @@ PY
   for file in \
     "$HOME/.config/opencode/plugins/macroscope.js" \
     "$HOME/.config/opencode/commands/macroscope.md" \
-    "$HOME/.config/opencode/commands/macroscope-loop.md" \
+    "$HOME/.config/opencode/commands/macroscope-codereview.md" \
+    "$HOME/.config/opencode/commands/macroscope-autoloop.md" \
     "$HOME/.config/opencode/commands/macroscope-local-review.md" \
     "$HOME/.config/opencode/commands/macroscope-triage-pr-comments.md" \
     "$HOME/.config/opencode/commands/macroscope-respond-to-pr-comments.md" \
@@ -990,10 +991,10 @@ install_codex_cli_shim() {
 
   if [ ! -x "$CODEX_BUNDLED_BINARY" ] || ! codex_supports_plugins "$CODEX_BUNDLED_BINARY"; then
     if [ -n "$current_codex" ]; then
-      CODEX_PLUGIN_HOST_WARNING="Codex CLI at ${current_codex} does not support local plugins. Install or update Codex.app to use /macroscope:review from the CLI."
+      CODEX_PLUGIN_HOST_WARNING="Codex CLI at ${current_codex} does not support local plugins. Install or update Codex.app to use /macroscope:codereview from the CLI."
       warn "$CODEX_PLUGIN_HOST_WARNING"
     else
-      CODEX_PLUGIN_HOST_WARNING="Codex CLI is not installed. Install Codex.app to use /macroscope:review from the CLI."
+      CODEX_PLUGIN_HOST_WARNING="Codex CLI is not installed. Install Codex.app to use /macroscope:codereview from the CLI."
       warn "$CODEX_PLUGIN_HOST_WARNING"
     fi
     return
@@ -1464,43 +1465,18 @@ install_opencode_support() {
 
   cp "$plugin_file" "$opencode_plugins/macroscope.js"
 
-  # Install command files and rewrite their relative skill paths to match
-  # the OpenCode-specific prefixed skill directories. The source command
-  # files point at ../skills/review/SKILL.md and ../skills/loop/SKILL.md
-  # (the universal/plugin-scoped names used by Claude Code, Cursor, and
-  # Codex). OpenCode has a flat skill namespace, so the installer renames
-  # the directories to macroscope-review/macroscope-loop on disk; the
-  # command files must reflect that or they'd point at a dead path.
-  cp "$commands_src/macroscope.md" "$opencode_commands/macroscope.md"
-  python3 - "$opencode_commands/macroscope.md" <<'PY'
-import os, sys
-path = sys.argv[1]
-with open(path, "r", encoding="utf-8") as f:
-    text = f.read()
-text = text.replace("../skills/review/SKILL.md", "../skills/macroscope-review/SKILL.md")
-with open(path, "w", encoding="utf-8") as f:
-    f.write(text)
-PY
-  if [ -f "$commands_src/macroscope-loop.md" ]; then
-    cp "$commands_src/macroscope-loop.md" "$opencode_commands/macroscope-loop.md"
-    python3 - "$opencode_commands/macroscope-loop.md" <<'PY'
-import os, sys
-path = sys.argv[1]
-with open(path, "r", encoding="utf-8") as f:
-    text = f.read()
-text = text.replace("../skills/loop/SKILL.md", "../skills/macroscope-loop/SKILL.md")
-with open(path, "w", encoding="utf-8") as f:
-    f.write(text)
-PY
+  # OpenCode uses flat namespaces for both skills and commands. We avoid
+  # the earlier `review`/`loop` collision risk by naming the skills
+  # `codereview` and `autoloop` at the source — distinctive enough that
+  # no rewrite or per-host prefix is needed. Commands live as
+  # `macroscope-codereview` and `macroscope-autoloop` so typing `/macro`
+  # surfaces both in the OpenCode command palette.
+  cp "$commands_src/macroscope-codereview.md" "$opencode_commands/macroscope-codereview.md"
+  if [ -f "$commands_src/macroscope-autoloop.md" ]; then
+    cp "$commands_src/macroscope-autoloop.md" "$opencode_commands/macroscope-autoloop.md"
   fi
-  # Install OpenCode skills under macroscope-prefixed directory names.
-  # OpenCode's skill namespace is flat (~/.config/opencode/skills/<name>/),
-  # so bare names like `review` and `loop` would collide with skills any
-  # other OpenCode plugin installs under the same names. Claude Code,
-  # Cursor, and Codex all scope skills under a plugin directory, so they
-  # use the source names directly.
-  copy_tree "$skills_src/review" "$opencode_skills/macroscope-review"
-  copy_tree "$skills_src/loop" "$opencode_skills/macroscope-loop"
+  copy_tree "$skills_src/codereview" "$opencode_skills/codereview"
+  copy_tree "$skills_src/autoloop" "$opencode_skills/autoloop"
 
   # Auto-allow the macroscope CLI in OpenCode so the skill does not stall on
   # per-argv approval prompts. OpenCode reads `~/.config/opencode/opencode.json`
@@ -1595,7 +1571,7 @@ PY
   fi
 
   if [ -f "$HOME/.claude/plugins/cache/macroscope-local/macroscope/$PLUGIN_VERSION/.claude-plugin/plugin.json" ] && \
-     [ -f "$HOME/.claude/plugins/cache/macroscope-local/macroscope/$PLUGIN_VERSION/skills/review/SKILL.md" ] && \
+     [ -f "$HOME/.claude/plugins/cache/macroscope-local/macroscope/$PLUGIN_VERSION/skills/codereview/SKILL.md" ] && \
      [ -f "$HOME/.claude/plugins/cache/macroscope-local/macroscope/$PLUGIN_VERSION/agents/macroscope-review-worker.md" ]; then
     success "Claude Code plugin installed with background worker"
   else
@@ -1608,7 +1584,7 @@ PY
     warn "Cursor plugin install did not produce the expected local plugin entry"
   fi
 
-  if [ -f "$HOME/.config/opencode/plugins/macroscope.js" ] && [ -f "$HOME/.config/opencode/commands/macroscope.md" ] && [ -f "$HOME/.config/opencode/skills/macroscope-review/SKILL.md" ]; then
+  if [ -f "$HOME/.config/opencode/plugins/macroscope.js" ] && [ -f "$HOME/.config/opencode/commands/macroscope-codereview.md" ] && [ -f "$HOME/.config/opencode/skills/codereview/SKILL.md" ]; then
     success "OpenCode plugin, commands, and skills installed"
   else
     warn "OpenCode install did not produce the expected plugin, command, and skill files"
@@ -1636,13 +1612,13 @@ print_installation_completion() {
   printf "${BOLD}Quick start:${RESET}\n"
   printf "  ${CYAN}macroscope${RESET}                     ${DIM}# Launch the interactive wizard${RESET}\n"
   printf "  ${CYAN}macroscope codereview --base <base_branch>${RESET} ${DIM}# Run the CLI directly${RESET}\n"
-  printf "  ${CYAN}/macroscope:review${RESET}           ${DIM}# Local review${RESET}\n"
-  printf "  ${CYAN}/macroscope:loop${RESET}             ${DIM}# Autopilot review-fix-push cycle${RESET}\n"
+  printf "  ${CYAN}/macroscope:codereview${RESET}           ${DIM}# Local review${RESET}\n"
+  printf "  ${CYAN}/macroscope:autoloop${RESET}             ${DIM}# Autopilot review-fix-push cycle${RESET}\n"
   echo ""
   printf "${BOLD}Notes:${RESET}\n"
   printf "  Restart Codex, Claude Code, Cursor, or OpenCode if they were already open.\n"
-  printf "  /macroscope:review runs a local streaming CLI review.\n"
-  printf "  /macroscope:loop runs the full review-fix-push-re-review autopilot cycle.\n"
+  printf "  /macroscope:codereview runs a local streaming CLI review.\n"
+  printf "  /macroscope:autoloop runs the full review-fix-push-re-review autopilot cycle.\n"
   printf "  Claude Code launches reviews in a background worker.\n"
   if [ "$CODEX_SHIM_INSTALLED" = "1" ]; then
     printf "  ${BOLD}codex${RESET} now points at the bundled Codex.app CLI so plugins work from the terminal.\n"
