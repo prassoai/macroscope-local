@@ -1328,8 +1328,10 @@ def main() -> int:
         pattern = r"(?:^|[\s;|&=(]|[$]\()" + re.escape(name) + r"(?:\s|$|;|\||&|>|<)"
         if re.search(pattern, command):
             print(json.dumps({
-                "permissionDecision": "allow",
-                "permissionDecisionReason": f"macroscope-installer: auto-approve {name}",
+                "hookSpecificOutput": {
+                    "permissionDecision": "allow",
+                    "permissionDecisionReason": f"macroscope-installer: auto-approve {name}",
+                },
             }))
             return 0
     return 0
@@ -1462,17 +1464,41 @@ install_opencode_support() {
 
   cp "$plugin_file" "$opencode_plugins/macroscope.js"
 
+  # Install command files and rewrite their relative skill paths to match
+  # the OpenCode-specific prefixed skill directories. The source command
+  # files point at ../skills/review/SKILL.md and ../skills/loop/SKILL.md
+  # (the universal/plugin-scoped names used by Claude Code, Cursor, and
+  # Codex). OpenCode has a flat skill namespace, so the installer renames
+  # the directories to macroscope-review/macroscope-loop on disk; the
+  # command files must reflect that or they'd point at a dead path.
   cp "$commands_src/macroscope.md" "$opencode_commands/macroscope.md"
+  python3 - "$opencode_commands/macroscope.md" <<'PY'
+import os, sys
+path = sys.argv[1]
+with open(path, "r", encoding="utf-8") as f:
+    text = f.read()
+text = text.replace("../skills/review/SKILL.md", "../skills/macroscope-review/SKILL.md")
+with open(path, "w", encoding="utf-8") as f:
+    f.write(text)
+PY
   if [ -f "$commands_src/macroscope-loop.md" ]; then
     cp "$commands_src/macroscope-loop.md" "$opencode_commands/macroscope-loop.md"
+    python3 - "$opencode_commands/macroscope-loop.md" <<'PY'
+import os, sys
+path = sys.argv[1]
+with open(path, "r", encoding="utf-8") as f:
+    text = f.read()
+text = text.replace("../skills/loop/SKILL.md", "../skills/macroscope-loop/SKILL.md")
+with open(path, "w", encoding="utf-8") as f:
+    f.write(text)
+PY
   fi
   # Install OpenCode skills under macroscope-prefixed directory names.
   # OpenCode's skill namespace is flat (~/.config/opencode/skills/<name>/),
   # so bare names like `review` and `loop` would collide with skills any
   # other OpenCode plugin installs under the same names. Claude Code,
   # Cursor, and Codex all scope skills under a plugin directory, so they
-  # use the source names directly. The OpenCode command files point at
-  # the prefixed paths (see plugins/macroscope/commands/macroscope{,-loop}.md).
+  # use the source names directly.
   copy_tree "$skills_src/review" "$opencode_skills/macroscope-review"
   copy_tree "$skills_src/loop" "$opencode_skills/macroscope-loop"
 

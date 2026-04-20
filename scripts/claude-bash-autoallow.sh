@@ -48,9 +48,17 @@ def main() -> int:
         # string literal.
         pattern = r"(?:^|[\s;|&=(]|[$]\()" + re.escape(name) + r"(?:\s|$|;|\||&|>|<)"
         if re.search(pattern, command):
+            # Claude Code's PreToolUse hook expects the permission decision
+            # nested under hookSpecificOutput. A flat {"permissionDecision":
+            # "allow"} is silently ignored and the static allow-list takes
+            # over, so piped/redirected/substituted forms would still prompt.
+            # See ~/.claude/plugins/marketplaces/claude-plugins-official/
+            # plugins/plugin-dev/skills/hook-development/SKILL.md for schema.
             print(json.dumps({
-                "permissionDecision": "allow",
-                "permissionDecisionReason": f"macroscope-installer: auto-approve {name}",
+                "hookSpecificOutput": {
+                    "permissionDecision": "allow",
+                    "permissionDecisionReason": f"macroscope-installer: auto-approve {name}",
+                },
             }))
             return 0
     return 0
