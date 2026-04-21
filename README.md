@@ -21,16 +21,16 @@ After installation:
 
 - Run `macroscope` to launch the interactive wizard.
 - Run the local Macroscope review from your editor:
-  - Claude Code: `/macroscope`
-  - Claude Code autopilot: `/macroscope loop`
-  - Codex: `/macroscope:macroscope`
-  - Codex autopilot: `/macroscope:macroscope loop`
-  - Cursor: `/macroscope:macroscope`
-  - Cursor autopilot: `/macroscope:macroscope loop`
+  - Claude Code: `/macroscope:codereview`
+  - Claude Code autopilot: `/macroscope:autoloop`
+  - Codex: `/macroscope:codereview`
+  - Codex autopilot: `/macroscope:autoloop`
+  - Cursor: `/macroscope:codereview`
+  - Cursor autopilot: `/macroscope:autoloop`
   - OpenCode: `/macroscope`
-  - OpenCode autopilot: `/macroscope loop`
-- `/macroscope` runs the local CLI review path by default, launches a background worker in Claude Code, and validates each streamed issue before acting.
-- `/macroscope loop` runs the full review-fix-push-re-review autopilot cycle.
+  - OpenCode autopilot: `/macroscope-autoloop`
+- `/macroscope:codereview` runs the local CLI review, launches a background worker in Claude Code, and validates each streamed issue before acting.
+- `/macroscope:autoloop` runs the full review-fix-push-re-review autopilot cycle.
 
 Normal installs fetch the plugin bundle from GitHub release assets, so the shipped plugin bundle and released CLI come from the same `back/macroscope-local` release pipeline.
 

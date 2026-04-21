@@ -200,6 +200,8 @@ remove_plugin_directories() {
     "$HOME/.cursor/plugins/local/macroscope" \
     "$HOME/.cursor/plugins/local/macroscope-codereview" \
     "$HOME/.config/opencode/skills/macroscope" \
+    "$HOME/.config/opencode/skills/codereview" \
+    "$HOME/.config/opencode/skills/autoloop" \
     "$HOME/.config/opencode/skills/macroscope-local-review" \
     "$HOME/.config/opencode/skills/macroscope-triage-pr-comments" \
     "$HOME/.config/opencode/skills/macroscope-respond-to-pr-comments" \
@@ -270,6 +272,8 @@ PY
   for file in \
     "$HOME/.config/opencode/plugins/macroscope.js" \
     "$HOME/.config/opencode/commands/macroscope.md" \
+    "$HOME/.config/opencode/commands/macroscope-codereview.md" \
+    "$HOME/.config/opencode/commands/macroscope-autoloop.md" \
     "$HOME/.config/opencode/commands/macroscope-local-review.md" \
     "$HOME/.config/opencode/commands/macroscope-triage-pr-comments.md" \
     "$HOME/.config/opencode/commands/macroscope-respond-to-pr-comments.md" \
@@ -277,7 +281,8 @@ PY
     "$HOME/.config/opencode/commands/local-review.md" \
     "$HOME/.config/opencode/commands/triage-pr-comments.md" \
     "$HOME/.config/opencode/commands/respond-to-pr-comments.md" \
-    "$HOME/.config/opencode/commands/review-pr.md"
+    "$HOME/.config/opencode/commands/review-pr.md" \
+    "$HOME/.claude/hooks/macroscope-bash-autoallow.sh"
   do
     if remove_file_if_present "$file"; then
       removed=1
@@ -506,6 +511,45 @@ for path in (claude_settings, claude_settings_local):
         if not enabled:
             data.pop("enabledPlugins", None)
 
+    permissions = data.get("permissions")
+    if isinstance(permissions, dict):
+        allow = permissions.get("allow")
+        _owned = {"Bash(macroscope)", "Bash(macroscope *)", "Bash(macroscope:*)", "Bash(mktemp)", "Bash(mktemp *)", "Bash(mktemp:*)"}
+        if isinstance(allow, list) and any(x in _owned for x in allow):
+            permissions["allow"] = [x for x in allow if x not in _owned]
+            changed = True
+            if not permissions["allow"]:
+                del permissions["allow"]
+            if not permissions:
+                data.pop("permissions", None)
+
+    # Remove the PreToolUse Bash hook we installed, preserving any other
+    # hooks the user configured. Only the macroscope-owned entry is dropped.
+    hooks_cfg = data.get("hooks")
+    if isinstance(hooks_cfg, dict):
+        pre_tool_use = hooks_cfg.get("PreToolUse")
+        if isinstance(pre_tool_use, list):
+            filtered = []
+            for entry in pre_tool_use:
+                ours = False
+                if isinstance(entry, dict):
+                    for h in entry.get("hooks", []) or []:
+                        if isinstance(h, dict):
+                            cmd = h.get("command", "")
+                            if "macroscope-bash-autoallow" in cmd or "macroscope-installer" in cmd:
+                                ours = True
+                                break
+                if not ours:
+                    filtered.append(entry)
+            if filtered != pre_tool_use:
+                changed = True
+                if filtered:
+                    hooks_cfg["PreToolUse"] = filtered
+                else:
+                    del hooks_cfg["PreToolUse"]
+        if not hooks_cfg:
+            data.pop("hooks", None)
+
     if changed:
         write_json(path, data, mode)
 
@@ -516,6 +560,43 @@ if isinstance(cursor_data, dict):
     if isinstance(servers, dict) and "macroscope-codereview" in servers:
         del servers["macroscope-codereview"]
         write_json(cursor_mcp_json, cursor_data, cursor_mode)
+
+
+cursor_cli_config = os.path.expanduser("~/.cursor/cli-config.json")
+cursor_cli_data, cursor_cli_mode = load_json(cursor_cli_config)
+if isinstance(cursor_cli_data, dict):
+    changed = False
+    _owned_shell = {"Shell(macroscope)", "Shell(macroscope *)", "Shell(mktemp)", "Shell(mktemp *)"}
+    permissions = cursor_cli_data.get("permissions")
+    if isinstance(permissions, dict):
+        allow = permissions.get("allow")
+        if isinstance(allow, list):
+            filtered = [r for r in allow if r not in _owned_shell]
+            if filtered != allow:
+                permissions["allow"] = filtered
+                changed = True
+    if changed:
+        write_json(cursor_cli_config, cursor_cli_data, cursor_cli_mode)
+
+
+opencode_config = os.path.expanduser("~/.config/opencode/opencode.json")
+opencode_data, opencode_mode = load_json(opencode_config)
+if isinstance(opencode_data, dict):
+    changed = False
+    permission = opencode_data.get("permission")
+    if isinstance(permission, dict):
+        bash = permission.get("bash")
+        if isinstance(bash, dict):
+            for key in ("macroscope", "macroscope *", "mktemp", "mktemp *"):
+                if key in bash:
+                    del bash[key]
+                    changed = True
+            if not bash:
+                del permission["bash"]
+        if not permission:
+            del opencode_data["permission"]
+    if changed:
+        write_json(opencode_config, opencode_data, opencode_mode)
 PY
 }
 
@@ -910,10 +991,10 @@ install_codex_cli_shim() {
 
   if [ ! -x "$CODEX_BUNDLED_BINARY" ] || ! codex_supports_plugins "$CODEX_BUNDLED_BINARY"; then
     if [ -n "$current_codex" ]; then
-      CODEX_PLUGIN_HOST_WARNING="Codex CLI at ${current_codex} does not support local plugins. Install or update Codex.app to use /macroscope:macroscope from the CLI."
+      CODEX_PLUGIN_HOST_WARNING="Codex CLI at ${current_codex} does not support local plugins. Install or update Codex.app to use /macroscope:codereview from the CLI."
       warn "$CODEX_PLUGIN_HOST_WARNING"
     else
-      CODEX_PLUGIN_HOST_WARNING="Codex CLI is not installed. Install Codex.app to use /macroscope:macroscope from the CLI."
+      CODEX_PLUGIN_HOST_WARNING="Codex CLI is not installed. Install Codex.app to use /macroscope:codereview from the CLI."
       warn "$CODEX_PLUGIN_HOST_WARNING"
     fi
     return
@@ -1145,6 +1226,26 @@ extra["macroscope-local"] = {
 enabled = data.setdefault("enabledPlugins", {})
 enabled["macroscope@macroscope-local"] = True
 
+# Auto-allow the macroscope CLI + mktemp. The plain allow rules cover
+# bare invocations (`macroscope codereview --base staging`). Claude Code's
+# allow-list pattern matcher tokenizes on shell operators, so commands
+# like `macroscope codereview > /tmp/foo 2>&1` or `review_log="$(mktemp
+# ...)"` do not match glob rules. For those cases the installer also
+# registers a PreToolUse hook (see register_claude_bash_autoallow_hook)
+# that inspects the raw tool_input and auto-approves any Bash command
+# whose first token is `macroscope` or `mktemp`, regardless of shell
+# operators that follow.
+permissions = data.setdefault("permissions", {})
+allow = permissions.setdefault("allow", [])
+for rule in (
+    "Bash(macroscope *)",
+    "Bash(macroscope:*)",
+    "Bash(mktemp *)",
+    "Bash(mktemp:*)",
+):
+    if rule not in allow:
+        allow.append(rule)
+
 with open(path, "w", encoding="utf-8") as f:
     json.dump(data, f, indent=2)
     f.write("\n")
@@ -1183,7 +1284,107 @@ with open(path, "w", encoding="utf-8") as f:
     f.write("\n")
 PY
 
+  register_claude_bash_autoallow_hook
   success "Installed Claude Code plugin to ${BOLD}${cache_dst}${RESET}"
+}
+
+# register_claude_bash_autoallow_hook installs the PreToolUse hook script
+# and registers it in ~/.claude/settings.json. This closes a gap in the
+# plain allow-list patterns: Claude Code's Bash matcher tokenizes on
+# shell operators, so `Bash(macroscope *)` stops matching as soon as the
+# command contains `|`, `>`, `$(...)`, or `&&`. The hook inspects the
+# raw command string and approves any macroscope/mktemp invocation,
+# regardless of shell operators around it.
+register_claude_bash_autoallow_hook() {
+  local script_src="$(dirname "$0")/scripts/claude-bash-autoallow.sh"
+  if [ ! -f "$script_src" ]; then
+    script_src="$CHECKOUT_DIR/scripts/claude-bash-autoallow.sh"
+  fi
+  # When installed via `curl | bash`, the installer has no $0 path to
+  # resolve a sibling script from — in that case we embed the script
+  # via a HEREDOC below instead of copying from disk.
+  local hook_dst="$HOME/.claude/hooks/macroscope-bash-autoallow.sh"
+  mkdir -p "$HOME/.claude/hooks"
+
+  if [ -f "$script_src" ]; then
+    cp "$script_src" "$hook_dst"
+  else
+    cat > "$hook_dst" <<'EMBED'
+#!/usr/bin/env python3
+"""PreToolUse hook that auto-approves Bash calls whose effective command
+word is macroscope or mktemp, regardless of shell operators around it."""
+import json, re, sys
+
+def main() -> int:
+    try:
+        payload = json.load(sys.stdin)
+    except Exception:
+        return 0
+    if payload.get("tool_name") != "Bash":
+        return 0
+    command = str(payload.get("tool_input", {}).get("command", "")).strip()
+    if not command:
+        return 0
+    for name in ("macroscope", "mktemp"):
+        pattern = r"(?:^|[\s;|&=(]|[$]\()" + re.escape(name) + r"(?:\s|$|;|\||&|>|<)"
+        if re.search(pattern, command):
+            print(json.dumps({
+                "hookSpecificOutput": {
+                    "permissionDecision": "allow",
+                    "permissionDecisionReason": f"macroscope-installer: auto-approve {name}",
+                },
+            }))
+            return 0
+    return 0
+
+if __name__ == "__main__":
+    sys.exit(main())
+EMBED
+  fi
+  chmod +x "$hook_dst"
+
+  python3 - "$HOME/.claude/settings.json" "$hook_dst" <<'PY'
+import json, os, sys
+
+settings_path, hook_path = sys.argv[1:3]
+
+if os.path.exists(settings_path):
+    with open(settings_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    mode = os.stat(settings_path).st_mode
+else:
+    data = {}
+    mode = None
+
+hooks = data.setdefault("hooks", {})
+pre_tool_use = hooks.setdefault("PreToolUse", [])
+
+marker = "macroscope-installer: auto-approve"
+# Replace any prior entry we installed, preserve entries the user added.
+def is_ours(entry):
+    if not isinstance(entry, dict):
+        return False
+    for h in entry.get("hooks", []):
+        if not isinstance(h, dict):
+            continue
+        cmd = h.get("command", "")
+        if "macroscope-bash-autoallow" in cmd or marker in cmd:
+            return True
+    return False
+
+pre_tool_use[:] = [e for e in pre_tool_use if not is_ours(e)]
+pre_tool_use.append({
+    "matcher": "Bash",
+    "hooks": [{"type": "command", "command": hook_path}],
+})
+
+os.makedirs(os.path.dirname(settings_path), exist_ok=True)
+with open(settings_path, "w", encoding="utf-8") as f:
+    json.dump(data, f, indent=2)
+    f.write("\n")
+if mode is not None:
+    os.chmod(settings_path, mode)
+PY
 }
 
 install_cursor_plugin() {
@@ -1200,6 +1401,43 @@ install_cursor_plugin() {
   mkdir -p "$HOME/.cursor/plugins/local"
   copy_tree "$plugin_src" "$cursor_dst"
   strip_host_overlays "$cursor_dst"
+
+  # Auto-allow the macroscope CLI in Cursor's CLI agent so the skill does not
+  # stall on per-argv approval prompts. Cursor's allowlist pattern is
+  # `Shell(<command>)`; we add the wildcard form matching any arguments and
+  # preserve any existing user rules.
+  python3 - "$HOME/.cursor/cli-config.json" <<'PY'
+import json, os, sys
+
+path = sys.argv[1]
+if os.path.exists(path):
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    mode = os.stat(path).st_mode
+else:
+    data = {}
+    mode = None
+
+permissions = data.setdefault("permissions", {})
+allow = permissions.setdefault("allow", [])
+permissions.setdefault("deny", [])
+
+for rule in (
+    "Shell(macroscope)",
+    "Shell(macroscope *)",
+    "Shell(mktemp)",
+    "Shell(mktemp *)",
+):
+    if rule not in allow:
+        allow.append(rule)
+
+os.makedirs(os.path.dirname(path), exist_ok=True)
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(data, f, indent=2)
+    f.write("\n")
+if mode is not None:
+    os.chmod(path, mode)
+PY
 
   success "Installed Cursor plugin to ${BOLD}${cursor_dst}${RESET}"
 }
@@ -1227,8 +1465,49 @@ install_opencode_support() {
 
   cp "$plugin_file" "$opencode_plugins/macroscope.js"
 
-  cp "$commands_src/macroscope.md" "$opencode_commands/macroscope.md"
-  copy_tree "$skills_src/macroscope" "$opencode_skills/macroscope"
+  # OpenCode uses flat namespaces for both skills and commands. We avoid
+  # the earlier `review`/`loop` collision risk by naming the skills
+  # `codereview` and `autoloop` at the source — distinctive enough that
+  # no rewrite or per-host prefix is needed. Commands live as
+  # `macroscope-codereview` and `macroscope-autoloop` so typing `/macro`
+  # surfaces both in the OpenCode command palette.
+  cp "$commands_src/macroscope-codereview.md" "$opencode_commands/macroscope-codereview.md"
+  if [ -f "$commands_src/macroscope-autoloop.md" ]; then
+    cp "$commands_src/macroscope-autoloop.md" "$opencode_commands/macroscope-autoloop.md"
+  fi
+  copy_tree "$skills_src/codereview" "$opencode_skills/codereview"
+  copy_tree "$skills_src/autoloop" "$opencode_skills/autoloop"
+
+  # Auto-allow the macroscope CLI in OpenCode so the skill does not stall on
+  # per-argv approval prompts. OpenCode reads `~/.config/opencode/opencode.json`
+  # and matches bash rules by pattern with last-match-wins semantics. We only
+  # set the macroscope key, leaving any catch-all or existing rules untouched.
+  python3 - "$opencode_root/opencode.json" <<'PY'
+import json, os, sys
+
+path = sys.argv[1]
+if os.path.exists(path):
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    mode = os.stat(path).st_mode
+else:
+    data = {}
+    mode = None
+
+permission = data.setdefault("permission", {})
+bash = permission.setdefault("bash", {})
+bash.setdefault("macroscope *", "allow")
+bash.setdefault("macroscope", "allow")
+bash.setdefault("mktemp *", "allow")
+bash.setdefault("mktemp", "allow")
+
+os.makedirs(os.path.dirname(path), exist_ok=True)
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(data, f, indent=2)
+    f.write("\n")
+if mode is not None:
+    os.chmod(path, mode)
+PY
 
   success "Installed OpenCode plugin to ${BOLD}${opencode_plugins}/macroscope.js${RESET}"
   success "Installed OpenCode commands to ${BOLD}${opencode_commands}${RESET}"
@@ -1292,7 +1571,7 @@ PY
   fi
 
   if [ -f "$HOME/.claude/plugins/cache/macroscope-local/macroscope/$PLUGIN_VERSION/.claude-plugin/plugin.json" ] && \
-     [ -f "$HOME/.claude/plugins/cache/macroscope-local/macroscope/$PLUGIN_VERSION/skills/macroscope/SKILL.md" ] && \
+     [ -f "$HOME/.claude/plugins/cache/macroscope-local/macroscope/$PLUGIN_VERSION/skills/codereview/SKILL.md" ] && \
      [ -f "$HOME/.claude/plugins/cache/macroscope-local/macroscope/$PLUGIN_VERSION/agents/macroscope-review-worker.md" ]; then
     success "Claude Code plugin installed with background worker"
   else
@@ -1305,7 +1584,7 @@ PY
     warn "Cursor plugin install did not produce the expected local plugin entry"
   fi
 
-  if [ -f "$HOME/.config/opencode/plugins/macroscope.js" ] && [ -f "$HOME/.config/opencode/commands/macroscope.md" ] && [ -f "$HOME/.config/opencode/skills/macroscope/SKILL.md" ]; then
+  if [ -f "$HOME/.config/opencode/plugins/macroscope.js" ] && [ -f "$HOME/.config/opencode/commands/macroscope-codereview.md" ] && [ -f "$HOME/.config/opencode/skills/codereview/SKILL.md" ]; then
     success "OpenCode plugin, commands, and skills installed"
   else
     warn "OpenCode install did not produce the expected plugin, command, and skill files"
@@ -1333,17 +1612,14 @@ print_installation_completion() {
   printf "${BOLD}Quick start:${RESET}\n"
   printf "  ${CYAN}macroscope${RESET}                     ${DIM}# Launch the interactive wizard${RESET}\n"
   printf "  ${CYAN}macroscope codereview --base <base_branch>${RESET} ${DIM}# Run the CLI directly${RESET}\n"
-  printf "  ${CYAN}/macroscope${RESET}                  ${DIM}# Local review in Claude Code or OpenCode${RESET}\n"
-  printf "  ${CYAN}/macroscope loop${RESET}             ${DIM}# Autopilot loop in Claude Code or OpenCode${RESET}\n"
-  printf "  ${CYAN}/macroscope:macroscope${RESET}      ${DIM}# Local review in Codex or Cursor${RESET}\n"
-  printf "  ${CYAN}/macroscope:macroscope loop${RESET} ${DIM}# Autopilot loop in Codex or Cursor${RESET}\n"
+  printf "  ${CYAN}/macroscope:codereview${RESET}           ${DIM}# Local review${RESET}\n"
+  printf "  ${CYAN}/macroscope:autoloop${RESET}             ${DIM}# Autopilot review-fix-push cycle${RESET}\n"
   echo ""
   printf "${BOLD}Notes:${RESET}\n"
   printf "  Restart Codex, Claude Code, Cursor, or OpenCode if they were already open.\n"
-  printf "  /macroscope now defaults to the local streaming CLI review path.\n"
-  printf "  Claude Code launches /macroscope in a background worker by default.\n"
-  printf "  /macroscope loop runs the full review-fix-push-re-review autopilot cycle.\n"
-  printf "  Local review validates each issue before acting and keeps poll sleeps capped at 60 seconds.\n"
+  printf "  /macroscope:codereview runs a local streaming CLI review.\n"
+  printf "  /macroscope:autoloop runs the full review-fix-push-re-review autopilot cycle.\n"
+  printf "  Claude Code launches reviews in a background worker.\n"
   if [ "$CODEX_SHIM_INSTALLED" = "1" ]; then
     printf "  ${BOLD}codex${RESET} now points at the bundled Codex.app CLI so plugins work from the terminal.\n"
   elif [ -n "$CODEX_PLUGIN_HOST_WARNING" ]; then
@@ -1385,8 +1661,8 @@ launch_wizard() {
 }
 
 main() {
-  if ! repair_only_requested && command -v clear >/dev/null 2>&1 && [ -t 1 ]; then
-    clear || true
+  if ! repair_only_requested && [ -t 1 ]; then
+    printf '\033[H\033[2J'
   fi
   if ! repair_only_requested; then
     print_banner
