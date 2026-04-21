@@ -1662,8 +1662,14 @@ launch_wizard() {
   # Drain pending terminal escape sequence responses (OSC 11 background
   # color, DSR cursor position) that the TUI library sent during the wizard.
   # Without this, responses appear as garbage in the shell input.
+  # Must switch to non-canonical mode — in canonical mode, bash's `read`
+  # can't see data that doesn't end with a newline.
   sleep 0.1
-  read -t 0.2 -r -n 10000 _discard < /dev/tty 2>/dev/null || true
+  if _old_tty=$(stty -g < /dev/tty 2>/dev/null); then
+    stty -icanon min 0 time 2 -echo < /dev/tty 2>/dev/null
+    dd bs=1024 count=1 < /dev/tty >/dev/null 2>&1 || true
+    stty "$_old_tty" < /dev/tty 2>/dev/null
+  fi
 }
 
 main() {
