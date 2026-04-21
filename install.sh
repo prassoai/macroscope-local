@@ -1666,8 +1666,8 @@ launch_wizard() {
     stty -echo < /dev/tty 2>/dev/null
   fi
 
-  if ! "$bin_path" < /dev/tty > /dev/tty 2>&1; then
-    warn "Wizard exited with a non-zero status. You can rerun it anytime with: macroscope"
+  if ! "$bin_path" setup < /dev/tty > /dev/tty 2>&1; then
+    warn "Wizard exited with a non-zero status. You can rerun it anytime with: macroscope setup"
   fi
 
   # Drain any remaining escape responses from the input buffer, then
