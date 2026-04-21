@@ -1655,18 +1655,26 @@ launch_wizard() {
 
   echo ""
   step "Launching Macroscope setup wizard..."
+
+  # Suppress terminal echo before running the binary so escape sequence
+  # responses (OSC 11, DSR) from the terminal emulator aren't echoed to
+  # the screen. The binary writes directly to /dev/tty so its own output
+  # is unaffected. Bubbletea manages its own terminal modes internally.
+  local _old_tty=""
+  _old_tty=$(stty -g < /dev/tty 2>/dev/null) || true
+  if [ -n "$_old_tty" ]; then
+    stty -echo < /dev/tty 2>/dev/null
+  fi
+
   if ! "$bin_path" < /dev/tty > /dev/tty 2>&1; then
     warn "Wizard exited with a non-zero status. You can rerun it anytime with: macroscope"
   fi
 
-  # Drain pending terminal escape sequence responses (OSC 11 background
-  # color, DSR cursor position) that the TUI library sent during the wizard.
-  # Without this, responses appear as garbage in the shell input.
-  # Must switch to non-canonical mode — in canonical mode, bash's `read`
-  # can't see data that doesn't end with a newline.
+  # Drain any remaining escape responses from the input buffer, then
+  # restore original terminal settings (including echo).
   sleep 0.1
-  if _old_tty=$(stty -g < /dev/tty 2>/dev/null); then
-    stty -icanon min 0 time 2 -echo < /dev/tty 2>/dev/null
+  if [ -n "$_old_tty" ]; then
+    stty -icanon min 0 time 2 < /dev/tty 2>/dev/null
     dd bs=1024 count=1 < /dev/tty >/dev/null 2>&1 || true
     stty "$_old_tty" < /dev/tty 2>/dev/null
   fi
