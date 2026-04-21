@@ -1658,6 +1658,12 @@ launch_wizard() {
   if ! "$bin_path" < /dev/tty > /dev/tty 2>&1; then
     warn "Wizard exited with a non-zero status. You can rerun it anytime with: macroscope"
   fi
+
+  # Drain pending terminal escape sequence responses (OSC 11 background
+  # color, DSR cursor position) that the TUI library sent during the wizard.
+  # Without this, responses appear as garbage in the shell input.
+  sleep 0.1
+  read -t 0.2 -r -n 10000 _discard < /dev/tty 2>/dev/null || true
 }
 
 main() {
