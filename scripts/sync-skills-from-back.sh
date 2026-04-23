@@ -1,25 +1,48 @@
 #!/bin/bash
 set -euo pipefail
 
-# Syncs standalone skills from the back repo's base SKILL.md files,
-# injecting a CLI prerequisite check (Step 0) after the frontmatter.
+# Syncs the full plugin bundle and standalone skills from the back repo.
 #
 # Usage:
 #   ./scripts/sync-skills-from-back.sh /path/to/back
 #
-# The back repo's skills/*/SKILL.md are the single source of truth.
-# This script produces the skills.sh-compatible versions that live in
-# this repo's skills/ directory.
+# The back repo's public-plugin directory is the single source of truth.
+# This script produces two things in macroscope-local:
+#
+#   1. The full plugin directory tree (manifests, assets, host-overlays,
+#      commands) copied verbatim into .claude-plugin/ and plugins/ so
+#      that marketplace submissions can point at this repo directly.
+#
+#   2. Standalone skills in skills/ for skills.sh cross-platform
+#      distribution, with a CLI prerequisite check injected after the
+#      frontmatter.
 
 BACK_REPO="${1:?Usage: $0 /path/to/back}"
-PLUGIN_SKILLS="$BACK_REPO/tools/cmd/macrodaemon/public-plugin/plugins/macroscope/skills"
+PLUGIN_ROOT="$BACK_REPO/tools/cmd/macrodaemon/public-plugin"
+PLUGIN_SKILLS="$PLUGIN_ROOT/plugins/macroscope/skills"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-DEST_SKILLS="$(cd "$SCRIPT_DIR/.." && pwd)/skills"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+DEST_SKILLS="$REPO_ROOT/skills"
 
-if [ ! -d "$PLUGIN_SKILLS" ]; then
-  echo "error: plugin skills not found at $PLUGIN_SKILLS" >&2
+if [ ! -d "$PLUGIN_ROOT" ]; then
+  echo "error: plugin root not found at $PLUGIN_ROOT" >&2
   exit 1
 fi
+
+# --- Part 1: Sync full plugin bundle for marketplace submissions ---
+
+# Sync .claude-plugin/marketplace.json at repo root
+mkdir -p "$REPO_ROOT/.claude-plugin"
+cp "$PLUGIN_ROOT/.claude-plugin/marketplace.json" "$REPO_ROOT/.claude-plugin/marketplace.json"
+echo "synced: .claude-plugin/marketplace.json"
+
+# Sync the entire plugins/macroscope/ directory
+rm -rf "$REPO_ROOT/plugins"
+mkdir -p "$REPO_ROOT/plugins"
+cp -R "$PLUGIN_ROOT/plugins/macroscope" "$REPO_ROOT/plugins/macroscope"
+echo "synced: plugins/macroscope/"
+
+# --- Part 2: Generate standalone skills for skills.sh ---
 
 PREREQ_FILE="$(mktemp)"
 trap 'rm -f "$PREREQ_FILE"' EXIT
@@ -51,20 +74,6 @@ for skill_dir in "$PLUGIN_SKILLS"/*/; do
   mkdir -p "$DEST_SKILLS/$skill_name"
   dst="$DEST_SKILLS/$skill_name/SKILL.md"
 
-  # Strategy: find the first blank line after the closing "---" of the
-  # frontmatter, and insert the prerequisite block there.
-  #
-  # The SKILL.md format is:
-  #   ---
-  #   name: ...
-  #   description: ...
-  #   ---
-  #   <blank line>
-  #   <body>
-  #
-  # We copy everything up to and including that blank line, insert the
-  # prereq block + another blank line, then copy the rest of the body.
-
   python3 -c "
 import sys
 
@@ -74,32 +83,27 @@ with open(sys.argv[1]) as f:
 with open(sys.argv[2]) as f:
     prereq = f.read()
 
-# Find closing --- of frontmatter (second occurrence)
 fm_closes = [i for i, l in enumerate(lines) if l.strip() == '---']
 if len(fm_closes) < 2:
     sys.exit('no frontmatter found in ' + sys.argv[1])
 close_idx = fm_closes[1]
 
-# Find first blank line after frontmatter
 body_start = close_idx + 1
 while body_start < len(lines) and lines[body_start].strip() == '':
     body_start += 1
 
-# Output: frontmatter + blank line + prereq + blank line + body
 with open(sys.argv[3], 'w') as out:
-    # Frontmatter through closing ---
     for i in range(close_idx + 1):
         out.write(lines[i])
     out.write('\n')
     out.write(prereq.rstrip('\n') + '\n')
     out.write('\n')
-    # Rest of body
     for i in range(body_start, len(lines)):
         out.write(lines[i])
 " "$src" "$PREREQ_FILE" "$dst"
 
   synced=$((synced + 1))
-  echo "synced: $skill_name"
+  echo "synced: skills/$skill_name/SKILL.md (standalone)"
 done
 
-echo "done: $synced skill(s) synced to $DEST_SKILLS"
+echo "done: plugin bundle + $synced standalone skill(s) synced"
