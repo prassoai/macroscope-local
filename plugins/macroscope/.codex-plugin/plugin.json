@@ -1,0 +1,44 @@
+{
+  "name": "macroscope",
+  "version": "1.5.0",
+  "description": "Macroscope local-first review for Codex, Claude Code, Cursor, and OpenCode.",
+  "author": {
+    "name": "Prasso",
+    "email": "macroscope@prasso.ai",
+    "url": "https://github.com/prassoai"
+  },
+  "homepage": "https://github.com/prassoai/macroscope-local",
+  "repository": "https://github.com/prassoai/macroscope-local",
+  "license": "UNLICENSED",
+  "keywords": [
+    "code-review",
+    "macroscope",
+    "codex",
+    "claude-code",
+    "cursor",
+    "opencode"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Macroscope",
+    "shortDescription": "Local-first Macroscope code review and autopilot loop",
+    "longDescription": "Two skills: /macroscope:codereview runs a streaming local CLI review, /macroscope:autoloop pushes fixes, waits for correctness checks, and addresses PR comments until the branch is clean.",
+    "developerName": "Prasso",
+    "category": "Development",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/prassoai/macroscope-local",
+    "privacyPolicyURL": "https://app.macroscope.com/privacy",
+    "termsOfServiceURL": "https://app.macroscope.com/terms",
+    "defaultPrompt": [
+      "/macroscope:codereview",
+      "/macroscope:autoloop"
+    ],
+    "brandColor": "#0F766E",
+    "composerIcon": "./assets/macroscope-small.svg",
+    "logo": "./assets/macroscope.svg",
+    "screenshots": []
+  }
+}
