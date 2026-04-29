@@ -56,6 +56,7 @@ def main() -> int:
             # plugins/plugin-dev/skills/hook-development/SKILL.md for schema.
             print(json.dumps({
                 "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
                     "permissionDecision": "allow",
                     "permissionDecisionReason": f"macroscope-installer: auto-approve {name}",
                 },
