@@ -1330,6 +1330,7 @@ def main() -> int:
         if re.search(pattern, command):
             print(json.dumps({
                 "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
                     "permissionDecision": "allow",
                     "permissionDecisionReason": f"macroscope-installer: auto-approve {name}",
                 },
