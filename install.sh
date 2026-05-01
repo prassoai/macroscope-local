@@ -1665,6 +1665,14 @@ launch_wizard() {
   _old_tty=$(stty -g < /dev/tty 2>/dev/null) || true
   if [ -n "$_old_tty" ]; then
     stty -echo < /dev/tty 2>/dev/null
+    # Pre-drain: terminal escape responses (OSC 11 / DSR) queued during the
+    # banner / clear-screen phase can land in stdin before the wizard reads.
+    # If Bubbletea ingests them, it can fail with "program was killed" or
+    # "error reading input" on first keystroke.
+    stty -icanon min 0 time 2 < /dev/tty 2>/dev/null
+    dd bs=1024 count=1 < /dev/tty >/dev/null 2>&1 || true
+    stty "$_old_tty" < /dev/tty 2>/dev/null
+    stty -echo < /dev/tty 2>/dev/null
   fi
 
   if ! "$bin_path" setup < /dev/tty > /dev/tty 2>&1; then
