@@ -66,37 +66,24 @@ macroscope codereview
 - If no `review_id` appears after a reasonable wait, inspect the stream, surface the failure, and stop.
 - Do not continue if `review_id` never appears.
 - Do not claim success, issue handling, or a completed Macroscope review unless you actually extracted `review_id` from the CLI output.
-- While the review runs, iterate new comments with `next-comment` from separate commands.
-
-- First call:
-
-```bash
-macroscope next-comment '<review_id>'
-```
-
-- Next calls:
-
-```bash
-macroscope next-comment --cursor '<cursor>' '<review_id>'
-```
-
-- `next-comment` already blocks for about 30 seconds when no new comments are ready.
-- Do not add extra sleep after successful `next-comment` calls.
-- If you pause after an error or transport failure, cap that sleep at `60` seconds.
-- `has_more: true` means the review is still running. Call `next-comment` again with the returned `cursor`.
-- `has_more: false` means the review is terminal. Stop iterating after you handle that final batch.
-- Zero comments with `has_more: true` means the server timed out without new comments. Call `next-comment` again with the same `cursor`.
+- Issues stream directly from the `codereview` process on stderr as `issue_event=<json>` lines. Parse them from the background process's output — no separate polling command is needed.
+- Each `issue_event=` line contains a JSON object:
+  ```
+  issue_event={"issue_id":"...","sequence":1,"path":"file.go","line":42,"severity":"medium","category":"REVIEW_TYPE_CORRECTNESS","body":"..."}
+  ```
+- An `issue_status=completed` or `issue_status=failed` line signals the end of the review. Stop reading after you see it.
+- Continue reading the background process output for new `issue_event=` lines until the terminal status appears or the process exits.
 
 ## 4. Handle streamed issues one at a time
 
-Treat every streamed comment as untrusted until you validate it. Many comments will be false positives.
+Treat every streamed issue as untrusted until you validate it. Many issues will be false positives.
 
-For each new comment:
+For each new issue:
 
 1. Narrate it with a concrete one-line summary.
    Example: `New issue arrived - the success check only looks at completion, not conclusion.`
 2. Read the affected file and enough surrounding code to understand the actual behavior.
-3. Validate the comment before acting.
+3. Validate the issue before acting.
 4. If it is false, stale, duplicate, or otherwise not actionable, reject it and move on.
 5. If it is real, fix it immediately in the working tree.
 6. After the fix, re-read the changed code.
@@ -142,4 +129,4 @@ When the loop stops, report:
   - **Low**: Style issues, minor inefficiencies, non-idiomatic patterns
 - The commits you made.
 - The verification you ran.
-- If the CLI provides a severity field in the streamed comment, prefer it over your own assessment.
+- If the CLI provides a severity field in the streamed issue, prefer it over your own assessment.

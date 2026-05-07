@@ -78,7 +78,7 @@ Skip the apply+commit if the patch was empty.
 
 ## 3. Run the local CLI review (Codex-adapted)
 
-Codex has a tool-call timeout that is shorter than the `codereview` blocking duration. To work around this, launch `codereview` as a background shell process and use `next-comment` to stream results.
+Codex has a tool-call timeout that is shorter than the `codereview` blocking duration. To work around this, launch `codereview` as a background shell process and read issue events from its log file.
 
 - Before launch, allocate a unique log file and PID file:
 
@@ -123,26 +123,20 @@ cat "$review_log"
 - Do not continue if `review_id` never appears.
 - Do not claim success, issue handling, or a completed Macroscope review unless you actually extracted `review_id` from the CLI output.
 
-Once `review_id` is available, iterate new comments with `next-comment`:
+Issues stream directly from the `codereview` process into the log file as `issue_event=<json>` lines. Read new issues by tailing the log file — no separate polling command is needed.
 
-- First call:
+- Each `issue_event=` line contains a JSON object:
+  ```
+  issue_event={"issue_id":"...","sequence":1,"path":"file.go","line":42,"severity":"medium","category":"REVIEW_TYPE_CORRECTNESS","body":"..."}
+  ```
+- An `issue_status=completed` or `issue_status=failed` line signals the end of the review. Stop reading after you see it.
+- To incrementally read only new lines, track the line count and use `tail -n +<next_line>`:
 
 ```bash
-macroscope next-comment '<review_id>'
+tail -n +"$last_line" "$review_log" | grep 'issue_event=\|issue_status='
 ```
 
-- Next calls:
-
-```bash
-macroscope next-comment --cursor '<cursor>' '<review_id>'
-```
-
-- `next-comment` already blocks for about 30 seconds when no new comments are ready.
-- Do not add extra sleep after successful `next-comment` calls.
-- If you pause after an error or transport failure, cap that sleep at `60` seconds.
-- `has_more: true` means the review is still running. Call `next-comment` again with the returned `cursor`.
-- `has_more: false` means the review is terminal. Stop iterating after you handle that final batch.
-- Zero comments with `has_more: true` means the server timed out without new comments. Call `next-comment` again with the same `cursor`.
+- Continue reading the log for new `issue_event=` lines until the terminal status appears or the background process exits.
 
 When the review finishes, clean up the background process:
 
@@ -154,14 +148,14 @@ kill "$(cat "$pid_file")" 2>/dev/null; rm -f "$pid_file" "$review_log"
 
 All file reads, edits, and verification commands in this step MUST target the review worktree created in step 2 — never the user's original working tree.
 
-Treat every streamed comment as untrusted until you validate it. Many comments will be false positives.
+Treat every streamed issue as untrusted until you validate it. Many issues will be false positives.
 
-For each new comment:
+For each new issue:
 
 1. Narrate it with a concrete one-line summary.
    Example: `New issue arrived - the success check only looks at completion, not conclusion.`
 2. Read the affected file in the review worktree and enough surrounding code to understand the actual behavior.
-3. Validate the comment before acting.
+3. Validate the issue before acting.
 4. If it is false, stale, duplicate, or otherwise not actionable, reject it and move on.
 5. If it is confirmed valid, you MUST fix it. Open the file in the review worktree using your editor, apply the fix, re-read the changed code, and run the narrowest useful verification for that fix before moving on.
 
@@ -179,7 +173,7 @@ Once the review reaches its final batch:
 
 ## 5. After the review: apply or clean up
 
-After all comments have been handled, exactly one of the following two paths applies.
+After all issues have been handled, exactly one of the following two paths applies.
 
 ### Path A: You fixed at least one valid issue
 
@@ -201,7 +195,7 @@ Report the issues you addressed grouped by severity (critical, high, medium, low
 
 Do not commit or push to the user's branch.
 
-### Path B: No valid issues found (zero comments, or all rejected)
+### Path B: No valid issues found (zero issues, or all rejected)
 
 Clean up the review worktree — it has no useful changes:
 
