@@ -35,15 +35,25 @@ TMP_ROOT="$(mktemp -d /tmp/macroscope-hook-test.XXXXXX)"
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
 HOME_DIR="$TMP_ROOT/home"
-BUNDLE_DIR="$TMP_ROOT/bundle"
 RUN_DIR="$TMP_ROOT/run"
 SHIM_DIR="$TMP_ROOT/shims"
 FAKE_BIN="$TMP_ROOT/macroscope"
 INSTALL_LOG="$TMP_ROOT/install.log"
+LOCAL_BACK_REPO="${MACROSCOPE_TEST_BACK_REPO:-}"
+
+if [ -n "$LOCAL_BACK_REPO" ]; then
+  BUNDLE_DIR="$LOCAL_BACK_REPO/tools/cmd/macrodaemon/public-plugin"
+  PLUGIN_SOURCE_ENV=("MACROSCOPE_LOCAL_BACK_REPO=$LOCAL_BACK_REPO")
+else
+  BUNDLE_DIR="$TMP_ROOT/bundle"
+  PLUGIN_SOURCE_ENV=("MACROSCOPE_PLUGIN_BUNDLE_SOURCE=$BUNDLE_DIR")
+fi
 
 mkdir -p "$HOME_DIR" "$BUNDLE_DIR" "$RUN_DIR" "$SHIM_DIR"
-cp -R "$REPO_ROOT/.claude-plugin" "$BUNDLE_DIR/.claude-plugin"
-cp -R "$REPO_ROOT/plugins" "$BUNDLE_DIR/plugins"
+if [ -z "$LOCAL_BACK_REPO" ]; then
+  cp -R "$REPO_ROOT/.claude-plugin" "$BUNDLE_DIR/.claude-plugin"
+  cp -R "$REPO_ROOT/plugins" "$BUNDLE_DIR/plugins"
+fi
 
 cat > "$FAKE_BIN" <<'SH'
 #!/usr/bin/env bash
@@ -94,7 +104,7 @@ validate_hook "$REPO_ROOT/scripts/claude-bash-autoallow.sh" "standalone hook"
     CODEX_HOME="$HOME_DIR/.codex" \
     MACROSCOPE_SKIP_WIZARD=1 \
     MACROSCOPE_LOCAL_BINARY_SOURCE="$FAKE_BIN" \
-    MACROSCOPE_PLUGIN_BUNDLE_SOURCE="$BUNDLE_DIR" \
+    "${PLUGIN_SOURCE_ENV[@]}" \
     PATH="$SHIM_DIR:$PATH" \
     bash < "$REPO_ROOT/install.sh" > "$INSTALL_LOG" 2>&1
 )
@@ -106,3 +116,43 @@ if ! grep -q "Installed Claude Code plugin" "$INSTALL_LOG"; then
   tail -n 80 "$INSTALL_LOG" >&2
   exit 1
 fi
+
+if ! grep -q "Claude Code plugin installed with skills" "$INSTALL_LOG"; then
+  echo "installer did not verify the Claude Code plugin skills" >&2
+  tail -n 80 "$INSTALL_LOG" >&2
+  exit 1
+fi
+
+PLUGIN_VERSION="$(python3 - "$BUNDLE_DIR/plugins/macroscope/.claude-plugin/plugin.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as f:
+    print(json.load(f)["version"])
+PY
+)"
+
+CLAUDE_SOURCE="$HOME_DIR/.claude/plugins/marketplaces/macroscope-local/plugins/macroscope"
+CLAUDE_CACHE="$HOME_DIR/.claude/plugins/cache/macroscope-local/macroscope/$PLUGIN_VERSION"
+CODEX_SOURCE="$HOME_DIR/plugins/macroscope"
+CODEX_CACHE="$HOME_DIR/.codex/plugins/cache/local-user-plugins/macroscope/local"
+
+for dst in "$CLAUDE_SOURCE" "$CLAUDE_CACHE"; do
+  cmp "$BUNDLE_DIR/plugins/macroscope/host-overlays/claude/skills/codereview/SKILL.md" "$dst/skills/codereview/SKILL.md"
+  cmp "$BUNDLE_DIR/plugins/macroscope/host-overlays/claude/skills/autoloop/SKILL.md" "$dst/skills/autoloop/SKILL.md"
+  if [ -d "$dst/host-overlays" ]; then
+    echo "Claude Code install retained host overlays in $dst" >&2
+    exit 1
+  fi
+done
+
+for dst in "$CODEX_SOURCE" "$CODEX_CACHE"; do
+  cmp "$BUNDLE_DIR/plugins/macroscope/host-overlays/codex/skills/codereview/SKILL.md" "$dst/skills/codereview/SKILL.md"
+  cmp "$BUNDLE_DIR/plugins/macroscope/host-overlays/codex/skills/autoloop/SKILL.md" "$dst/skills/autoloop/SKILL.md"
+  if [ -d "$dst/host-overlays" ]; then
+    echo "Codex install retained host overlays in $dst" >&2
+    exit 1
+  fi
+done
+
+echo "ok: installer applies Claude and Codex host overlays"
