@@ -101,13 +101,13 @@ Skip the apply+commit if the patch was empty.
 - Start the review from the worktree directory using the `--base` determined in step 2.5:
 
 ```bash
-macroscope codereview --base "$base_branch"
+macroscope codereview --raw --base "$base_branch"
 ```
 
 or, if reviewing local-only changes with a baseline commit:
 
 ```bash
-macroscope codereview --base HEAD~1
+macroscope codereview --raw --base HEAD~1
 ```
 
 - Read streamed output via your host's background-output facility (e.g. `BashOutput` in Claude Code) and look for a line containing `review_id=`. Capture that value.

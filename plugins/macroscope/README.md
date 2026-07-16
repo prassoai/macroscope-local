@@ -16,8 +16,7 @@ OpenCode:    /macroscope-codereview   /macroscope-autoloop
 `/macroscope:codereview` (or the host equivalent) runs a one-shot local review:
 
 - It runs a streaming local `macroscope codereview`.
-- In Claude Code, the skill dispatches a dedicated background worker subagent before the CLI starts.
-- In other hosts, the installed skill is responsible for opening a sub-agent when the host supports it.
+- On hosts with background-command support, it runs the blocking review asynchronously while streaming issues back to the active session.
 - It validates each streamed issue before acting.
 - It rejects false positives, fixes confirmed issues one at a time, and reports only the issues it addressed, grouped by severity (critical / high / medium / low).
 - It keeps polling sleeps capped at 60 seconds.

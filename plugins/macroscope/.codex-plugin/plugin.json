@@ -1,6 +1,6 @@
 {
   "name": "macroscope",
-  "version": "1.5.0",
+  "version": "1.5.1",
   "description": "Macroscope local-first review for Codex, Claude Code, Cursor, and OpenCode.",
   "author": {
     "name": "Prasso",
@@ -22,7 +22,7 @@
   "interface": {
     "displayName": "Macroscope",
     "shortDescription": "Local-first Macroscope code review and autopilot loop",
-    "longDescription": "Two skills: /macroscope:codereview runs a streaming local CLI review, /macroscope:autoloop pushes fixes, waits for correctness checks, and addresses PR comments until the branch is clean.",
+    "longDescription": "Two skills: /macroscope:codereview runs a streaming local CLI review, while /macroscope:autoloop fixes confirmed issues locally, verifies and commits them, and re-reviews until the branch is clean.",
     "developerName": "Prasso",
     "category": "Development",
     "capabilities": [

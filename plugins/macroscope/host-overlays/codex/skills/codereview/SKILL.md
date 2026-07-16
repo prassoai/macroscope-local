@@ -92,13 +92,13 @@ pid_file="$(mktemp "${TMPDIR:-/tmp}/macroscope-pid.XXXXXX")"
 With `--base` (feature branch or local-only with baseline):
 
 ```bash
-macroscope codereview --base "$base_branch" > "$review_log" 2>&1 & echo $! > "$pid_file"
+macroscope codereview --raw --base "$base_branch" > "$review_log" 2>&1 & echo $! > "$pid_file"
 ```
 
 or for local-only changes with baseline commit:
 
 ```bash
-macroscope codereview --base HEAD~1 > "$review_log" 2>&1 & echo $! > "$pid_file"
+macroscope codereview --raw --base HEAD~1 > "$review_log" 2>&1 & echo $! > "$pid_file"
 ```
 
 Without `--base` (empty patch, no baseline commit):

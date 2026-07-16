@@ -1,6 +1,6 @@
 ---
 name: autoloop
-description: Run the full review-fix-push-re-review autopilot cycle until the branch is clean.
+description: Run the local review-fix-verify loop until the branch is clean.
 ---
 
 Run a local-only Macroscope autopilot cycle using the installed CLI:
@@ -44,7 +44,7 @@ pid_file="$(mktemp "${TMPDIR:-/tmp}/macroscope-pid.XXXXXX")"
 With `--base`:
 
 ```bash
-macroscope codereview --base "$base_branch" > "$review_log" 2>&1 & echo $! > "$pid_file"
+macroscope codereview --raw --base "$base_branch" > "$review_log" 2>&1 & echo $! > "$pid_file"
 # Note: uses redirection (> file 2>&1) rather than | tee so the command
 # remains a single token that matches the Bash(macroscope *) allow rule.
 ```

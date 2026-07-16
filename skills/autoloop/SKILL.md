@@ -1,6 +1,6 @@
 ---
 name: autoloop
-description: Run the full review-fix-push-re-review autopilot cycle until the branch is clean.
+description: Run the local review-fix-verify loop until the branch is clean.
 ---
 
 ## 0. Verify the CLI is installed
@@ -53,13 +53,13 @@ git symbolic-ref --quiet refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/rem
 - Start the review:
 
 ```bash
-macroscope codereview --base "$base_branch"
+macroscope codereview --raw --base "$base_branch"
 ```
 
 - If you omitted `--base`, run:
 
 ```bash
-macroscope codereview
+macroscope codereview --raw
 ```
 
 - Read streamed output via your host's background-output facility (e.g. `BashOutput` in Claude Code) and look for a line containing `review_id=`. Capture that value.
