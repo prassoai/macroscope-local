@@ -881,6 +881,18 @@ apply_claude_overlay() {
   strip_host_overlays "$dst"
 }
 
+apply_codex_overlay() {
+  local src="$1"
+  local dst="$2"
+  local overlay_src="$src/host-overlays/codex"
+
+  if [ -d "$overlay_src" ]; then
+    cp -R "$overlay_src/." "$dst/"
+  fi
+
+  strip_host_overlays "$dst"
+}
+
 seed_local_build_config_if_needed() {
   if [ -z "${MACROSCOPE_LOCAL_BACK_REPO:-}" ] && [ -z "${MACROSCOPE_LOCAL_BINARY_SOURCE:-}" ]; then
     return
@@ -1089,8 +1101,8 @@ PY
   codex_cache_dst="$codex_cache_root/$marketplace_name/macroscope/$CODEX_LOCAL_PLUGIN_VERSION"
   plugin_key="macroscope@$marketplace_name"
   copy_tree "$plugin_src" "$codex_cache_dst"
-  strip_host_overlays "$plugin_dst"
-  strip_host_overlays "$codex_cache_dst"
+  apply_codex_overlay "$plugin_src" "$plugin_dst"
+  apply_codex_overlay "$plugin_src" "$codex_cache_dst"
 
   python3 - "$codex_config" "$plugin_key" <<'PY'
 import os
@@ -1573,8 +1585,8 @@ PY
 
   if [ -f "$HOME/.claude/plugins/cache/macroscope-local/macroscope/$PLUGIN_VERSION/.claude-plugin/plugin.json" ] && \
      [ -f "$HOME/.claude/plugins/cache/macroscope-local/macroscope/$PLUGIN_VERSION/skills/codereview/SKILL.md" ] && \
-     [ -f "$HOME/.claude/plugins/cache/macroscope-local/macroscope/$PLUGIN_VERSION/agents/macroscope-review-worker.md" ]; then
-    success "Claude Code plugin installed with background worker"
+     [ -f "$HOME/.claude/plugins/cache/macroscope-local/macroscope/$PLUGIN_VERSION/skills/autoloop/SKILL.md" ]; then
+    success "Claude Code plugin installed with skills"
   else
     warn "Claude Code plugin install did not produce the expected cache entry"
   fi
