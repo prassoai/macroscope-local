@@ -80,8 +80,10 @@ STATE_LOADED=0
 STATE_TOOLS=""
 STATE_HOST_PERMISSIONS=""
 STATE_PATH_FILE=""
+STATE_PATH_POLICY=""
 PATH_ACTION="skip"
 PATH_TARGET=""
+PATH_POLICY="auto"
 APPLY_STARTED=0
 APPLY_COMPLETE=0
 ROLLBACK_LOG=""
@@ -97,7 +99,7 @@ Options:
                                     Select host integrations
   --host-permissions prompt|grant|skip
                                     Control host shell permission automation
-  --no-path                         Do not edit shell configuration
+  --no-path                         Never edit shell configuration (remembered for updates)
   --shell-config PATH               Edit exactly this shell configuration file
   --wizard                          Launch setup after installation
   --no-wizard                       Do not launch setup
@@ -195,13 +197,21 @@ try:
     tools = data.get("tools", [])
     host_permissions = data.get("hostPermissions", "")
     path_file = data.get("pathFile")
+    path_policy = data.get("pathPolicy")
     if not isinstance(tools, list) or not all(isinstance(tool, str) for tool in tools):
         raise TypeError("tools must be a string array")
     if not isinstance(host_permissions, str):
         raise TypeError("hostPermissions must be a string")
     if path_file is not None and not isinstance(path_file, str):
         raise TypeError("pathFile must be a string or null")
+    if path_policy is None:
+        # Preserve the behavior of legacy state. Only the new installer can
+        # record an explicit, durable --no-path choice.
+        path_policy = "managed" if path_file else "auto"
+    if path_policy not in ("auto", "managed", "skip"):
+        raise TypeError("pathPolicy must be auto, managed, or skip")
 except Exception:
+    print("")
     print("")
     print("")
     print("")
@@ -210,13 +220,15 @@ except Exception:
 print(",".join(tools))
 print(host_permissions)
 print(path_file or "")
+print(path_policy)
 print("valid")
 PY
 )"
   STATE_TOOLS="$(printf '%s\n' "$values" | sed -n '1p')"
   STATE_HOST_PERMISSIONS="$(printf '%s\n' "$values" | sed -n '2p')"
   STATE_PATH_FILE="$(printf '%s\n' "$values" | sed -n '3p')"
-  [ "$(printf '%s\n' "$values" | sed -n '4p')" = "valid" ] && STATE_LOADED=1
+  STATE_PATH_POLICY="$(printf '%s\n' "$values" | sed -n '4p')"
+  [ "$(printf '%s\n' "$values" | sed -n '5p')" = "valid" ] && STATE_LOADED=1
   return 0
 }
 
@@ -364,19 +376,35 @@ login_shell_name() {
 resolve_path_action() {
   PATH_ACTION="skip"
   PATH_TARGET=""
-  [ "$SKIP_PATH" -eq 0 ] || return 0
+  PATH_POLICY="auto"
+  if [ "$SKIP_PATH" -eq 1 ]; then
+    PATH_POLICY="skip"
+    return 0
+  fi
   if [ -n "$SHELL_CONFIG_OVERRIDE" ]; then
+    PATH_POLICY="managed"
     PATH_TARGET="$SHELL_CONFIG_OVERRIDE"
     case "$PATH_TARGET" in /*) ;; *) PATH_TARGET="$PWD/$PATH_TARGET" ;; esac
     PATH_ACTION="modify"
     return
   fi
+  if [ "$INSTALL_MODE" = "update" ] && [ "$STATE_LOADED" -eq 1 ]; then
+    case "$STATE_PATH_POLICY" in
+      skip)
+        PATH_POLICY="skip"
+        return
+        ;;
+      managed) PATH_POLICY="managed" ;;
+      auto) PATH_POLICY="auto" ;;
+    esac
+  fi
   active_path_contains_install_dir && return
-  if [ "$INSTALL_MODE" = "update" ] && [ "$STATE_LOADED" -eq 1 ] && [ -n "$STATE_PATH_FILE" ]; then
+  if [ "$INSTALL_MODE" = "update" ] && [ "$STATE_LOADED" -eq 1 ] && [ "$STATE_PATH_POLICY" = "managed" ] && [ -n "$STATE_PATH_FILE" ]; then
     PATH_TARGET="$STATE_PATH_FILE"
     PATH_ACTION="modify"
     return
   fi
+  PATH_POLICY="managed"
   case "$(login_shell_name)" in
     zsh)
       if [ -f "$HOME/.zprofile" ]; then PATH_TARGET="$HOME/.zprofile"
@@ -413,6 +441,12 @@ print_plan() {
     printf '%d. Add %s/.local/bin to PATH in %s\n' "$index" "$HOME" "$PATH_TARGET"
   elif active_path_contains_install_dir; then
     printf '%d. Keep PATH unchanged (%s/.local/bin is already active)\n' "$index" "$HOME"
+  elif [ "$PATH_POLICY" = "skip" ]; then
+    if [ "$SKIP_PATH" -eq 1 ]; then
+      printf '%d. Keep shell configuration unchanged (remember --no-path for future updates)\n' "$index"
+    else
+      printf '%d. Keep shell configuration unchanged (remembered --no-path; use --shell-config PATH to manage it)\n' "$index"
+    fi
   else
     printf '%d. Keep shell configuration unchanged\n' "$index"
   fi
@@ -2195,9 +2229,9 @@ PY
 write_install_state() {
   local path_file="$STATE_PATH_FILE"
   [ "$PATH_ACTION" = "modify" ] && path_file="$PATH_TARGET"
-  python3 - "$STATE_FILE" "$TMP_DIR/permission-before.json" "$SELECTED_TOOLS" "$HOST_PERMISSIONS" "$path_file" "$INSTALLED_VERSION" "$HOME" <<'PY'
+  python3 - "$STATE_FILE" "$TMP_DIR/permission-before.json" "$SELECTED_TOOLS" "$HOST_PERMISSIONS" "$path_file" "$PATH_POLICY" "$INSTALLED_VERSION" "$HOME" <<'PY'
 import json, os, sys, tempfile
-path, before_path, tools_csv, host_permissions, path_file, version, home = sys.argv[1:8]
+path, before_path, tools_csv, host_permissions, path_file, path_policy, version, home = sys.argv[1:9]
 try:
     with open(before_path, encoding="utf-8") as f: before = json.load(f)
 except Exception: before = {}
@@ -2224,8 +2258,8 @@ for tool, (config_path, keys, rules) in rules_by_tool.items():
         inserted = set()
         preexisting = set(old.get("preexisting", []))
     ownership[tool] = {"inserted": sorted(inserted), "preexisting": sorted(preexisting)}
-data = {"schemaVersion": 1, "version": version, "tools": selected, "hostPermissions": host_permissions,
-        "pathFile": path_file or None, "permissionOwnership": ownership}
+data = {"schemaVersion": 2, "version": version, "tools": selected, "hostPermissions": host_permissions,
+        "pathFile": path_file or None, "pathPolicy": path_policy, "permissionOwnership": ownership}
 os.makedirs(os.path.dirname(path), exist_ok=True)
 fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".macroscope-state-")
 with os.fdopen(fd, "w", encoding="utf-8") as f: json.dump(data, f, indent=2); f.write("\n")
