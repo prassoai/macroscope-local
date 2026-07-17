@@ -80,8 +80,10 @@ STATE_LOADED=0
 STATE_TOOLS=""
 STATE_HOST_PERMISSIONS=""
 STATE_PATH_FILE=""
+STATE_PATH_POLICY=""
 PATH_ACTION="skip"
 PATH_TARGET=""
+PATH_POLICY="skip"
 APPLY_STARTED=0
 APPLY_COMPLETE=0
 ROLLBACK_LOG=""
@@ -195,13 +197,19 @@ try:
     tools = data.get("tools", [])
     host_permissions = data.get("hostPermissions", "")
     path_file = data.get("pathFile")
+    path_policy = data.get("pathPolicy")
     if not isinstance(tools, list) or not all(isinstance(tool, str) for tool in tools):
         raise TypeError("tools must be a string array")
     if not isinstance(host_permissions, str):
         raise TypeError("hostPermissions must be a string")
     if path_file is not None and not isinstance(path_file, str):
         raise TypeError("pathFile must be a string or null")
+    if path_policy is None:
+        path_policy = "managed" if path_file else "skip"
+    if path_policy not in ("managed", "skip"):
+        raise TypeError("pathPolicy must be managed or skip")
 except Exception:
+    print("")
     print("")
     print("")
     print("")
@@ -210,13 +218,15 @@ except Exception:
 print(",".join(tools))
 print(host_permissions)
 print(path_file or "")
+print(path_policy)
 print("valid")
 PY
 )"
   STATE_TOOLS="$(printf '%s\n' "$values" | sed -n '1p')"
   STATE_HOST_PERMISSIONS="$(printf '%s\n' "$values" | sed -n '2p')"
   STATE_PATH_FILE="$(printf '%s\n' "$values" | sed -n '3p')"
-  [ "$(printf '%s\n' "$values" | sed -n '4p')" = "valid" ] && STATE_LOADED=1
+  STATE_PATH_POLICY="$(printf '%s\n' "$values" | sed -n '4p')"
+  [ "$(printf '%s\n' "$values" | sed -n '5p')" = "valid" ] && STATE_LOADED=1
   return 0
 }
 
@@ -364,12 +374,18 @@ login_shell_name() {
 resolve_path_action() {
   PATH_ACTION="skip"
   PATH_TARGET=""
+  PATH_POLICY="skip"
   [ "$SKIP_PATH" -eq 0 ] || return 0
   if [ -n "$SHELL_CONFIG_OVERRIDE" ]; then
+    PATH_POLICY="managed"
     PATH_TARGET="$SHELL_CONFIG_OVERRIDE"
     case "$PATH_TARGET" in /*) ;; *) PATH_TARGET="$PWD/$PATH_TARGET" ;; esac
     PATH_ACTION="modify"
     return
+  fi
+  if [ "$INSTALL_MODE" = "update" ] && [ "$STATE_LOADED" -eq 1 ]; then
+    [ "$STATE_PATH_POLICY" = "skip" ] && return
+    PATH_POLICY="managed"
   fi
   active_path_contains_install_dir && return
   if [ "$INSTALL_MODE" = "update" ] && [ "$STATE_LOADED" -eq 1 ] && [ -n "$STATE_PATH_FILE" ]; then
@@ -377,6 +393,7 @@ resolve_path_action() {
     PATH_ACTION="modify"
     return
   fi
+  PATH_POLICY="managed"
   case "$(login_shell_name)" in
     zsh)
       if [ -f "$HOME/.zprofile" ]; then PATH_TARGET="$HOME/.zprofile"
@@ -2195,9 +2212,9 @@ PY
 write_install_state() {
   local path_file="$STATE_PATH_FILE"
   [ "$PATH_ACTION" = "modify" ] && path_file="$PATH_TARGET"
-  python3 - "$STATE_FILE" "$TMP_DIR/permission-before.json" "$SELECTED_TOOLS" "$HOST_PERMISSIONS" "$path_file" "$INSTALLED_VERSION" "$HOME" <<'PY'
+  python3 - "$STATE_FILE" "$TMP_DIR/permission-before.json" "$SELECTED_TOOLS" "$HOST_PERMISSIONS" "$path_file" "$PATH_POLICY" "$INSTALLED_VERSION" "$HOME" <<'PY'
 import json, os, sys, tempfile
-path, before_path, tools_csv, host_permissions, path_file, version, home = sys.argv[1:8]
+path, before_path, tools_csv, host_permissions, path_file, path_policy, version, home = sys.argv[1:9]
 try:
     with open(before_path, encoding="utf-8") as f: before = json.load(f)
 except Exception: before = {}
@@ -2224,8 +2241,8 @@ for tool, (config_path, keys, rules) in rules_by_tool.items():
         inserted = set()
         preexisting = set(old.get("preexisting", []))
     ownership[tool] = {"inserted": sorted(inserted), "preexisting": sorted(preexisting)}
-data = {"schemaVersion": 1, "version": version, "tools": selected, "hostPermissions": host_permissions,
-        "pathFile": path_file or None, "permissionOwnership": ownership}
+data = {"schemaVersion": 2, "version": version, "tools": selected, "hostPermissions": host_permissions,
+        "pathFile": path_file or None, "pathPolicy": path_policy, "permissionOwnership": ownership}
 os.makedirs(os.path.dirname(path), exist_ok=True)
 fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".macroscope-state-")
 with os.fdopen(fd, "w", encoding="utf-8") as f: json.dump(data, f, indent=2); f.write("\n")

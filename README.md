@@ -19,7 +19,7 @@ curl -sSL https://raw.githubusercontent.com/prassoai/macroscope-local/main/insta
   bash -s -- --dry-run --tools claude,codex --host-permissions skip --no-path
 ```
 
-`--host-permissions grant` separately opts into Macroscope/mktemp shell allow-rules and the Claude Code `PreToolUse` hook. `--yes` confirms the displayed plan but never implies that permission grant. PATH changes are skipped when `~/.local/bin` is already active; otherwise only the login shell's preferred file is changed. Use `--shell-config PATH` for a managed dotfile or `--no-path` to make no shell edits.
+`--host-permissions grant` separately opts into Macroscope/mktemp shell allow-rules and the Claude Code `PreToolUse` hook. `--yes` confirms the displayed plan but never implies that permission grant. PATH changes are skipped when `~/.local/bin` is already active; otherwise only the login shell's preferred file is changed. Use `--shell-config PATH` for a managed dotfile or `--no-path` to make no shell edits; the installer remembers either choice for future updates.
 
 If your `codex` CLI is too old to load local plugins, the installer will place a small wrapper in `~/.local/bin/codex` that forwards to the newer Codex.app bundled binary.
 

@@ -275,8 +275,16 @@ test_active_path_skips_profiles() {
   TEST_PATH="$TEST_HOME/.local/bin:/usr/bin:/bin"
   run_install --yes --tools none --host-permissions skip --no-wizard >"$TEST_ROOT/out"
   [ ! -e "$TEST_HOME/.zshrc" ] && [ ! -e "$TEST_HOME/.zprofile" ] || fail "active PATH still changed profiles"
-  pass "exact active PATH component skips shell edits"
   unset TEST_PATH
+  run_install --mode update --yes --tools none --host-permissions skip --no-wizard >"$TEST_ROOT/out"
+  [ ! -e "$TEST_HOME/.zshrc" ] && [ ! -e "$TEST_HOME/.zprofile" ] || fail "later update claimed a shell profile"
+  python3 - "$TEST_HOME/.local/state/macroscope/install.json" <<'PY' || fail "active PATH policy was not retained"
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as f: data = json.load(f)
+assert data["pathPolicy"] == "skip"
+assert data["pathFile"] is None
+PY
+  pass "active PATH stays unmanaged when a later update cannot see it"
 }
 
 test_initial_defaults_to_all_tools() {
@@ -297,15 +305,80 @@ PY
 test_shell_config_override_is_exact() {
   new_home
   TEST_SHELL=/bin/bash
-  TEST_PATH="$TEST_HOME/.local/bin:/usr/bin:/bin"
-  run_install --yes --tools none --host-permissions skip --shell-config "$TEST_HOME/dotfiles/shell.env" --no-wizard >"$TEST_ROOT/out"
-  unset TEST_PATH
+  run_install --yes --tools none --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/out"
+  run_install --mode update --yes --tools none --host-permissions skip --shell-config "$TEST_HOME/dotfiles/shell.env" --no-wizard >"$TEST_ROOT/out"
+  python3 - "$TEST_HOME/.local/state/macroscope/install.json" "$TEST_HOME/dotfiles/shell.env" <<'PY' || fail "shell override did not restore managed policy"
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as f: data = json.load(f)
+assert data["pathPolicy"] == "managed"
+assert data["pathFile"] == sys.argv[2]
+PY
+  printf '# user shell config\n' > "$TEST_HOME/dotfiles/shell.env"
   run_install --mode update --yes --tools none --host-permissions skip --no-wizard >"$TEST_ROOT/out"
   grep -Fq '# Added by Macroscope installer' "$TEST_HOME/dotfiles/shell.env" || fail "shell override was not updated"
   [ ! -e "$TEST_HOME/.bashrc" ] && [ ! -e "$TEST_HOME/.bash_profile" ] || fail "shell override also changed default profiles"
   [ "$(grep -Fc '# Added by Macroscope installer' "$TEST_HOME/dotfiles/shell.env")" -eq 1 ] || fail "recorded shell target was duplicated"
-  pass "--shell-config remains the only update target"
+  pass "--shell-config overrides skip and remains the only managed target"
   unset TEST_SHELL
+}
+
+test_no_path_policy_survives_update() {
+  new_home
+  run_install --yes --tools none --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/out"
+  printf '# user zsh config\n' > "$TEST_HOME/.zshrc"
+  run_install --mode update --yes --tools none --host-permissions skip --no-wizard >"$TEST_ROOT/out"
+  [ "$(cat "$TEST_HOME/.zshrc")" = '# user zsh config' ] || fail "stored --no-path policy did not protect zshrc"
+  [ ! -e "$TEST_HOME/.zprofile" ] || fail "stored --no-path policy created zprofile"
+  python3 - "$TEST_HOME/.local/state/macroscope/install.json" <<'PY' || fail "--no-path policy was not persisted"
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as f: data = json.load(f)
+assert data["schemaVersion"] == 2
+assert data["pathPolicy"] == "skip"
+assert data["pathFile"] is None
+PY
+
+  new_home
+  local prior_target="$TEST_HOME/dotfiles/prior.env"
+  run_install --yes --tools none --host-permissions skip --shell-config "$prior_target" --no-wizard >"$TEST_ROOT/out"
+  run_install --mode update --yes --tools none --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/out"
+  printf '# user now owns PATH\n' > "$prior_target"
+  run_install --mode update --yes --tools none --host-permissions skip --no-wizard >"$TEST_ROOT/out"
+  [ "$(cat "$prior_target")" = '# user now owns PATH' ] || fail "retained pathFile overrode skip policy"
+  python3 - "$TEST_HOME/.local/state/macroscope/install.json" "$prior_target" <<'PY' || fail "--no-path discarded prior target history"
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as f: data = json.load(f)
+assert data["pathPolicy"] == "skip"
+assert data["pathFile"] == sys.argv[2]
+PY
+  pass "--no-path remains durable while retaining prior target history"
+}
+
+test_legacy_path_policy_is_inferred() {
+  new_home
+  mkdir -p "$TEST_HOME/.local/state/macroscope"
+  local legacy_target="$TEST_HOME/dotfiles/legacy.env"
+  printf '{"schemaVersion":1,"tools":[],"hostPermissions":"skip","pathFile":"%s","permissionOwnership":{}}\n' "$legacy_target" > "$TEST_HOME/.local/state/macroscope/install.json"
+  run_install --mode update --yes --tools none --host-permissions skip --no-wizard >"$TEST_ROOT/out"
+  grep -Fq '# Added by Macroscope installer' "$legacy_target" || fail "legacy managed path target was not updated"
+  python3 - "$TEST_HOME/.local/state/macroscope/install.json" <<'PY' || fail "legacy managed policy was not migrated"
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as f: data = json.load(f)
+assert data["schemaVersion"] == 2
+assert data["pathPolicy"] == "managed"
+PY
+
+  new_home
+  mkdir -p "$TEST_HOME/.local/state/macroscope"
+  printf '{"schemaVersion":1,"tools":[],"hostPermissions":"skip","pathFile":null,"permissionOwnership":{}}\n' > "$TEST_HOME/.local/state/macroscope/install.json"
+  run_install --mode update --yes --tools none --host-permissions skip --no-wizard >"$TEST_ROOT/out"
+  [ ! -e "$TEST_HOME/.zshrc" ] && [ ! -e "$TEST_HOME/.zprofile" ] || fail "legacy unmanaged state claimed a shell profile"
+  python3 - "$TEST_HOME/.local/state/macroscope/install.json" <<'PY' || fail "legacy unmanaged policy was not migrated"
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as f: data = json.load(f)
+assert data["schemaVersion"] == 2
+assert data["pathPolicy"] == "skip"
+PY
+  pass "legacy state infers managed and unmanaged PATH policies"
 }
 
 test_recorded_shell_target_preserves_its_syntax() {
@@ -556,8 +629,10 @@ test_zsh_touches_one_profile_and_selected_tool_only
 test_initial_install_does_not_modify_unselected_existing_tool
 test_active_path_skips_profiles
 test_initial_defaults_to_all_tools
+test_no_path_policy_survives_update
 test_shell_config_override_is_exact
 test_recorded_shell_target_preserves_its_syntax
+test_legacy_path_policy_is_inferred
 test_permissions_are_opt_in_and_owned
 test_permission_updates_preserve_managed_symlinks
 test_update_preserves_footprint_and_removes_deselected
