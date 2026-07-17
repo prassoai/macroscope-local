@@ -99,7 +99,7 @@ Options:
                                     Select host integrations
   --host-permissions prompt|grant|skip
                                     Control host shell permission automation
-  --no-path                         Do not edit shell configuration
+  --no-path                         Never edit shell configuration (remembered for updates)
   --shell-config PATH               Edit exactly this shell configuration file
   --wizard                          Launch setup after installation
   --no-wizard                       Do not launch setup
@@ -205,9 +205,9 @@ try:
     if path_file is not None and not isinstance(path_file, str):
         raise TypeError("pathFile must be a string or null")
     if path_policy is None:
-        # Legacy state cannot distinguish a recorded target from a later
-        # --no-path choice, so preserve user control during migration.
-        path_policy = "skip"
+        # Preserve the behavior of legacy state. Only the new installer can
+        # record an explicit, durable --no-path choice.
+        path_policy = "managed" if path_file else "auto"
     if path_policy not in ("auto", "managed", "skip"):
         raise TypeError("pathPolicy must be auto, managed, or skip")
 except Exception:
@@ -441,6 +441,12 @@ print_plan() {
     printf '%d. Add %s/.local/bin to PATH in %s\n' "$index" "$HOME" "$PATH_TARGET"
   elif active_path_contains_install_dir; then
     printf '%d. Keep PATH unchanged (%s/.local/bin is already active)\n' "$index" "$HOME"
+  elif [ "$PATH_POLICY" = "skip" ]; then
+    if [ "$SKIP_PATH" -eq 1 ]; then
+      printf '%d. Keep shell configuration unchanged (remember --no-path for future updates)\n' "$index"
+    else
+      printf '%d. Keep shell configuration unchanged (remembered --no-path; use --shell-config PATH to manage it)\n' "$index"
+    fi
   else
     printf '%d. Keep shell configuration unchanged\n' "$index"
   fi

@@ -333,8 +333,10 @@ PY
 test_no_path_policy_survives_update() {
   new_home
   run_install --yes --tools none --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/out"
+  grep -Fq 'remember --no-path for future updates' "$TEST_ROOT/out" || fail "explicit --no-path persistence was not disclosed"
   printf '# user zsh config\n' > "$TEST_HOME/.zshrc"
   run_install --mode update --yes --tools none --host-permissions skip --no-wizard >"$TEST_ROOT/out"
+  grep -Fq 'remembered --no-path; use --shell-config PATH to manage it' "$TEST_ROOT/out" || fail "remembered --no-path was not explained"
   [ "$(cat "$TEST_HOME/.zshrc")" = '# user zsh config' ] || fail "stored --no-path policy did not protect zshrc"
   [ ! -e "$TEST_HOME/.zprofile" ] || fail "stored --no-path policy created zprofile"
   python3 - "$TEST_HOME/.local/state/macroscope/install.json" <<'PY' || fail "--no-path policy was not persisted"
@@ -361,33 +363,37 @@ PY
   pass "--no-path remains durable while retaining prior target history"
 }
 
-test_legacy_path_policy_is_conservative() {
+test_legacy_path_policy_preserves_behavior() {
   new_home
   mkdir -p "$TEST_HOME/.local/state/macroscope"
   local legacy_target="$TEST_HOME/dotfiles/legacy.env"
   printf '{"schemaVersion":1,"tools":[],"hostPermissions":"skip","pathFile":"%s","permissionOwnership":{}}\n' "$legacy_target" > "$TEST_HOME/.local/state/macroscope/install.json"
   run_install --mode update --yes --tools none --host-permissions skip --no-wizard >"$TEST_ROOT/out"
-  [ ! -e "$legacy_target" ] || fail "ambiguous legacy path target was modified"
-  python3 - "$TEST_HOME/.local/state/macroscope/install.json" "$legacy_target" <<'PY' || fail "ambiguous legacy path policy was not migrated conservatively"
+  grep -Fq '# Added by Macroscope installer' "$legacy_target" || fail "legacy managed path target was not repaired"
+  python3 - "$TEST_HOME/.local/state/macroscope/install.json" "$legacy_target" <<'PY' || fail "legacy managed path policy was not preserved"
 import json, sys
 with open(sys.argv[1], encoding="utf-8") as f: data = json.load(f)
 assert data["schemaVersion"] == 2
-assert data["pathPolicy"] == "skip"
+assert data["pathPolicy"] == "managed"
 assert data["pathFile"] == sys.argv[2]
 PY
 
   new_home
   mkdir -p "$TEST_HOME/.local/state/macroscope"
   printf '{"schemaVersion":1,"tools":[],"hostPermissions":"skip","pathFile":null,"permissionOwnership":{}}\n' > "$TEST_HOME/.local/state/macroscope/install.json"
+  TEST_PATH="$TEST_HOME/.local/bin:/usr/bin:/bin"
   run_install --mode update --yes --tools none --host-permissions skip --no-wizard >"$TEST_ROOT/out"
-  [ ! -e "$TEST_HOME/.zshrc" ] && [ ! -e "$TEST_HOME/.zprofile" ] || fail "legacy unmanaged state claimed a shell profile"
-  python3 - "$TEST_HOME/.local/state/macroscope/install.json" <<'PY' || fail "legacy unmanaged policy was not migrated"
+  [ ! -e "$TEST_HOME/.zshrc" ] && [ ! -e "$TEST_HOME/.zprofile" ] || fail "active legacy PATH changed a shell profile"
+  python3 - "$TEST_HOME/.local/state/macroscope/install.json" <<'PY' || fail "legacy active PATH was not migrated to auto"
 import json, sys
 with open(sys.argv[1], encoding="utf-8") as f: data = json.load(f)
 assert data["schemaVersion"] == 2
-assert data["pathPolicy"] == "skip"
+assert data["pathPolicy"] == "auto"
 PY
-  pass "legacy state never claims shell configuration during migration"
+  unset TEST_PATH
+  run_install --mode update --yes --tools none --host-permissions skip --no-wizard >"$TEST_ROOT/out"
+  grep -Fq '# Added by Macroscope installer' "$TEST_HOME/.zprofile" || fail "legacy automatic PATH behavior was not preserved"
+  pass "legacy state preserves managed and automatic PATH behavior"
 }
 
 test_recorded_shell_target_preserves_its_syntax() {
@@ -641,7 +647,7 @@ test_initial_defaults_to_all_tools
 test_no_path_policy_survives_update
 test_shell_config_override_is_exact
 test_recorded_shell_target_preserves_its_syntax
-test_legacy_path_policy_is_conservative
+test_legacy_path_policy_preserves_behavior
 test_permissions_are_opt_in_and_owned
 test_permission_updates_preserve_managed_symlinks
 test_update_preserves_footprint_and_removes_deselected
