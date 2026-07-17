@@ -275,16 +275,24 @@ test_active_path_skips_profiles() {
   TEST_PATH="$TEST_HOME/.local/bin:/usr/bin:/bin"
   run_install --yes --tools none --host-permissions skip --no-wizard >"$TEST_ROOT/out"
   [ ! -e "$TEST_HOME/.zshrc" ] && [ ! -e "$TEST_HOME/.zprofile" ] || fail "active PATH still changed profiles"
-  unset TEST_PATH
-  run_install --mode update --yes --tools none --host-permissions skip --no-wizard >"$TEST_ROOT/out"
-  [ ! -e "$TEST_HOME/.zshrc" ] && [ ! -e "$TEST_HOME/.zprofile" ] || fail "later update claimed a shell profile"
-  python3 - "$TEST_HOME/.local/state/macroscope/install.json" <<'PY' || fail "active PATH policy was not retained"
+  python3 - "$TEST_HOME/.local/state/macroscope/install.json" <<'PY' || fail "active PATH was treated as an explicit opt-out"
 import json, sys
 with open(sys.argv[1], encoding="utf-8") as f: data = json.load(f)
-assert data["pathPolicy"] == "skip"
+assert data["pathPolicy"] == "auto"
 assert data["pathFile"] is None
 PY
-  pass "active PATH stays unmanaged when a later update cannot see it"
+  run_install --mode update --yes --tools none --host-permissions skip --no-wizard >"$TEST_ROOT/out"
+  [ ! -e "$TEST_HOME/.zshrc" ] && [ ! -e "$TEST_HOME/.zprofile" ] || fail "still-active PATH changed profiles"
+  unset TEST_PATH
+  run_install --mode update --yes --tools none --host-permissions skip --no-wizard >"$TEST_ROOT/out"
+  grep -Fq '# Added by Macroscope installer' "$TEST_HOME/.zprofile" || fail "missing ambient PATH was not repaired"
+  python3 - "$TEST_HOME/.local/state/macroscope/install.json" <<'PY' || fail "repaired PATH was not recorded as managed"
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as f: data = json.load(f)
+assert data["pathPolicy"] == "managed"
+assert data["pathFile"].endswith("/.zprofile")
+PY
+  pass "ambient PATH is rechecked before becoming installer-managed"
 }
 
 test_initial_defaults_to_all_tools() {
@@ -353,18 +361,19 @@ PY
   pass "--no-path remains durable while retaining prior target history"
 }
 
-test_legacy_path_policy_is_inferred() {
+test_legacy_path_policy_is_conservative() {
   new_home
   mkdir -p "$TEST_HOME/.local/state/macroscope"
   local legacy_target="$TEST_HOME/dotfiles/legacy.env"
   printf '{"schemaVersion":1,"tools":[],"hostPermissions":"skip","pathFile":"%s","permissionOwnership":{}}\n' "$legacy_target" > "$TEST_HOME/.local/state/macroscope/install.json"
   run_install --mode update --yes --tools none --host-permissions skip --no-wizard >"$TEST_ROOT/out"
-  grep -Fq '# Added by Macroscope installer' "$legacy_target" || fail "legacy managed path target was not updated"
-  python3 - "$TEST_HOME/.local/state/macroscope/install.json" <<'PY' || fail "legacy managed policy was not migrated"
+  [ ! -e "$legacy_target" ] || fail "ambiguous legacy path target was modified"
+  python3 - "$TEST_HOME/.local/state/macroscope/install.json" "$legacy_target" <<'PY' || fail "ambiguous legacy path policy was not migrated conservatively"
 import json, sys
 with open(sys.argv[1], encoding="utf-8") as f: data = json.load(f)
 assert data["schemaVersion"] == 2
-assert data["pathPolicy"] == "managed"
+assert data["pathPolicy"] == "skip"
+assert data["pathFile"] == sys.argv[2]
 PY
 
   new_home
@@ -378,7 +387,7 @@ with open(sys.argv[1], encoding="utf-8") as f: data = json.load(f)
 assert data["schemaVersion"] == 2
 assert data["pathPolicy"] == "skip"
 PY
-  pass "legacy state infers managed and unmanaged PATH policies"
+  pass "legacy state never claims shell configuration during migration"
 }
 
 test_recorded_shell_target_preserves_its_syntax() {
@@ -632,7 +641,7 @@ test_initial_defaults_to_all_tools
 test_no_path_policy_survives_update
 test_shell_config_override_is_exact
 test_recorded_shell_target_preserves_its_syntax
-test_legacy_path_policy_is_inferred
+test_legacy_path_policy_is_conservative
 test_permissions_are_opt_in_and_owned
 test_permission_updates_preserve_managed_symlinks
 test_update_preserves_footprint_and_removes_deselected

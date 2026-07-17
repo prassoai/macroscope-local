@@ -83,7 +83,7 @@ STATE_PATH_FILE=""
 STATE_PATH_POLICY=""
 PATH_ACTION="skip"
 PATH_TARGET=""
-PATH_POLICY="skip"
+PATH_POLICY="auto"
 APPLY_STARTED=0
 APPLY_COMPLETE=0
 ROLLBACK_LOG=""
@@ -205,9 +205,11 @@ try:
     if path_file is not None and not isinstance(path_file, str):
         raise TypeError("pathFile must be a string or null")
     if path_policy is None:
-        path_policy = "managed" if path_file else "skip"
-    if path_policy not in ("managed", "skip"):
-        raise TypeError("pathPolicy must be managed or skip")
+        # Legacy state cannot distinguish a recorded target from a later
+        # --no-path choice, so preserve user control during migration.
+        path_policy = "skip"
+    if path_policy not in ("auto", "managed", "skip"):
+        raise TypeError("pathPolicy must be auto, managed, or skip")
 except Exception:
     print("")
     print("")
@@ -374,8 +376,11 @@ login_shell_name() {
 resolve_path_action() {
   PATH_ACTION="skip"
   PATH_TARGET=""
-  PATH_POLICY="skip"
-  [ "$SKIP_PATH" -eq 0 ] || return 0
+  PATH_POLICY="auto"
+  if [ "$SKIP_PATH" -eq 1 ]; then
+    PATH_POLICY="skip"
+    return 0
+  fi
   if [ -n "$SHELL_CONFIG_OVERRIDE" ]; then
     PATH_POLICY="managed"
     PATH_TARGET="$SHELL_CONFIG_OVERRIDE"
@@ -384,11 +389,17 @@ resolve_path_action() {
     return
   fi
   if [ "$INSTALL_MODE" = "update" ] && [ "$STATE_LOADED" -eq 1 ]; then
-    [ "$STATE_PATH_POLICY" = "skip" ] && return
-    PATH_POLICY="managed"
+    case "$STATE_PATH_POLICY" in
+      skip)
+        PATH_POLICY="skip"
+        return
+        ;;
+      managed) PATH_POLICY="managed" ;;
+      auto) PATH_POLICY="auto" ;;
+    esac
   fi
   active_path_contains_install_dir && return
-  if [ "$INSTALL_MODE" = "update" ] && [ "$STATE_LOADED" -eq 1 ] && [ -n "$STATE_PATH_FILE" ]; then
+  if [ "$INSTALL_MODE" = "update" ] && [ "$STATE_LOADED" -eq 1 ] && [ "$STATE_PATH_POLICY" = "managed" ] && [ -n "$STATE_PATH_FILE" ]; then
     PATH_TARGET="$STATE_PATH_FILE"
     PATH_ACTION="modify"
     return
