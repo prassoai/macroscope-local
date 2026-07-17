@@ -61,7 +61,7 @@ CODEX_SHIM_INSTALLED=0
 CODEX_PLUGIN_HOST_WARNING=""
 
 CODEX_LOCAL_PLUGIN_VERSION="local"
-CODEX_BUNDLED_BINARY="/Applications/Codex.app/Contents/Resources/codex"
+CODEX_BUNDLED_BINARY="${MACROSCOPE_CODEX_BUNDLED_BINARY:-/Applications/Codex.app/Contents/Resources/codex}"
 CODEX_SHIM_PATH=""
 
 DRY_RUN=0
@@ -85,6 +85,7 @@ PATH_TARGET=""
 APPLY_STARTED=0
 APPLY_COMPLETE=0
 ROLLBACK_LOG=""
+SAVED_TTY_STATE=""
 
 usage() {
   cat <<'EOF'
@@ -140,7 +141,17 @@ parse_options() {
         esac
         ;;
       -h|--help) usage; exit 0 ;;
-      --) ;;
+      --)
+        shift
+        if [ "$#" -gt 1 ] || { [ "$#" -eq 1 ] && [ -n "$INSTALL_VERSION" ]; }; then
+          error "Unexpected argument: ${2:-$1}"
+          exit 2
+        fi
+        if [ "$#" -eq 1 ]; then
+          INSTALL_VERSION="$1"
+        fi
+        break
+        ;;
       -*) error "Unknown option: $1"; usage >&2; exit 2 ;;
       *)
         if [ -n "$INSTALL_VERSION" ]; then
@@ -179,15 +190,26 @@ import json, sys
 try:
     with open(sys.argv[1], encoding="utf-8") as f:
         data = json.load(f)
+    if not isinstance(data, dict):
+        raise TypeError("state must be an object")
+    tools = data.get("tools", [])
+    host_permissions = data.get("hostPermissions", "")
+    path_file = data.get("pathFile")
+    if not isinstance(tools, list) or not all(isinstance(tool, str) for tool in tools):
+        raise TypeError("tools must be a string array")
+    if not isinstance(host_permissions, str):
+        raise TypeError("hostPermissions must be a string")
+    if path_file is not None and not isinstance(path_file, str):
+        raise TypeError("pathFile must be a string or null")
 except Exception:
     print("")
     print("")
     print("")
     print("invalid")
     raise SystemExit
-print(",".join(data.get("tools", [])))
-print(data.get("hostPermissions", ""))
-print(data.get("pathFile") or "")
+print(",".join(tools))
+print(host_permissions)
+print(path_file or "")
 print("valid")
 PY
 )"
@@ -195,6 +217,7 @@ PY
   STATE_HOST_PERMISSIONS="$(printf '%s\n' "$values" | sed -n '2p')"
   STATE_PATH_FILE="$(printf '%s\n' "$values" | sed -n '3p')"
   [ "$(printf '%s\n' "$values" | sed -n '4p')" = "valid" ] && STATE_LOADED=1
+  return 0
 }
 
 detect_installed_tools() {
@@ -342,10 +365,15 @@ resolve_path_action() {
   PATH_ACTION="skip"
   PATH_TARGET=""
   [ "$SKIP_PATH" -eq 0 ] || return 0
-  active_path_contains_install_dir && return
   if [ -n "$SHELL_CONFIG_OVERRIDE" ]; then
     PATH_TARGET="$SHELL_CONFIG_OVERRIDE"
     case "$PATH_TARGET" in /*) ;; *) PATH_TARGET="$PWD/$PATH_TARGET" ;; esac
+    PATH_ACTION="modify"
+    return
+  fi
+  active_path_contains_install_dir && return
+  if [ "$INSTALL_MODE" = "update" ] && [ "$STATE_LOADED" -eq 1 ] && [ -n "$STATE_PATH_FILE" ]; then
+    PATH_TARGET="$STATE_PATH_FILE"
     PATH_ACTION="modify"
     return
   fi
@@ -394,6 +422,10 @@ print_plan() {
     if tool_selected "$tool"; then
       printf '%d. Install or update the %s plugin (%s)\n' "$index" "$tool" "$(tool_plan_path "$tool")"
       index=$((index + 1))
+      if [ "$tool" = "codex" ] && codex_shim_will_install; then
+        printf '%d. Install or update the managed Codex CLI wrapper at %s/.local/bin/codex\n' "$index" "$HOME"
+        index=$((index + 1))
+      fi
     elif [ "$INSTALL_MODE" = "update" ] && tool_installed "$tool"; then
       printf '%d. Remove Macroscope-owned %s integration state at %s (deselected)\n' "$index" "$tool" "$(tool_plan_path "$tool")"
       index=$((index + 1))
@@ -472,6 +504,16 @@ codex_supports_plugins() {
   local codex_bin="$1"
   [ -x "$codex_bin" ] || return 1
   "$codex_bin" --help 2>/dev/null | grep -q "app-server"
+}
+
+codex_shim_will_install() {
+  local current_codex=""
+  current_codex="$(command -v codex || true)"
+  if [ -n "$current_codex" ] && [ "$current_codex" = "$CODEX_BUNDLED_BINARY" ] && codex_supports_plugins "$current_codex"; then
+    return 1
+  fi
+  [ -x "$CODEX_BUNDLED_BINARY" ] && codex_supports_plugins "$CODEX_BUNDLED_BINARY" || return 1
+  [ ! -f "$HOME/.local/bin/codex" ] || is_managed_codex_shim "$HOME/.local/bin/codex"
 }
 
 is_managed_codex_shim() {
@@ -703,7 +745,6 @@ clean_json_and_toml_state() {
     "$HOME/.claude.json" \
     "$HOME/.claude/plugins/known_marketplaces.json" \
     "$HOME/.claude/plugins/installed_plugins.json" \
-    "$HOME/.claude.json" \
     "$HOME/.claude/settings.json" \
     "$HOME/.claude/settings.local.json" \
     "$HOME/.cursor/mcp.json" \
@@ -820,14 +861,20 @@ def write_json(path, data, mode):
 
 
 install_state_data, _ = load_json(install_state)
-permission_ownership = install_state_data.get("permissionOwnership", {}) if isinstance(install_state_data, dict) else None
+if isinstance(install_state_data, dict) and "permissionOwnership" not in install_state_data:
+    permission_ownership = None
+elif isinstance(install_state_data, dict) and isinstance(install_state_data.get("permissionOwnership"), dict):
+    permission_ownership = install_state_data["permissionOwnership"]
+else:
+    permission_ownership = {}
 
 
 def owned_permission_rules(tool, legacy_rules):
     if permission_ownership is None:
         return set(legacy_rules)
     tool_state = permission_ownership.get(tool, {})
-    return set(tool_state.get("inserted", [])) if isinstance(tool_state, dict) else set()
+    inserted = tool_state.get("inserted", []) if isinstance(tool_state, dict) else []
+    return {rule for rule in inserted if isinstance(rule, str)} if isinstance(inserted, list) else set()
 
 
 marketplace_data, marketplace_mode = load_json(codex_marketplace)
@@ -923,7 +970,7 @@ for path in (claude_settings, claude_settings_local):
         if not enabled:
             data.pop("enabledPlugins", None)
 
-    permissions = data.get("permissions")
+    permissions = data.get("permissions") if path == claude_settings else None
     if isinstance(permissions, dict):
         allow = permissions.get("allow")
         _owned = owned_permission_rules("claude", {"Bash(macroscope)", "Bash(macroscope *)", "Bash(macroscope:*)", "Bash(mktemp)", "Bash(mktemp *)", "Bash(mktemp:*)"})
@@ -1186,8 +1233,10 @@ stage_binary() {
 
 apply_binary() {
   step "Installing binary..."
-  mkdir -p "$INSTALL_DIR"
-  chmod 755 "$INSTALL_DIR"
+  if [ ! -d "$INSTALL_DIR" ]; then
+    mkdir -p "$INSTALL_DIR"
+    chmod 755 "$INSTALL_DIR"
+  fi
   local target="$INSTALL_DIR/macroscope"
   local candidate="$TMP_DIR/macroscope"
   local next="$INSTALL_DIR/.macroscope.new.$$"
@@ -1204,15 +1253,27 @@ validate_staged_artifacts() {
     error "Staged Macroscope binary is not executable on this system"
     return 1
   fi
-  if ! INSTALLED_VERSION="$("$TMP_DIR/macroscope" --version 2>/dev/null)"; then
+  if ! INSTALLED_VERSION="$("$TMP_DIR/macroscope" --version 2>/dev/null)" || [ -z "$INSTALLED_VERSION" ]; then
     error "Staged Macroscope binary is not executable on this system"
     return 1
   fi
-  INSTALLED_VERSION="${INSTALLED_VERSION:-$INSTALL_VERSION}"
-  if [ -n "$SELECTED_TOOLS" ] && { [ -z "$CHECKOUT_DIR" ] || [ ! -f "$CHECKOUT_DIR/plugins/macroscope/.claude-plugin/plugin.json" ]; }; then
-    error "Staged plugin bundle is incomplete"
-    return 1
-  fi
+  local plugin_root="$CHECKOUT_DIR/plugins/macroscope"
+  local tool="" required=""
+  for tool in claude codex cursor opencode; do
+    tool_selected "$tool" || continue
+    case "$tool" in
+      claude) required=".claude-plugin/plugin.json commands/macroscope-codereview.md commands/macroscope-autoloop.md skills/codereview/SKILL.md skills/autoloop/SKILL.md" ;;
+      codex) required=".codex-plugin/plugin.json commands/macroscope-codereview.md commands/macroscope-autoloop.md skills/codereview/SKILL.md skills/autoloop/SKILL.md" ;;
+      cursor) required=".cursor-plugin/plugin.json commands/macroscope-codereview.md commands/macroscope-autoloop.md skills/codereview/SKILL.md skills/autoloop/SKILL.md" ;;
+      opencode) required="opencode/macroscope.js commands/macroscope-codereview.md commands/macroscope-autoloop.md skills/codereview/SKILL.md skills/autoloop/SKILL.md" ;;
+    esac
+    for required in $required; do
+      if [ -z "$CHECKOUT_DIR" ] || [ ! -f "$plugin_root/$required" ]; then
+        error "Staged plugin bundle is missing $tool asset: $required"
+        return 1
+      fi
+    done
+  done
   success "Staged binary and plugin bundle are valid"
 }
 
@@ -1372,7 +1433,13 @@ update_shell_config() {
   local marker="# Added by Macroscope installer"
   local export_line="export PATH=\"$install_bin:\$PATH\""
   local line="$export_line"
-  [ "$(login_shell_name)" = "fish" ] && line="set -Ux fish_user_paths $install_bin \$fish_user_paths"
+  local target_shell=""
+  case "$PATH_TARGET" in
+    */config.fish) target_shell="fish" ;;
+    *.zshrc|*.zprofile|*.bashrc|*.bash_profile|*/.profile) target_shell="posix" ;;
+    *) target_shell="$(login_shell_name)" ;;
+  esac
+  [ "$target_shell" = "fish" ] && line="set -Ux fish_user_paths $install_bin \$fish_user_paths"
   mkdir -p "$(dirname "$PATH_TARGET")"
   touch "$PATH_TARGET"
   if ! grep -Fq "$line" "$PATH_TARGET" 2>/dev/null; then
@@ -1391,7 +1458,7 @@ update_shell_config() {
 install_codex_cli_shim() {
   step "Checking Codex CLI..."
 
-  local current_codex=""
+  local current_codex="" quoted_bundled_binary=""
   local shim_path="$HOME/.local/bin/codex"
 
   CODEX_SHIM_PATH="$shim_path"
@@ -1419,11 +1486,16 @@ install_codex_cli_shim() {
     return
   fi
 
+  quoted_bundled_binary="$(python3 - "$CODEX_BUNDLED_BINARY" <<'PY'
+import shlex, sys
+print(shlex.quote(sys.argv[1]))
+PY
+)"
   cat > "$shim_path" <<EOF
 #!/bin/bash
 set -euo pipefail
 # Macroscope-managed Codex shim
-exec "${CODEX_BUNDLED_BINARY}" "\$@"
+exec ${quoted_bundled_binary} "\$@"
 EOF
   chmod +x "$shim_path"
   CODEX_SHIM_INSTALLED=1
@@ -1686,9 +1758,8 @@ PY
 # and registers it in ~/.claude/settings.json. This closes a gap in the
 # plain allow-list patterns: Claude Code's Bash matcher tokenizes on
 # shell operators, so `Bash(macroscope *)` stops matching as soon as the
-# command contains `|`, `>`, `$(...)`, or `&&`. The hook inspects the
-# raw command string and approves any macroscope/mktemp invocation,
-# regardless of shell operators around it.
+# command contains a redirect or background operator. The hook inspects the
+# raw command string and approves only a single macroscope/mktemp command.
 register_claude_bash_autoallow_hook() {
   local script_src="$(dirname "$0")/scripts/claude-bash-autoallow.sh"
   if [ ! -f "$script_src" ]; then
@@ -1705,9 +1776,26 @@ register_claude_bash_autoallow_hook() {
   else
     cat > "$hook_dst" <<'EMBED'
 #!/usr/bin/env python3
-"""PreToolUse hook that auto-approves Bash calls whose effective command
-word is macroscope or mktemp, regardless of shell operators around it."""
+"""PreToolUse hook that auto-approves single macroscope or mktemp commands."""
 import json, re, sys
+
+def safe_simple_command(command, names):
+    candidate = command.strip()
+    if candidate.endswith("&"):
+        candidate = candidate[:-1].rstrip()
+    if not candidate or re.search(r"[\n\r;|`()()]|[$][(]", candidate):
+        return None
+    without_fd_redirects = re.sub(r"(?:\d*>\s*&\s*\d+|&>>?)", "", candidate)
+    if "&" in without_fd_redirects:
+        return None
+    match = re.match(r"^([A-Za-z0-9_.-]+)(?:\s|$)", candidate)
+    return match.group(1) if match and match.group(1) in names else None
+
+def approved_command(command):
+    assignment = re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=[$][(](.*)[)]", command.strip())
+    if assignment:
+        return safe_simple_command(assignment.group(1), ("mktemp",))
+    return safe_simple_command(command, ("macroscope", "mktemp"))
 
 def main() -> int:
     try:
@@ -1719,17 +1807,16 @@ def main() -> int:
     command = str(payload.get("tool_input", {}).get("command", "")).strip()
     if not command:
         return 0
-    for name in ("macroscope", "mktemp"):
-        pattern = r"(?:^|[\s;|&=(]|[$]\()" + re.escape(name) + r"(?:\s|$|;|\||&|>|<)"
-        if re.search(pattern, command):
-            print(json.dumps({
-                "hookSpecificOutput": {
-                    "hookEventName": "PreToolUse",
-                    "permissionDecision": "allow",
-                    "permissionDecisionReason": f"macroscope-installer: auto-approve {name}",
-                },
-            }))
-            return 0
+    name = approved_command(command)
+    if name:
+        print(json.dumps({
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "allow",
+                "permissionDecisionReason": f"macroscope-installer: auto-approve {name}",
+            },
+        }))
+        return 0
     return 0
 
 if __name__ == "__main__":
@@ -1839,9 +1926,34 @@ mode = os.stat(path).st_mode if os.path.exists(path) else None
 if os.path.exists(path):
     with open(path, encoding="utf-8") as f: data = json.load(f)
 else: data = {}
-bash = data.setdefault("permission", {}).setdefault("bash", {})
-for rule in ("macroscope *", "macroscope", "mktemp *", "mktemp"):
-    bash.setdefault(rule, "allow")
+permission = data.get("permission")
+if isinstance(permission, str):
+    if permission == "allow":
+        bash = None
+    else:
+        permission = {"*": permission}
+        data["permission"] = permission
+        bash = {}
+        permission["bash"] = bash
+elif isinstance(permission, dict):
+    bash = permission.get("bash")
+    if isinstance(bash, str):
+        if bash == "allow":
+            bash = None
+        else:
+            bash = {"*": bash}
+            permission["bash"] = bash
+    elif not isinstance(bash, dict):
+        bash = {}
+        permission["bash"] = bash
+else:
+    permission = {}
+    data["permission"] = permission
+    bash = {}
+    permission["bash"] = bash
+if isinstance(bash, dict):
+    for rule in ("macroscope *", "macroscope", "mktemp *", "mktemp"):
+        bash.setdefault(rule, "allow")
 os.makedirs(os.path.dirname(path), exist_ok=True)
 fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".macroscope-config-")
 with os.fdopen(fd, "w", encoding="utf-8") as f: json.dump(data, f, indent=2); f.write("\n")
@@ -1978,8 +2090,13 @@ clean_legacy_mcp_state() {
   step "Cleaning legacy MCP artifacts..."
   local legacy_mcp="$HOME/.local/bin/macroscope-mcp"
   if command -v pgrep >/dev/null 2>&1; then
-    local legacy_pids=""
-    legacy_pids="$(pgrep -f "^${legacy_mcp}([[:space:]]|$)" 2>/dev/null || true)"
+    local legacy_pattern="" legacy_pids=""
+    legacy_pattern="$(python3 - "$legacy_mcp" <<'PY'
+import re, sys
+print("^" + re.escape(sys.argv[1]) + r"([[:space:]]|$)")
+PY
+)"
+    legacy_pids="$(pgrep -f "$legacy_pattern" 2>/dev/null || true)"
     if [ -n "$legacy_pids" ]; then
       while IFS= read -r pid; do
         [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
@@ -2066,7 +2183,12 @@ for tool, (path, keys, known) in rules.items():
         present = set(value if isinstance(value, list) else value.keys() if isinstance(value, dict) else [])
     except Exception: present = set()
     owned = set(prior.get(tool, {}).get("inserted", []))
-    result[tool] = {"preexisting": sorted((present & set(known)) - owned), "ownedBefore": sorted(owned & present)}
+    known_present = present & set(known)
+    result[tool] = {
+        "presentBefore": sorted(known_present),
+        "preexisting": sorted(known_present - owned),
+        "ownedBefore": sorted(owned & present),
+    }
 with open(output, "w", encoding="utf-8") as f: json.dump(result, f)
 PY
 }
@@ -2074,24 +2196,31 @@ PY
 write_install_state() {
   local path_file="$STATE_PATH_FILE"
   [ "$PATH_ACTION" = "modify" ] && path_file="$PATH_TARGET"
-  python3 - "$STATE_FILE" "$TMP_DIR/permission-before.json" "$SELECTED_TOOLS" "$HOST_PERMISSIONS" "$path_file" "$INSTALLED_VERSION" <<'PY'
+  python3 - "$STATE_FILE" "$TMP_DIR/permission-before.json" "$SELECTED_TOOLS" "$HOST_PERMISSIONS" "$path_file" "$INSTALLED_VERSION" "$HOME" <<'PY'
 import json, os, sys, tempfile
-path, before_path, tools_csv, host_permissions, path_file, version = sys.argv[1:7]
+path, before_path, tools_csv, host_permissions, path_file, version, home = sys.argv[1:8]
 try:
     with open(before_path, encoding="utf-8") as f: before = json.load(f)
 except Exception: before = {}
-known = {
- "claude": ["Bash(macroscope *)", "Bash(macroscope:*)", "Bash(mktemp *)", "Bash(mktemp:*)"],
- "cursor": ["Shell(macroscope)", "Shell(macroscope *)", "Shell(mktemp)", "Shell(mktemp *)"],
- "opencode": ["macroscope *", "macroscope", "mktemp *", "mktemp"],
+rules_by_tool = {
+ "claude": (os.path.join(home, ".claude/settings.json"), ("permissions", "allow"), ["Bash(macroscope *)", "Bash(macroscope:*)", "Bash(mktemp *)", "Bash(mktemp:*)"]),
+ "cursor": (os.path.join(home, ".cursor/cli-config.json"), ("permissions", "allow"), ["Shell(macroscope)", "Shell(macroscope *)", "Shell(mktemp)", "Shell(mktemp *)"]),
+ "opencode": (os.path.join(home, ".config/opencode/opencode.json"), ("permission", "bash"), ["macroscope *", "macroscope", "mktemp *", "mktemp"]),
 }
 selected = [x for x in tools_csv.split(",") if x]
 ownership = {}
-for tool, rules in known.items():
+for tool, (config_path, keys, rules) in rules_by_tool.items():
     old = before.get(tool, {})
     if host_permissions == "grant" and tool in selected:
-        preexisting = set(old.get("preexisting", [])); carried = set(old.get("ownedBefore", []))
-        inserted = carried | (set(rules) - preexisting - carried)
+        try:
+            with open(config_path, encoding="utf-8") as f: value = json.load(f)
+            for key in keys: value = value.get(key, {}) if isinstance(value, dict) else {}
+            present_after = set(value if isinstance(value, list) else value.keys() if isinstance(value, dict) else []) & set(rules)
+        except Exception: present_after = set()
+        present_before = set(old.get("presentBefore", []))
+        carried = set(old.get("ownedBefore", [])) & present_after
+        inserted = carried | (present_after - present_before)
+        preexisting = (set(old.get("preexisting", [])) | (present_before - carried)) & present_after
     else:
         inserted = set()
         preexisting = set(old.get("preexisting", []))
@@ -2108,7 +2237,7 @@ PY
 rollback_targets() {
   local codex_home="$(get_codex_home)"
   local codex_marketplace="$(get_codex_marketplace_name)"
-  printf '%s\n' \
+  printf '%s\0' \
     "$HOME/.local/bin/macroscope" \
     "$HOME/.local/bin/macroscope-mcp" \
     "$HOME/.local/bin/codex" \
@@ -2134,7 +2263,7 @@ rollback_targets() {
     "$HOME/.config/opencode/opencode.json" \
     "$HOME/.macroscope/config.yaml" \
     "$STATE_FILE"
-  [ -z "$PATH_TARGET" ] || printf '%s\n' "$PATH_TARGET"
+  [ -z "$PATH_TARGET" ] || printf '%s\0' "$PATH_TARGET"
 }
 
 snapshot_for_rollback() {
@@ -2143,13 +2272,13 @@ snapshot_for_rollback() {
   mkdir -p "$backup_root"
   : > "$ROLLBACK_LOG"
   local path="" index=0 backup=""
-  while IFS= read -r path; do
+  while IFS= read -r -d '' path; do
     [ -n "$path" ] || continue
     index=$((index + 1))
     backup="$backup_root/$index"
     if [ -e "$path" ] || [ -L "$path" ]; then
       cp -a "$path" "$backup"
-      printf 'present\t%s\t%s\n' "$path" "$backup" >> "$ROLLBACK_LOG"
+      printf 'present\0%s\0%s\0' "$path" "$backup" >> "$ROLLBACK_LOG"
       if [ -L "$path" ]; then
         local resolved_path="" resolved_backup=""
         resolved_path="$(python3 - "$path" <<'PY'
@@ -2161,14 +2290,14 @@ PY
           resolved_backup="$backup.resolved"
           if [ -e "$resolved_path" ] || [ -L "$resolved_path" ]; then
             cp -a "$resolved_path" "$resolved_backup"
-            printf 'present\t%s\t%s\n' "$resolved_path" "$resolved_backup" >> "$ROLLBACK_LOG"
+            printf 'present\0%s\0%s\0' "$resolved_path" "$resolved_backup" >> "$ROLLBACK_LOG"
           else
-            printf 'absent\t%s\t-\n' "$resolved_path" >> "$ROLLBACK_LOG"
+            printf 'absent\0%s\0-\0' "$resolved_path" >> "$ROLLBACK_LOG"
           fi
         fi
       fi
     else
-      printf 'absent\t%s\t-\n' "$path" >> "$ROLLBACK_LOG"
+      printf 'absent\0%s\0-\0' "$path" >> "$ROLLBACK_LOG"
     fi
   done < <(rollback_targets)
 }
@@ -2177,7 +2306,9 @@ rollback_install() {
   [ -f "$ROLLBACK_LOG" ] || return 0
   warn "Installation failed; restoring the previous install-owned state"
   local status="" path="" backup=""
-  while IFS=$'\t' read -r status path backup; do
+  while IFS= read -r -d '' status &&
+        IFS= read -r -d '' path &&
+        IFS= read -r -d '' backup; do
     [ -n "$path" ] || continue
     rm -rf "$path"
     if [ "$status" = "present" ]; then
@@ -2189,6 +2320,10 @@ rollback_install() {
 
 handle_exit() {
   local status="$1"
+  if [ -n "$SAVED_TTY_STATE" ]; then
+    stty "$SAVED_TTY_STATE" < /dev/tty 2>/dev/null || true
+    SAVED_TTY_STATE=""
+  fi
   if [ "$status" -ne 0 ] && [ "$APPLY_STARTED" -eq 1 ] && [ "$APPLY_COMPLETE" -eq 0 ]; then
     rollback_install || true
   fi
@@ -2403,6 +2538,7 @@ launch_wizard() {
   local _old_tty=""
   _old_tty=$(stty -g < /dev/tty 2>/dev/null) || true
   if [ -n "$_old_tty" ]; then
+    SAVED_TTY_STATE="$_old_tty"
     stty -echo < /dev/tty 2>/dev/null
     # Pre-drain: terminal escape responses (OSC 11 / DSR) queued during the
     # banner / clear-screen phase can land in stdin before the wizard reads.
@@ -2425,6 +2561,7 @@ launch_wizard() {
     stty -icanon min 0 time 2 < /dev/tty 2>/dev/null
     dd bs=1024 count=1 < /dev/tty >/dev/null 2>&1 || true
     stty "$_old_tty" < /dev/tty 2>/dev/null
+    SAVED_TTY_STATE=""
   fi
 }
 

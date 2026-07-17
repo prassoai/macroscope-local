@@ -4,12 +4,27 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 INSTALLER="$REPO_ROOT/install.sh"
 PASS=0
+TEST_SUITE_ROOT="$(mktemp -d)"
+DECOY_PID=""
+TEST_BINARY_DEFAULT="$TEST_SUITE_ROOT/macroscope"
+
+printf '#!/bin/sh\nprintf "test-version\\n"\n' > "$TEST_BINARY_DEFAULT"
+chmod +x "$TEST_BINARY_DEFAULT"
+
+cleanup() {
+  if [ -n "$DECOY_PID" ]; then
+    kill "$DECOY_PID" 2>/dev/null || true
+    wait "$DECOY_PID" 2>/dev/null || true
+  fi
+  rm -rf "$TEST_SUITE_ROOT"
+}
+trap cleanup EXIT
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 pass() { PASS=$((PASS + 1)); echo "PASS: $*"; }
 
 new_home() {
-  TEST_ROOT="$(mktemp -d)"
+  TEST_ROOT="$(mktemp -d "$TEST_SUITE_ROOT/test.XXXXXX")"
   TEST_HOME="$TEST_ROOT/home"
   mkdir -p "$TEST_HOME"
 }
@@ -19,8 +34,9 @@ run_install() {
     HOME="$TEST_HOME" \
     SHELL="${TEST_SHELL:-/bin/zsh}" \
     PATH="${TEST_PATH:-/usr/bin:/bin}" \
-    MACROSCOPE_LOCAL_BINARY_SOURCE="${TEST_BINARY:-/usr/bin/true}" \
-    MACROSCOPE_PLUGIN_BUNDLE_SOURCE="$REPO_ROOT" \
+    MACROSCOPE_LOCAL_BINARY_SOURCE="${TEST_BINARY:-$TEST_BINARY_DEFAULT}" \
+    MACROSCOPE_PLUGIN_BUNDLE_SOURCE="${TEST_PLUGIN_BUNDLE:-$REPO_ROOT}" \
+    MACROSCOPE_CODEX_BUNDLED_BINARY="${TEST_CODEX_BUNDLED_BINARY:-}" \
     MACROSCOPE_TEST_NONINTERACTIVE=1 \
     bash "$INSTALLER" "$@"
 }
@@ -40,6 +56,163 @@ test_dry_run_is_read_only() {
   pass "dry-run has zero persistent writes"
 }
 
+test_empty_version_binary_is_rejected_before_apply() {
+  new_home
+  set +e
+  TEST_BINARY=/usr/bin/true run_install --yes --tools none --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/out" 2>"$TEST_ROOT/err"
+  local code=$?
+  set -e
+  [ "$code" -ne 0 ] || fail "empty-version binary passed validation"
+  [ ! -e "$TEST_HOME/.local/bin/macroscope" ] || fail "invalid binary was applied"
+  pass "empty-version binary is rejected before apply"
+}
+
+test_selected_tool_assets_are_validated_before_apply() {
+  new_home
+  local broken_bundle="$TEST_ROOT/bundle"
+  cp -R "$REPO_ROOT" "$broken_bundle"
+  rm -f "$broken_bundle/plugins/macroscope/skills/autoloop/SKILL.md"
+  set +e
+  TEST_PLUGIN_BUNDLE="$broken_bundle" run_install --yes --tools opencode --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/out" 2>"$TEST_ROOT/err"
+  local code=$?
+  set -e
+  [ "$code" -ne 0 ] || fail "incomplete selected-tool assets passed validation"
+  [ ! -e "$TEST_HOME/.local/bin/macroscope" ] || fail "binary applied before plugin validation"
+  pass "selected-tool assets are validated before apply"
+}
+
+test_existing_install_directory_mode_is_preserved() {
+  new_home
+  mkdir -p "$TEST_HOME/.local/bin"
+  chmod 700 "$TEST_HOME/.local/bin"
+  run_install --yes --tools none --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/out"
+  local mode=""
+  mode="$(stat -f '%Lp' "$TEST_HOME/.local/bin" 2>/dev/null || stat -c '%a' "$TEST_HOME/.local/bin")"
+  [ "$mode" = "700" ] || fail "existing install directory mode changed to $mode"
+  pass "existing install directory mode is preserved"
+}
+
+test_codex_wrapper_is_announced_in_plan() {
+  new_home
+  local bundled_codex="$TEST_ROOT/codex'quoted"
+  printf '#!/bin/sh\n[ "${1:-}" != "--help" ] || printf "app-server\\n"\n' > "$bundled_codex"
+  chmod +x "$bundled_codex"
+  TEST_CODEX_BUNDLED_BINARY="$bundled_codex" run_install --dry-run --tools codex --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/out"
+  grep -Fq "Install or update the managed Codex CLI wrapper at $TEST_HOME/.local/bin/codex" "$TEST_ROOT/out" || fail "Codex wrapper missing from plan"
+  TEST_CODEX_BUNDLED_BINARY="$bundled_codex" run_install --yes --tools codex --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/out"
+  "$TEST_HOME/.local/bin/codex" --help | grep -Fq 'app-server' || fail "Codex wrapper did not preserve a quoted binary path"
+  pass "Codex wrapper is announced and safely quoted"
+}
+
+test_option_terminator_allows_dash_prefixed_version() {
+  new_home
+  run_install --dry-run --tools none --host-permissions skip --no-wizard -- -beta >"$TEST_ROOT/out"
+  grep -Fq 'Requested version: -beta' "$TEST_ROOT/out" || fail "-- did not preserve a dash-prefixed version"
+  pass "option terminator preserves a dash-prefixed version"
+}
+
+test_invalid_state_falls_back_to_detected_tools() {
+  new_home
+  mkdir -p "$TEST_HOME/.local/state/macroscope" "$TEST_HOME/.cursor/plugins/local/macroscope"
+  printf '{' > "$TEST_HOME/.local/state/macroscope/install.json"
+  run_install --mode update --dry-run --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/out"
+  grep -Fq 'Install or update the cursor plugin' "$TEST_ROOT/out" || fail "invalid state did not fall back to detected integrations"
+  printf '{"tools":null}\n' > "$TEST_HOME/.local/state/macroscope/install.json"
+  run_install --mode update --dry-run --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/out"
+  grep -Fq 'Install or update the cursor plugin' "$TEST_ROOT/out" || fail "invalid state schema did not fall back to detected integrations"
+  pass "invalid state falls back to detected integrations"
+}
+
+test_repair_cleans_claude_local_settings() {
+  new_home
+  mkdir -p "$TEST_HOME/.claude" "$TEST_HOME/.local/state/macroscope"
+  printf '{"schemaVersion":1,"tools":["claude"]}\n' > "$TEST_HOME/.local/state/macroscope/install.json"
+  printf '{"permissions":{"allow":["Bash(macroscope *)"]}}\n' > "$TEST_HOME/.claude/settings.json"
+  printf '{"enabledPlugins":{"macroscope@macroscope-local":true,"keep":true},"permissions":{"allow":["Bash(macroscope *)","Bash(user-command *)"]}}\n' > "$TEST_HOME/.claude/settings.local.json"
+  MACROSCOPE_REPAIR_ONLY=1 run_install >"$TEST_ROOT/out"
+  python3 - "$TEST_HOME/.claude/settings.local.json" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as f:
+    data = json.load(f)
+assert data["enabledPlugins"] == {"keep": True}
+assert data["permissions"]["allow"] == ["Bash(macroscope *)", "Bash(user-command *)"]
+PY
+  ! grep -Fq 'Bash(macroscope *)' "$TEST_HOME/.claude/settings.json" || fail "repair left an owned rule in settings.json"
+  pass "repair scopes Claude permission cleanup to settings.json"
+}
+
+test_repair_fails_closed_on_invalid_permission_ownership() {
+  new_home
+  mkdir -p "$TEST_HOME/.claude" "$TEST_HOME/.local/state/macroscope"
+  printf '{"schemaVersion":1,"tools":[],"hostPermissions":"skip","permissionOwnership":[]}\n' > "$TEST_HOME/.local/state/macroscope/install.json"
+  printf '{"permissions":{"allow":["Bash(macroscope *)"]}}\n' > "$TEST_HOME/.claude/settings.json"
+  MACROSCOPE_REPAIR_ONLY=1 run_install >"$TEST_ROOT/out"
+  grep -Fq 'Bash(macroscope *)' "$TEST_HOME/.claude/settings.json" || fail "invalid ownership metadata removed an unproven rule"
+  pass "repair fails closed on invalid permission ownership"
+}
+
+test_legacy_cleanup_does_not_kill_regex_near_process() {
+  new_home
+  local legacy_path="$TEST_HOME/.local/bin/macroscope-mcp"
+  local decoy_path="${legacy_path//./x}"
+  mkdir -p "$(dirname "$decoy_path")"
+  ln -s /bin/sleep "$decoy_path"
+  "$decoy_path" 86400 &
+  DECOY_PID=$!
+  run_install --mode update --yes --tools none --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/out"
+  if ! kill -0 "$DECOY_PID" 2>/dev/null; then
+    fail "legacy cleanup killed a regex-near process"
+  fi
+  kill "$DECOY_PID" 2>/dev/null || true
+  wait "$DECOY_PID" 2>/dev/null || true
+  DECOY_PID=""
+  pass "legacy cleanup only kills the literal executable path"
+}
+
+test_opencode_scalar_permissions_are_preserved() {
+  new_home
+  mkdir -p "$TEST_HOME/.config/opencode"
+  printf '{"permission":"allow"}\n' > "$TEST_HOME/.config/opencode/opencode.json"
+  run_install --yes --tools opencode --host-permissions grant --no-path --no-wizard >"$TEST_ROOT/out"
+  python3 - "$TEST_HOME/.config/opencode/opencode.json" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as f:
+    data = json.load(f)
+assert data["permission"] == "allow"
+PY
+  python3 - "$TEST_HOME/.local/state/macroscope/install.json" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as f:
+    state = json.load(f)
+assert state["permissionOwnership"]["opencode"]["inserted"] == []
+PY
+
+  new_home
+  mkdir -p "$TEST_HOME/.config/opencode"
+  printf '{"permission":{"bash":"allow","edit":"deny"}}\n' > "$TEST_HOME/.config/opencode/opencode.json"
+  run_install --yes --tools opencode --host-permissions grant --no-path --no-wizard >"$TEST_ROOT/out"
+  python3 - "$TEST_HOME/.config/opencode/opencode.json" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as f:
+    data = json.load(f)
+assert data["permission"] == {"bash": "allow", "edit": "deny"}
+PY
+
+  new_home
+  mkdir -p "$TEST_HOME/.config/opencode"
+  printf '{"permission":{"bash":"ask"}}\n' > "$TEST_HOME/.config/opencode/opencode.json"
+  run_install --yes --tools opencode --host-permissions grant --no-path --no-wizard >"$TEST_ROOT/out"
+  python3 - "$TEST_HOME/.config/opencode/opencode.json" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as f:
+    data = json.load(f)
+bash = data["permission"]["bash"]
+assert bash["*"] == "ask"
+assert bash["macroscope *"] == "allow"
+PY
+  pass "OpenCode scalar permissions are preserved"
+}
+
 test_noninteractive_requires_consent() {
   new_home
   set +e
@@ -54,7 +227,8 @@ test_noninteractive_requires_consent() {
 test_no_controlling_tty_requires_consent() {
   new_home
   set +e
-  env \
+  python3 -c 'import subprocess, sys; raise SystemExit(subprocess.run(sys.argv[1:], start_new_session=True).returncode)' \
+    env \
     HOME="$TEST_HOME" \
     SHELL=/bin/zsh \
     PATH=/usr/bin:/bin \
@@ -123,10 +297,32 @@ PY
 test_shell_config_override_is_exact() {
   new_home
   TEST_SHELL=/bin/bash
+  TEST_PATH="$TEST_HOME/.local/bin:/usr/bin:/bin"
   run_install --yes --tools none --host-permissions skip --shell-config "$TEST_HOME/dotfiles/shell.env" --no-wizard >"$TEST_ROOT/out"
+  unset TEST_PATH
+  run_install --mode update --yes --tools none --host-permissions skip --no-wizard >"$TEST_ROOT/out"
   grep -Fq '# Added by Macroscope installer' "$TEST_HOME/dotfiles/shell.env" || fail "shell override was not updated"
   [ ! -e "$TEST_HOME/.bashrc" ] && [ ! -e "$TEST_HOME/.bash_profile" ] || fail "shell override also changed default profiles"
-  pass "--shell-config touches exactly the requested file"
+  [ "$(grep -Fc '# Added by Macroscope installer' "$TEST_HOME/dotfiles/shell.env")" -eq 1 ] || fail "recorded shell target was duplicated"
+  pass "--shell-config remains the only update target"
+  unset TEST_SHELL
+}
+
+test_recorded_shell_target_preserves_its_syntax() {
+  new_home
+  TEST_SHELL=/bin/fish
+  run_install --yes --tools none --host-permissions skip --shell-config "$TEST_HOME/.config/fish/config.fish" --no-wizard >"$TEST_ROOT/out"
+  printf '' > "$TEST_HOME/.config/fish/config.fish"
+  TEST_SHELL=/bin/zsh run_install --mode update --yes --tools none --host-permissions skip --no-wizard >"$TEST_ROOT/out"
+  grep -Fq 'set -Ux fish_user_paths' "$TEST_HOME/.config/fish/config.fish" || fail "saved fish target received non-fish syntax"
+
+  new_home
+  TEST_SHELL=/bin/zsh
+  run_install --yes --tools none --host-permissions skip --shell-config "$TEST_HOME/.zprofile" --no-wizard >"$TEST_ROOT/out"
+  printf '' > "$TEST_HOME/.zprofile"
+  TEST_SHELL=/bin/fish run_install --mode update --yes --tools none --host-permissions skip --no-wizard >"$TEST_ROOT/out"
+  grep -Fq 'export PATH=' "$TEST_HOME/.zprofile" || fail "saved zsh target received fish syntax"
+  pass "recorded shell targets preserve their syntax"
   unset TEST_SHELL
 }
 
@@ -145,6 +341,21 @@ assert data["hostPermissions"] == "grant"
 assert data["permissionOwnership"]["claude"]["inserted"]
 assert data["permissionOwnership"]["cursor"]["inserted"]
 assert data["permissionOwnership"]["opencode"]["inserted"]
+PY
+  python3 - "$TEST_HOME/.claude/hooks/macroscope-bash-autoallow.sh" <<'PY' || fail "Claude hook command validation failed"
+import json, subprocess, sys
+hook = sys.argv[1]
+
+def decision(command):
+    payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": command}})
+    return subprocess.run([hook], input=payload, text=True, capture_output=True, check=True).stdout.strip()
+
+assert decision('macroscope codereview --raw > "$review_log" 2>&1 &')
+assert decision('macroscope codereview &>review.log')
+assert decision('review_log=$(mktemp "${TMPDIR:-/tmp}/review.XXXXXX")')
+assert not decision('macroscope --help; rm -rf "$HOME/data"')
+assert not decision('macroscope codereview | sh')
+assert not decision('macroscope "$(rm -rf "$HOME/data")"')
 PY
   pass "host permission automation is explicit and ownership-tracked"
   unset TEST_PATH
@@ -165,7 +376,7 @@ test_update_preserves_footprint_and_removes_deselected() {
   new_home
   TEST_PATH="$TEST_HOME/.local/bin:/usr/bin:/bin"
   run_install --yes --tools claude --host-permissions grant --no-wizard >"$TEST_ROOT/initial"
-  TEST_BINARY=/usr/bin/true run_install --mode update --yes >"$TEST_ROOT/update"
+  run_install --mode update --yes >"$TEST_ROOT/update"
   python3 - "$TEST_HOME/.local/state/macroscope/install.json" <<'PY' || fail "update expanded integration footprint"
 import json, sys
 with open(sys.argv[1]) as f: data = json.load(f)
@@ -173,7 +384,7 @@ assert data["tools"] == ["claude"]
 assert data["hostPermissions"] == "grant"
 PY
   [ ! -e "$TEST_HOME/.cursor" ] && [ ! -e "$TEST_HOME/.config/opencode" ] || fail "update installed new tools"
-  TEST_BINARY=/usr/bin/true run_install --mode update --yes --tools none --host-permissions skip >"$TEST_ROOT/remove"
+  run_install --mode update --yes --tools none --host-permissions skip >"$TEST_ROOT/remove"
   [ ! -e "$TEST_HOME/.claude/plugins/cache/macroscope-local" ] || fail "deselected Claude plugin remains"
   [ ! -e "$TEST_HOME/.claude/hooks/macroscope-bash-autoallow.sh" ] || fail "deselected Claude hook remains"
   pass "update preserves prior footprint and explicitly removes deselected state"
@@ -260,6 +471,24 @@ test_failure_rolls_back_binary() {
   unset TEST_PATH
 }
 
+test_rollback_handles_tabbed_home_without_truncation() {
+  new_home
+  local truncated_home="$TEST_ROOT/home"
+  printf 'keep\n' > "$truncated_home/sentinel"
+  TEST_HOME="$truncated_home"$'\t''managed'
+  mkdir -p "$TEST_HOME/.local/bin"
+  printf 'old-binary\n' > "$TEST_HOME/.local/bin/macroscope"
+  chmod +x "$TEST_HOME/.local/bin/macroscope"
+  set +e
+  MACROSCOPE_TEST_FAIL_AFTER_BINARY=1 run_install --mode update --yes --tools none --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/out" 2>"$TEST_ROOT/err"
+  local code=$?
+  set -e
+  [ "$code" -eq 70 ] || fail "tabbed-HOME injected failure exited $code"
+  [ "$(cat "$TEST_HOME/.local/bin/macroscope")" = "old-binary" ] || fail "tabbed-HOME rollback did not restore binary"
+  [ "$(cat "$truncated_home/sentinel")" = "keep" ] || fail "rollback touched a truncated path"
+  pass "rollback handles tabbed HOME paths without truncation"
+}
+
 test_plugin_failure_rolls_back_all_touched_state() {
   new_home
   mkdir -p "$TEST_HOME/.local/bin" "$TEST_HOME/.claude" "$TEST_ROOT/dotfiles"
@@ -309,6 +538,16 @@ test_wizard_lifecycle_plan() {
 }
 
 test_dry_run_is_read_only
+test_empty_version_binary_is_rejected_before_apply
+test_selected_tool_assets_are_validated_before_apply
+test_existing_install_directory_mode_is_preserved
+test_codex_wrapper_is_announced_in_plan
+test_option_terminator_allows_dash_prefixed_version
+test_invalid_state_falls_back_to_detected_tools
+test_repair_cleans_claude_local_settings
+test_repair_fails_closed_on_invalid_permission_ownership
+test_legacy_cleanup_does_not_kill_regex_near_process
+test_opencode_scalar_permissions_are_preserved
 test_noninteractive_requires_consent
 test_no_controlling_tty_requires_consent
 test_zsh_touches_one_profile_and_selected_tool_only
@@ -316,6 +555,7 @@ test_initial_install_does_not_modify_unselected_existing_tool
 test_active_path_skips_profiles
 test_initial_defaults_to_all_tools
 test_shell_config_override_is_exact
+test_recorded_shell_target_preserves_its_syntax
 test_permissions_are_opt_in_and_owned
 test_permission_updates_preserve_managed_symlinks
 test_update_preserves_footprint_and_removes_deselected
@@ -323,6 +563,7 @@ test_legacy_update_preserves_unowned_permissions
 test_legacy_explicit_skip_preserves_unowned_rules
 test_empty_recorded_footprint_does_not_expand_from_stale_files
 test_failure_rolls_back_binary
+test_rollback_handles_tabbed_home_without_truncation
 test_plugin_failure_rolls_back_all_touched_state
 test_legacy_cleanup_failure_restores_claude_mcp_state
 test_wizard_lifecycle_plan
