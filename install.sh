@@ -1758,8 +1758,8 @@ PY
 # and registers it in ~/.claude/settings.json. This closes a gap in the
 # plain allow-list patterns: Claude Code's Bash matcher tokenizes on
 # shell operators, so `Bash(macroscope *)` stops matching as soon as the
-# command contains a redirect or background operator. The hook inspects the
-# raw command string and approves only a single macroscope/mktemp command.
+# command contains a background operator. The hook inspects the raw command
+# string and approves only a single macroscope/mktemp command without redirects.
 register_claude_bash_autoallow_hook() {
   local script_src="$(dirname "$0")/scripts/claude-bash-autoallow.sh"
   if [ ! -f "$script_src" ]; then
@@ -1783,10 +1783,9 @@ def safe_simple_command(command, names):
     candidate = command.strip()
     if candidate.endswith("&"):
         candidate = candidate[:-1].rstrip()
-    if not candidate or re.search(r"[\n\r;|`()()]|[$][(]", candidate):
+    if not candidate or re.search(r"[\n\r;|`()<>]|[$][(]", candidate):
         return None
-    without_fd_redirects = re.sub(r"(?:\d*>\s*&\s*\d+|&>>?)", "", candidate)
-    if "&" in without_fd_redirects:
+    if "&" in candidate:
         return None
     match = re.match(r"^([A-Za-z0-9_.-]+)(?:\s|$)", candidate)
     return match.group(1) if match and match.group(1) in names else None

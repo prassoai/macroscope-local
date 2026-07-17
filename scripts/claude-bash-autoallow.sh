@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """PreToolUse hook for Claude Code. Auto-approves single Bash commands whose
-command starts with `macroscope` or `mktemp` (optionally followed by args,
-redirects, or backgrounding). Claude Code's permission
+command starts with `macroscope` or `mktemp` (optionally followed by args or
+backgrounding). Claude Code's permission
 allow-list patterns stop matching as soon as a shell operator appears in
 the command, so the /macroscope:codereview and /macroscope:autoloop skills would
-otherwise stall on redirected or backgrounded invocations even
+otherwise stall on backgrounded invocations even
 after the installer writes `Bash(macroscope *)`.
 
 Reads the tool call as JSON on stdin, emits a JSON decision on stdout.
@@ -23,12 +23,9 @@ def safe_simple_command(command, names):
     candidate = command.strip()
     if candidate.endswith("&"):
         candidate = candidate[:-1].rstrip()
-    if not candidate or re.search(r"[\n\r;|`()()]|[$][(]", candidate):
+    if not candidate or re.search(r"[\n\r;|`()<>]|[$][(]", candidate):
         return None
-    # File-descriptor redirects such as 2>&1 are part of the single command;
-    # any other ampersand introduces another shell operation.
-    without_fd_redirects = re.sub(r"(?:\d*>\s*&\s*\d+|&>>?)", "", candidate)
-    if "&" in without_fd_redirects:
+    if "&" in candidate:
         return None
     match = re.match(r"^([A-Za-z0-9_.-]+)(?:\s|$)", candidate)
     return match.group(1) if match and match.group(1) in names else None
@@ -56,11 +53,11 @@ def main() -> int:
 
     # Approve only a complete single command. This covers:
     #   macroscope codereview --base staging
-    #   macroscope codereview ... > log 2>&1
+    #   macroscope codereview --raw &
     #   review_log=$(mktemp /tmp/foo.XXX)
     #   mktemp "${TMPDIR:-/tmp}/foo.XXX"
-    # Chaining, pipelines, nested substitutions, and compound commands fall
-    # through to Claude's normal permission flow.
+    # Chaining, pipelines, redirects, nested substitutions, and compound
+    # commands fall through to Claude's normal permission flow.
     name = approved_command(command)
     if name:
         # Claude Code's PreToolUse hook expects the permission decision

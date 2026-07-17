@@ -350,9 +350,11 @@ def decision(command):
     payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": command}})
     return subprocess.run([hook], input=payload, text=True, capture_output=True, check=True).stdout.strip()
 
-assert decision('macroscope codereview --raw > "$review_log" 2>&1 &')
-assert decision('macroscope codereview &>review.log')
+assert decision('macroscope codereview --raw &')
 assert decision('review_log=$(mktemp "${TMPDIR:-/tmp}/review.XXXXXX")')
+assert not decision('macroscope --help > ~/.zshrc')
+assert not decision('mktemp >> ~/.bash_profile')
+assert not decision('macroscope codereview &>review.log')
 assert not decision('macroscope --help; rm -rf "$HOME/data"')
 assert not decision('macroscope codereview | sh')
 assert not decision('macroscope "$(rm -rf "$HOME/data")"')
