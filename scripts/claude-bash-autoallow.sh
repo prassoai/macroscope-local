@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""PreToolUse hook for Claude Code. Auto-approves Bash tool calls whose
-command starts with `macroscope` or `mktemp` (optionally followed by args,
-pipes, redirects, or command substitution). Claude Code's permission
+"""PreToolUse hook for Claude Code. Auto-approves single Bash commands whose
+command starts with `macroscope` or `mktemp` (optionally followed by args or
+backgrounding). Claude Code's permission
 allow-list patterns stop matching as soon as a shell operator appears in
 the command, so the /macroscope:codereview and /macroscope:autoloop skills would
-otherwise stall on every piped / redirected / substituted invocation even
+otherwise stall on backgrounded invocations even
 after the installer writes `Bash(macroscope *)`.
 
 Reads the tool call as JSON on stdin, emits a JSON decision on stdout.
@@ -17,6 +17,25 @@ Installed by install.sh into ~/.claude/hooks/ and registered in
 import json
 import re
 import sys
+
+
+def safe_simple_command(command, names):
+    candidate = command.strip()
+    if candidate.endswith("&"):
+        candidate = candidate[:-1].rstrip()
+    if not candidate or re.search(r"[\n\r;|`()<>]|[$][(]", candidate):
+        return None
+    if "&" in candidate:
+        return None
+    match = re.match(r"^([A-Za-z0-9_.-]+)(?:\s|$)", candidate)
+    return match.group(1) if match and match.group(1) in names else None
+
+
+def approved_command(command):
+    assignment = re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=[$][(](.*)[)]", command.strip())
+    if assignment:
+        return safe_simple_command(assignment.group(1), ("mktemp",))
+    return safe_simple_command(command, ("macroscope", "mktemp"))
 
 
 def main() -> int:
@@ -32,36 +51,26 @@ def main() -> int:
     if not command:
         return 0
 
-    # Allow any Bash invocation where the effective command word is
-    # `macroscope` or `mktemp`. This covers:
+    # Approve only a complete single command. This covers:
     #   macroscope codereview --base staging
-    #   macroscope codereview ... > log 2>&1
+    #   macroscope codereview --raw &
     #   review_log=$(mktemp /tmp/foo.XXX)
     #   mktemp "${TMPDIR:-/tmp}/foo.XXX"
-    # while still falling through for unrelated commands like `git` or `ls`.
-    # Word-boundary matching avoids false positives in string literals such
-    # as `echo 'macroscope should not match this'` — those are rare in the
-    # skill workflow and fall through to the installer's static allow rules.
-    for name in ("macroscope", "mktemp"):
-        # Match `name` at start, after whitespace, after `$(`, or after `|` —
-        # i.e. as a command word in normal shell usage — not inside a quoted
-        # string literal.
-        pattern = r"(?:^|[\s;|&=(]|[$]\()" + re.escape(name) + r"(?:\s|$|;|\||&|>|<)"
-        if re.search(pattern, command):
-            # Claude Code's PreToolUse hook expects the permission decision
-            # nested under hookSpecificOutput. A flat {"permissionDecision":
-            # "allow"} is silently ignored and the static allow-list takes
-            # over, so piped/redirected/substituted forms would still prompt.
-            # See ~/.claude/plugins/marketplaces/claude-plugins-official/
-            # plugins/plugin-dev/skills/hook-development/SKILL.md for schema.
-            print(json.dumps({
-                "hookSpecificOutput": {
-                    "hookEventName": "PreToolUse",
-                    "permissionDecision": "allow",
-                    "permissionDecisionReason": f"macroscope-installer: auto-approve {name}",
-                },
-            }))
-            return 0
+    # Chaining, pipelines, redirects, nested substitutions, and compound
+    # commands fall through to Claude's normal permission flow.
+    name = approved_command(command)
+    if name:
+        # Claude Code's PreToolUse hook expects the permission decision
+        # nested under hookSpecificOutput. A flat {"permissionDecision":
+        # "allow"} is silently ignored and the static allow-list takes over.
+        print(json.dumps({
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "allow",
+                "permissionDecisionReason": f"macroscope-installer: auto-approve {name}",
+            },
+        }))
+        return 0
     return 0
 
 
