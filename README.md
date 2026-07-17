@@ -8,10 +8,18 @@ Macroscope CLI release artifacts plus the installer for Codex, Claude Code, Curs
 curl -sSL https://raw.githubusercontent.com/prassoai/macroscope-local/main/install.sh | bash
 ```
 
-The installer downloads `macroscope`, auto-configures your shell PATH, and installs the released Macroscope integration for supported Codex, Claude Code, Cursor, and OpenCode setups.
-It also repairs stale Macroscope-owned binaries, plugin state, and legacy MCP registrations before laying down the fresh install.
-Normal installs preserve `~/.macroscope` and saved credentials; they do not perform a destructive wipe.
+The installer first displays every planned binary, PATH, integration, permission, and wizard action, then asks for confirmation. Initial interactive installs present all four host integrations as selected by default and launch setup after a successful install.
+It stages and validates the new binary and plugin bundle before replacing install-owned state. Normal installs preserve `~/.macroscope`, saved credentials, unrelated host settings, and file modes.
 For a full local removal after the CLI is available, run `macroscope uninstall`.
+
+Preview an install without persistent writes, or select only the hosts you use:
+
+```bash
+curl -sSL https://raw.githubusercontent.com/prassoai/macroscope-local/main/install.sh |
+  bash -s -- --dry-run --tools claude,codex --host-permissions skip --no-path
+```
+
+`--host-permissions grant` separately opts into Macroscope/mktemp shell allow-rules and the Claude Code `PreToolUse` hook. `--yes` confirms the displayed plan but never implies that permission grant. PATH changes are skipped when `~/.local/bin` is already active; otherwise only the login shell's preferred file is changed. Use `--shell-config PATH` for a managed dotfile or `--no-path` to make no shell edits.
 
 If your `codex` CLI is too old to load local plugins, the installer will place a small wrapper in `~/.local/bin/codex` that forwards to the newer Codex.app bundled binary.
 
