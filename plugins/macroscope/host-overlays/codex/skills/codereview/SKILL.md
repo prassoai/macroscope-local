@@ -87,25 +87,36 @@ review_log="$(mktemp "${TMPDIR:-/tmp}/macroscope-review.XXXXXX")"
 pid_file="$(mktemp "${TMPDIR:-/tmp}/macroscope-pid.XXXXXX")"
 ```
 
-- Start the review in the background from the worktree directory, using the `--base` determined in step 2.5:
+- Start the review in the background from the worktree directory, using the `--base` determined in step 2.5. Capture the child PID, then wait for it in the same shell so the shell session stays alive while later tool calls poll the log:
 
 With `--base` (feature branch or local-only with baseline):
 
 ```bash
-macroscope codereview --raw --base "$base_branch" > "$review_log" 2>&1 & echo $! > "$pid_file"
+macroscope codereview --raw --base "$base_branch" > "$review_log" 2>&1 &
+child_pid=$!
+printf '%s\n' "$child_pid" > "$pid_file"
+wait "$child_pid"
 ```
 
 or for local-only changes with baseline commit:
 
 ```bash
-macroscope codereview --raw --base HEAD~1 > "$review_log" 2>&1 & echo $! > "$pid_file"
+macroscope codereview --raw --base HEAD~1 > "$review_log" 2>&1 &
+child_pid=$!
+printf '%s\n' "$child_pid" > "$pid_file"
+wait "$child_pid"
 ```
 
 Without `--base` (empty patch, no baseline commit):
 
 ```bash
-macroscope codereview > "$review_log" 2>&1 & echo $! > "$pid_file"
+macroscope codereview > "$review_log" 2>&1 &
+child_pid=$!
+printf '%s\n' "$child_pid" > "$pid_file"
+wait "$child_pid"
 ```
+
+- Let the launch shell continue running in its background session while separate tool calls poll `"$review_log"`. Do not interrupt that shell: `wait "$child_pid"` is what keeps the review process attached for its full lifetime.
 
 - Wait briefly (5-10 seconds), then check the log for `review_id`:
 
