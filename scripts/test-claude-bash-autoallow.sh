@@ -106,7 +106,7 @@ validate_hook "$REPO_ROOT/scripts/claude-bash-autoallow.sh" "standalone hook"
     MACROSCOPE_LOCAL_BINARY_SOURCE="$FAKE_BIN" \
     "${PLUGIN_SOURCE_ENV[@]}" \
     PATH="$SHIM_DIR:$PATH" \
-    bash < "$REPO_ROOT/install.sh" > "$INSTALL_LOG" 2>&1
+    bash -s -- --yes --host-permissions grant < "$REPO_ROOT/install.sh" > "$INSTALL_LOG" 2>&1
 )
 
 validate_hook "$HOME_DIR/.claude/hooks/macroscope-bash-autoallow.sh" "installer embedded hook"
