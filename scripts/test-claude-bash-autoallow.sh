@@ -31,6 +31,49 @@ print(f"ok: {label} emits PreToolUse allow decision")
 PY
 }
 
+assert_codex_codereview_wait_recipe() {
+  local skill_path="$1"
+  local label="$2"
+
+  python3 - "$skill_path" "$label" <<'PY'
+import re
+import sys
+
+skill_path, label = sys.argv[1:3]
+with open(skill_path, "r", encoding="utf-8") as f:
+    text = f.read()
+
+launch_blocks = [
+    block
+    for block in re.findall(r"```bash\n(.*?)\n```", text, re.DOTALL)
+    if "macroscope codereview" in block and '"$review_log"' in block
+]
+
+assert len(launch_blocks) == 3, (
+    f"{label}: expected three Codex codereview launch recipes, "
+    f"found {len(launch_blocks)}"
+)
+
+expected_tail = [
+    "child_pid=$!",
+    "printf '%s\\n' \"$child_pid\" > \"$pid_file\"",
+    "wait \"$child_pid\"",
+]
+for block in launch_blocks:
+    lines = block.splitlines()
+    assert lines[0].endswith("&"), f"{label}: review is not backgrounded: {lines[0]}"
+    assert lines[-3:] == expected_tail, (
+        f"{label}: launch recipe does not retain its shell through child completion: {block}"
+    )
+
+assert '& echo $! > "$pid_file"' not in text, (
+    f"{label}: vulnerable launch recipe still exits immediately after recording the PID"
+)
+
+print(f"ok: {label} keeps Codex review launch shells alive")
+PY
+}
+
 TMP_ROOT="$(mktemp -d /tmp/macroscope-hook-test.XXXXXX)"
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
@@ -96,6 +139,9 @@ SH
 chmod +x "$SHIM_DIR/rm"
 
 validate_hook "$REPO_ROOT/scripts/claude-bash-autoallow.sh" "standalone hook"
+assert_codex_codereview_wait_recipe \
+  "$REPO_ROOT/plugins/macroscope/host-overlays/codex/skills/codereview/SKILL.md" \
+  "release snapshot"
 
 (
   cd "$RUN_DIR"
@@ -149,6 +195,7 @@ done
 for dst in "$CODEX_SOURCE" "$CODEX_CACHE"; do
   cmp "$BUNDLE_DIR/plugins/macroscope/host-overlays/codex/skills/codereview/SKILL.md" "$dst/skills/codereview/SKILL.md"
   cmp "$BUNDLE_DIR/plugins/macroscope/host-overlays/codex/skills/autoloop/SKILL.md" "$dst/skills/autoloop/SKILL.md"
+  assert_codex_codereview_wait_recipe "$dst/skills/codereview/SKILL.md" "installed overlay at $dst"
   if [ -d "$dst/host-overlays" ]; then
     echo "Codex install retained host overlays in $dst" >&2
     exit 1
