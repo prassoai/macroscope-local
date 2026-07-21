@@ -1087,6 +1087,11 @@ test_completion_keeps_setup_and_verification_in_quick_start() {
   ! grep -Fq 'Verify installation:' "$TEST_ROOT/out" || fail "completion still has a separate verification section"
   grep -Fq 'macroscope setup               # Sign in and select a workspace' "$TEST_ROOT/out" || fail "Quick start is missing the setup command"
   grep -Fq 'macroscope --help              # Show all supported commands' "$TEST_ROOT/out" || fail "Quick start is missing the verification command"
+  grep -Fq 'Agent        Review                    Autopilot' "$TEST_ROOT/out" || fail "coding-agent command headers are missing"
+  grep -Fq 'Claude Code  /macroscope:codereview   /macroscope:autoloop' "$TEST_ROOT/out" || fail "Claude Code commands do not match the docs"
+  grep -Fq 'Codex        /macroscope:codereview   /macroscope:autoloop' "$TEST_ROOT/out" || fail "Codex commands do not match the docs"
+  grep -Fq 'Cursor       /codereview              /autoloop' "$TEST_ROOT/out" || fail "Cursor commands do not match the docs"
+  grep -Fq 'OpenCode     /macroscope-codereview   /macroscope-autoloop' "$TEST_ROOT/out" || fail "OpenCode commands do not match the docs"
   pass "completion keeps setup and verification commands in Quick start"
 }
 
