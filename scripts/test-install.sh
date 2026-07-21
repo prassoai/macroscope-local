@@ -845,10 +845,10 @@ test_interactive_lists_select_only_claude_and_permissions() {
   run_interactive_install "$TEST_ROOT/install" 0 \
     --no-path --no-wizard --events \
     "space to toggle="$'\e[B \e[B \e[B \n' \
-    "Allow your coding assistants to run Macroscope commands?="$'\e[A\n' \
+    "Allow coding agents to auto-approve Macroscope commands?="$'\e[A\n' \
     "Proceed?="$'\n' || fail "interactive list selections did not complete"
-  grep -Fq 'Optional coding assistant command approvals' "$TEST_ROOT/install" || fail "permission prompt did not frame the change as optional"
-  grep -Fq 'Let Claude Code, Cursor, and OpenCode run Macroscope commands without asking every time. This adds Macroscope and mktemp shell allow-rules, plus a Claude Code PreToolUse hook.' "$TEST_ROOT/install" || fail "permission prompt did not explain the approval benefit and config changes"
+  grep -Fq 'Optional Macroscope command auto-approval' "$TEST_ROOT/install" || fail "permission prompt did not name auto-approval"
+  grep -Fq 'Adds Macroscope and mktemp shell allow-rules to Claude Code, Cursor, and OpenCode, plus a Claude Code PreToolUse hook.' "$TEST_ROOT/install" || fail "permission prompt did not explain the config changes"
   python3 - "$TEST_HOME/.local/state/macroscope/install.json" <<'PY' || fail "interactive choices were not persisted"
 import json, sys
 with open(sys.argv[1], encoding="utf-8") as f: data = json.load(f)
@@ -901,7 +901,7 @@ test_interactive_escape_does_not_block() {
     --no-path --no-wizard --events \
     "space to toggle="$'\e' \
     $'\e[4A'=$'\n' \
-    "Allow your coding assistants to run Macroscope commands?"=$'\n' \
+    "Allow coding agents to auto-approve Macroscope commands?"=$'\n' \
     "Proceed?"=$'\n' || fail "standalone escape blocked the integration list"
   pass "standalone escape leaves the integration list responsive"
 }
