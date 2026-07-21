@@ -156,6 +156,16 @@ tree_digest() {
   find "$1" -mindepth 1 -print | LC_ALL=C sort | shasum | awk '{print $1}'
 }
 
+# test_sha256 FILE -> hex SHA-256, portable across sha256sum (Linux) and
+# shasum -a 256 (stock macOS), matching the fallback the installer relies on.
+test_sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  else
+    shasum -a 256 "$1" | awk '{print $1}'
+  fi
+}
+
 OS_TAG="$(uname -s | tr '[:upper:]' '[:lower:]')"
 ARCH_TAG="$(uname -m)"
 case "$ARCH_TAG" in
@@ -210,8 +220,8 @@ CURL
 write_release_metadata() {
   local mode="${1:-good}" bhash bundlehash
   local zero="0000000000000000000000000000000000000000000000000000000000000000"
-  bhash="$(sha256sum "$FIX/binary" | awk '{print $1}')"
-  bundlehash="$(sha256sum "$FIX/bundle" | awk '{print $1}')"
+  bhash="$(test_sha256 "$FIX/binary")"
+  bundlehash="$(test_sha256 "$FIX/bundle")"
   [ "$mode" != "corrupt-binary" ] || bhash="$zero"
   [ "$mode" != "corrupt-bundle" ] || bundlehash="$zero"
   local bdigest="\"sha256:${bhash}\"" bundledigest="\"sha256:${bundlehash}\""
