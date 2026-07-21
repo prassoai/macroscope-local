@@ -12,7 +12,9 @@ Using the Macroscope CLI requires an active Macroscope account.
 curl -sSL https://raw.githubusercontent.com/prassoai/macroscope-local/main/install.sh | bash
 ```
 
-The installer previews every planned change — binaries, PATH edits, editor integrations, and permissions — and asks for confirmation before writing anything. It stages and validates the new binary and plugin bundle before replacing existing state, and preserves `~/.macroscope`, saved credentials, unrelated editor settings, and file modes.
+The installer previews every planned change — binaries, PATH edits, editor integrations, and permissions — and asks for confirmation before writing anything. It downloads over HTTPS only, verifies each downloaded artifact against the release's signed `SHA256SUMS` manifest before installing it, and stages and validates the new binary and plugin bundle before replacing existing state. It preserves `~/.macroscope`, saved credentials, unrelated editor settings, and file modes.
+
+A checksum **mismatch always aborts the install**. If a release predates manifest publishing and ships no `SHA256SUMS`, the installer warns loudly and continues; set `MACROSCOPE_REQUIRE_CHECKSUM=1` to instead fail closed and refuse any release without a manifest.
 
 Interactive installs propose command auto-approval by default; choose **Install without command auto-approval** at the final confirmation to decline.
 

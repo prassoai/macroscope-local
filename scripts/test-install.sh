@@ -156,6 +156,160 @@ tree_digest() {
   find "$1" -mindepth 1 -print | LC_ALL=C sort | shasum | awk '{print $1}'
 }
 
+OS_TAG="$(uname -s | tr '[:upper:]' '[:lower:]')"
+ARCH_TAG="$(uname -m)"
+case "$ARCH_TAG" in
+  x86_64) ARCH_TAG="amd64" ;;
+  aarch64 | arm64) ARCH_TAG="arm64" ;;
+esac
+
+# setup_download_mocks builds fixture artifacts and a mock `curl` that serves
+# release assets from local files, so tests can exercise the real download +
+# integrity-verification path in install.sh instead of the local-source shortcut.
+setup_download_mocks() {
+  FIX="$TEST_ROOT/fixtures"
+  MOCK_BIN="$TEST_ROOT/mockbin"
+  mkdir -p "$FIX" "$MOCK_BIN"
+
+  printf '#!/bin/sh\nprintf "test-version\\n"\n' > "$FIX/binary"
+  chmod +x "$FIX/binary"
+  tar -czf "$FIX/bundle" -C "$REPO_ROOT" .
+
+  cat > "$MOCK_BIN/curl" <<'CURL'
+#!/bin/bash
+set -euo pipefail
+dest="" url="" prev=""
+for a in "$@"; do
+  if [ "$prev" = "-o" ]; then dest="$a"; prev=""; continue; fi
+  case "$a" in
+    -o) prev="-o" ;;
+    http://* | https://*) url="$a" ;;
+  esac
+done
+[ -n "$url" ] && [ -n "$dest" ] || { echo "mock curl: bad args: $*" >&2; exit 2; }
+base="${url##*/}"
+case "$base" in
+  macroscope-plugin-bundle.tar.gz) src="$MOCK_CURL_FIX/bundle" ;;
+  SHA256SUMS) src="$MOCK_CURL_FIX/manifest" ;;
+  macroscope-*) src="$MOCK_CURL_FIX/binary" ;;
+  *) echo "mock curl: unknown asset: $base" >&2; exit 2 ;;
+esac
+[ -f "$src" ] || exit 22
+cp "$src" "$dest"
+CURL
+  chmod +x "$MOCK_BIN/curl"
+}
+
+# write_manifest [good|corrupt-binary|corrupt-bundle] writes a SHA256SUMS
+# manifest for the fixtures, optionally poisoning one entry's hash.
+write_manifest() {
+  local mode="${1:-good}" bhash bundlehash
+  local zero="0000000000000000000000000000000000000000000000000000000000000000"
+  bhash="$(sha256sum "$FIX/binary" | awk '{print $1}')"
+  bundlehash="$(sha256sum "$FIX/bundle" | awk '{print $1}')"
+  [ "$mode" != "corrupt-binary" ] || bhash="$zero"
+  [ "$mode" != "corrupt-bundle" ] || bundlehash="$zero"
+  printf '%s  macroscope-%s-%s\n%s  macroscope-plugin-bundle.tar.gz\n' \
+    "$bhash" "$OS_TAG" "$ARCH_TAG" "$bundlehash" > "$FIX/manifest"
+}
+
+run_install_download() {
+  env \
+    HOME="$TEST_HOME" \
+    SHELL="/bin/zsh" \
+    PATH="$MOCK_BIN:/usr/bin:/bin" \
+    MOCK_CURL_FIX="$FIX" \
+    MACROSCOPE_REQUIRE_CHECKSUM="${MACROSCOPE_REQUIRE_CHECKSUM:-0}" \
+    MACROSCOPE_TEST_NONINTERACTIVE=1 \
+    bash "$INSTALLER" "$@"
+}
+
+test_checksum_helpers_accept_match_and_reject_mismatch() {
+  new_home
+  local work="$TEST_ROOT/units"
+  mkdir -p "$work"
+  printf 'hello\n' > "$work/artifact"
+  local h
+  h="$(sha256sum "$work/artifact" | awk '{print $1}')"
+  printf '%s  artifact\n' "$h" > "$work/good"
+  printf '%s  artifact\n' "0000000000000000000000000000000000000000000000000000000000000000" > "$work/bad"
+  printf '%s  other\n' "$h" > "$work/missing"
+  (
+    export MACROSCOPE_SOURCE_ONLY=1
+    # shellcheck disable=SC1090
+    . "$INSTALLER"
+    if ! verify_artifact_checksum "$work/artifact" artifact "$work/good" unit >/dev/null 2>&1; then exit 11; fi
+    if verify_artifact_checksum "$work/artifact" artifact "$work/bad" unit >/dev/null 2>&1; then exit 12; fi
+    if verify_artifact_checksum "$work/artifact" artifact "$work/missing" unit >/dev/null 2>&1; then exit 13; fi
+    exit 0
+  )
+  local code=$?
+  [ "$code" -eq 0 ] || fail "verify_artifact_checksum misbehaved (code $code)"
+  pass "verify_artifact_checksum accepts a match and rejects mismatch/missing entries"
+}
+
+test_download_verifies_against_manifest() {
+  new_home
+  setup_download_mocks
+  write_manifest good
+  run_install_download --yes --tools none --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/out" 2>&1
+  [ -x "$TEST_HOME/.local/bin/macroscope" ] || fail "verified binary was not installed"
+  grep -Fq "Verified Macroscope CLI binary against SHA-256 manifest" "$TEST_ROOT/out" || fail "missing verification success message"
+  pass "downloaded binary is verified against the SHA-256 manifest"
+}
+
+test_download_fails_closed_on_checksum_mismatch() {
+  new_home
+  setup_download_mocks
+  write_manifest corrupt-binary
+  set +e
+  run_install_download --yes --tools none --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/out" 2>&1
+  local code=$?
+  set -e
+  [ "$code" -ne 0 ] || fail "checksum mismatch did not fail the install"
+  [ ! -e "$TEST_HOME/.local/bin/macroscope" ] || fail "binary installed despite checksum mismatch"
+  grep -Fq "Integrity check FAILED" "$TEST_ROOT/out" || fail "missing integrity failure message"
+  pass "checksum mismatch fails closed before install"
+}
+
+test_missing_manifest_warns_and_installs_by_default() {
+  new_home
+  setup_download_mocks
+  rm -f "$FIX/manifest"
+  run_install_download --yes --tools none --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/out" 2>&1
+  [ -x "$TEST_HOME/.local/bin/macroscope" ] || fail "transitional grace did not install the binary"
+  grep -Fq "WITHOUT integrity verification" "$TEST_ROOT/out" || fail "grace path did not warn loudly"
+  pass "missing manifest warns loudly but installs (transitional grace)"
+}
+
+test_missing_manifest_fails_closed_under_strict() {
+  new_home
+  setup_download_mocks
+  rm -f "$FIX/manifest"
+  set +e
+  MACROSCOPE_REQUIRE_CHECKSUM=1 run_install_download --yes --tools none --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/out" 2>&1
+  local code=$?
+  set -e
+  [ "$code" -ne 0 ] || fail "strict mode did not fail on missing manifest"
+  [ ! -e "$TEST_HOME/.local/bin/macroscope" ] || fail "binary installed under strict mode without a manifest"
+  grep -Fq "MACROSCOPE_REQUIRE_CHECKSUM=1" "$TEST_ROOT/out" || fail "strict failure message missing"
+  pass "missing manifest fails closed under MACROSCOPE_REQUIRE_CHECKSUM=1"
+}
+
+test_plugin_bundle_is_verified_before_extraction() {
+  new_home
+  setup_download_mocks
+  write_manifest corrupt-bundle
+  set +e
+  run_install_download --yes --tools claude --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/out" 2>&1
+  local code=$?
+  set -e
+  [ "$code" -ne 0 ] || fail "bundle checksum mismatch did not fail the install"
+  [ ! -e "$TEST_HOME/.local/bin/macroscope" ] || fail "binary installed despite bundle mismatch"
+  grep -Fq "Integrity check FAILED for Macroscope plugin bundle" "$TEST_ROOT/out" || fail "missing bundle integrity failure message"
+  pass "plugin bundle is verified before extraction"
+}
+
 test_dry_run_is_read_only() {
   new_home
   local before after
@@ -169,8 +323,13 @@ test_dry_run_is_read_only() {
 
 test_empty_version_binary_is_rejected_before_apply() {
   new_home
+  # A binary whose --version prints nothing must be rejected. Use a purpose-built
+  # fixture rather than /usr/bin/true, whose GNU build prints a version string.
+  local noversion="$TEST_ROOT/noversion"
+  printf '#!/bin/sh\nexit 0\n' > "$noversion"
+  chmod +x "$noversion"
   set +e
-  TEST_BINARY=/usr/bin/true run_install --yes --tools none --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/out" 2>"$TEST_ROOT/err"
+  TEST_BINARY="$noversion" run_install --yes --tools none --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/out" 2>"$TEST_ROOT/err"
   local code=$?
   set -e
   [ "$code" -ne 0 ] || fail "empty-version binary passed validation"
@@ -198,7 +357,7 @@ test_existing_install_directory_mode_is_preserved() {
   chmod 700 "$TEST_HOME/.local/bin"
   run_install --yes --tools none --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/out"
   local mode=""
-  mode="$(stat -f '%Lp' "$TEST_HOME/.local/bin" 2>/dev/null || stat -c '%a' "$TEST_HOME/.local/bin")"
+  mode="$(stat -c '%a' "$TEST_HOME/.local/bin" 2>/dev/null || stat -f '%Lp' "$TEST_HOME/.local/bin")"
   [ "$mode" = "700" ] || fail "existing install directory mode changed to $mode"
   pass "existing install directory mode is preserved"
 }
@@ -1163,5 +1322,11 @@ test_wizard_lifecycle_plan
 test_completion_prints_after_successful_wizard
 test_failed_wizard_is_not_reported_as_success
 test_completion_keeps_setup_and_verification_in_quick_start
+test_checksum_helpers_accept_match_and_reject_mismatch
+test_download_verifies_against_manifest
+test_download_fails_closed_on_checksum_mismatch
+test_missing_manifest_warns_and_installs_by_default
+test_missing_manifest_fails_closed_under_strict
+test_plugin_bundle_is_verified_before_extraction
 
 echo "All $PASS installer tests passed."

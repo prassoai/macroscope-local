@@ -91,6 +91,15 @@ APPLY_COMPLETE=0
 ROLLBACK_LOG=""
 SAVED_TTY_STATE=""
 
+# Integrity verification of downloaded release artifacts.
+#   REQUIRE_CHECKSUM=1 fails closed when a release publishes no SHA256SUMS
+#   manifest. Default (0) applies a loud, transitional grace for releases that
+#   predate manifest publishing; a manifest that is present but does NOT match
+#   is always fatal regardless of this setting.
+REQUIRE_CHECKSUM="${MACROSCOPE_REQUIRE_CHECKSUM:-0}"
+RELEASE_MANIFEST=""
+RELEASE_MANIFEST_STATE=""
+
 usage() {
   cat <<'EOF'
 Usage: install.sh [version] [options]
@@ -1625,6 +1634,87 @@ resolve_version() {
   info "Requested version: ${BOLD}${INSTALL_VERSION}${RESET}"
 }
 
+# release_asset_url ASSET_NAME -> download URL for the resolved release.
+release_asset_url() {
+  local repo="prassoai/macroscope-local"
+  if [ "$INSTALL_VERSION" = "latest" ]; then
+    printf 'https://github.com/%s/releases/latest/download/%s' "$repo" "$1"
+  else
+    printf 'https://github.com/%s/releases/download/%s/%s' "$repo" "$INSTALL_VERSION" "$1"
+  fi
+}
+
+# sha256_of FILE -> lowercase hex SHA-256, portable across sha256sum/shasum.
+# Returns 2 when no SHA-256 tool is available.
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  else
+    return 2
+  fi
+}
+
+# ensure_release_manifest downloads the release's SHA256SUMS exactly once and
+# records whether it exists (present/absent) so both artifacts share one fetch.
+ensure_release_manifest() {
+  [ -z "$RELEASE_MANIFEST_STATE" ] || return 0
+  local dest="$TMP_DIR/SHA256SUMS"
+  if curl -fsSL --proto '=https' --proto-redir '=https' "$(release_asset_url SHA256SUMS)" -o "$dest" 2>/dev/null; then
+    RELEASE_MANIFEST="$dest"
+    RELEASE_MANIFEST_STATE="present"
+  else
+    RELEASE_MANIFEST_STATE="absent"
+  fi
+}
+
+# verify_artifact_checksum FILE MANIFEST_NAME MANIFEST_PATH LABEL
+# Compares FILE's SHA-256 against its entry in a sha256sum-format manifest.
+# Fails closed on a missing entry, a missing hashing tool, or any mismatch.
+verify_artifact_checksum() {
+  local file="$1" name="$2" manifest="$3" label="$4"
+  local expected actual
+  expected="$(awk -v n="$name" '{ sub(/^\*/, "", $2); if ($2 == n) { print tolower($1); exit } }' "$manifest")"
+  if [ -z "$expected" ]; then
+    error "Integrity manifest has no entry for ${name}; refusing to install ${label}."
+    return 1
+  fi
+  if ! actual="$(sha256_of "$file")"; then
+    error "No SHA-256 tool (sha256sum or shasum) available to verify ${label}."
+    return 1
+  fi
+  actual="$(printf '%s' "$actual" | tr '[:upper:]' '[:lower:]')"
+  if [ "$expected" != "$actual" ]; then
+    error "Integrity check FAILED for ${label} — refusing to install."
+    error "  expected: ${expected}"
+    error "  actual:   ${actual}"
+    return 1
+  fi
+  success "Verified ${label} against SHA-256 manifest"
+}
+
+# verify_downloaded_artifact FILE MANIFEST_NAME LABEL
+# Enforces integrity for a freshly downloaded release artifact. A present
+# manifest is always enforced; an absent one is fatal only under
+# REQUIRE_CHECKSUM=1, otherwise it degrades to a loud, transitional grace.
+verify_downloaded_artifact() {
+  local file="$1" name="$2" label="$3"
+  ensure_release_manifest
+  if [ "$RELEASE_MANIFEST_STATE" = "absent" ]; then
+    if [ "$REQUIRE_CHECKSUM" = "1" ]; then
+      error "Release '${INSTALL_VERSION}' publishes no SHA256SUMS manifest and MACROSCOPE_REQUIRE_CHECKSUM=1 is set."
+      error "Refusing to install unverified ${label}."
+      return 1
+    fi
+    warn "SECURITY: release '${INSTALL_VERSION}' publishes no SHA256SUMS manifest."
+    warn "SECURITY: installing ${label} WITHOUT integrity verification (transitional grace)."
+    warn "SECURITY: set MACROSCOPE_REQUIRE_CHECKSUM=1 to require verification and fail closed."
+    return 0
+  fi
+  verify_artifact_checksum "$file" "$name" "$RELEASE_MANIFEST" "$label"
+}
+
 stage_binary() {
   step "Downloading Macroscope CLI..."
 
@@ -1656,18 +1746,13 @@ stage_binary() {
     return
   fi
 
-  local repo="prassoai/macroscope-local"
-  local url=""
-
-  if [ "$INSTALL_VERSION" = "latest" ]; then
-    url="https://github.com/${repo}/releases/latest/download/macroscope-${OS}-${ARCH}"
-  else
-    url="https://github.com/${repo}/releases/download/${INSTALL_VERSION}/macroscope-${OS}-${ARCH}"
-  fi
+  local asset="macroscope-${OS}-${ARCH}"
+  local url
+  url="$(release_asset_url "$asset")"
 
   info "Downloading from: ${DIM}${url}${RESET}"
 
-  if ! curl -fL --progress-bar "$url" -o "$TMP_DIR/macroscope"; then
+  if ! curl -fL --proto '=https' --proto-redir '=https' --progress-bar "$url" -o "$TMP_DIR/macroscope"; then
     error "Failed to download macroscope"
     echo ""
     echo "Possible reasons:"
@@ -1676,9 +1761,11 @@ stage_binary() {
     echo "  Invalid version specified: ${INSTALL_VERSION}"
     echo ""
     echo "Check available releases at:"
-    echo "  https://github.com/${repo}/releases"
+    echo "  https://github.com/prassoai/macroscope-local/releases"
     exit 1
   fi
+
+  verify_downloaded_artifact "$TMP_DIR/macroscope" "$asset" "Macroscope CLI binary" || exit 1
 
   chmod +x "$TMP_DIR/macroscope"
 
@@ -1764,16 +1851,14 @@ fetch_plugin_bundle() {
       success "Fetched plugin bundle from ${BOLD}${MACROSCOPE_PLUGIN_BUNDLE_SOURCE}${RESET}"
     fi
   else
-    if [ "$INSTALL_VERSION" = "latest" ]; then
-      bundle_url="https://github.com/prassoai/macroscope-local/releases/latest/download/macroscope-plugin-bundle.tar.gz"
-    else
-      bundle_url="https://github.com/prassoai/macroscope-local/releases/download/${INSTALL_VERSION}/macroscope-plugin-bundle.tar.gz"
-    fi
+    local bundle_asset="macroscope-plugin-bundle.tar.gz"
+    bundle_url="$(release_asset_url "$bundle_asset")"
 
     info "Downloading plugin bundle from: ${DIM}${bundle_url}${RESET}"
 
     mkdir -p "$CHECKOUT_DIR"
-    if curl -fL --progress-bar "$bundle_url" -o "$bundle_archive"; then
+    if curl -fL --proto '=https' --proto-redir '=https' --progress-bar "$bundle_url" -o "$bundle_archive"; then
+      verify_downloaded_artifact "$bundle_archive" "$bundle_asset" "Macroscope plugin bundle" || exit 1
       tar -xzf "$bundle_archive" -C "$CHECKOUT_DIR"
       success "Fetched plugin bundle from ${BOLD}${INSTALL_VERSION}${RESET}"
     else
@@ -3209,4 +3294,8 @@ main() {
   fi
 }
 
-main "$@"
+# Allow tests to source this script for the helper functions without running
+# the installer. Normal execution (including `curl ... | bash`) is unaffected.
+if [ "${MACROSCOPE_SOURCE_ONLY:-0}" != "1" ]; then
+  main "$@"
+fi
