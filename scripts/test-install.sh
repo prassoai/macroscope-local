@@ -187,12 +187,16 @@ for a in "$@"; do
   esac
 done
 [ -n "$url" ] && [ -n "$dest" ] || { echo "mock curl: bad args: $*" >&2; exit 2; }
-base="${url##*/}"
-case "$base" in
-  macroscope-plugin-bundle.tar.gz) src="$MOCK_CURL_FIX/bundle" ;;
-  SHA256SUMS) src="$MOCK_CURL_FIX/manifest" ;;
-  macroscope-*) src="$MOCK_CURL_FIX/binary" ;;
-  *) echo "mock curl: unknown asset: $base" >&2; exit 2 ;;
+case "$url" in
+  *://api.github.com/*) src="$MOCK_CURL_FIX/release.json" ;;
+  *)
+    base="${url##*/}"
+    case "$base" in
+      macroscope-plugin-bundle.tar.gz) src="$MOCK_CURL_FIX/bundle" ;;
+      macroscope-*) src="$MOCK_CURL_FIX/binary" ;;
+      *) echo "mock curl: unknown asset: $base" >&2; exit 2 ;;
+    esac
+    ;;
 esac
 [ -f "$src" ] || exit 22
 cp "$src" "$dest"
@@ -200,17 +204,30 @@ CURL
   chmod +x "$MOCK_BIN/curl"
 }
 
-# write_manifest [good|corrupt-binary|corrupt-bundle] writes a SHA256SUMS
-# manifest for the fixtures, optionally poisoning one entry's hash.
-write_manifest() {
+# write_release_metadata [good|corrupt-binary|corrupt-bundle|no-digest]
+# writes a GitHub-style release JSON reporting a per-asset sha256 `digest`,
+# optionally poisoning a hash or omitting digests to exercise the grace path.
+write_release_metadata() {
   local mode="${1:-good}" bhash bundlehash
   local zero="0000000000000000000000000000000000000000000000000000000000000000"
   bhash="$(sha256sum "$FIX/binary" | awk '{print $1}')"
   bundlehash="$(sha256sum "$FIX/bundle" | awk '{print $1}')"
   [ "$mode" != "corrupt-binary" ] || bhash="$zero"
   [ "$mode" != "corrupt-bundle" ] || bundlehash="$zero"
-  printf '%s  macroscope-%s-%s\n%s  macroscope-plugin-bundle.tar.gz\n' \
-    "$bhash" "$OS_TAG" "$ARCH_TAG" "$bundlehash" > "$FIX/manifest"
+  local bdigest="\"sha256:${bhash}\"" bundledigest="\"sha256:${bundlehash}\""
+  if [ "$mode" = "no-digest" ]; then
+    bdigest="\"\""
+    bundledigest="\"\""
+  fi
+  cat > "$FIX/release.json" <<JSON
+{
+  "tag_name": "test",
+  "assets": [
+    {"name": "macroscope-${OS_TAG}-${ARCH_TAG}", "digest": ${bdigest}},
+    {"name": "macroscope-plugin-bundle.tar.gz", "digest": ${bundledigest}}
+  ]
+}
+JSON
 }
 
 run_install_download() {
@@ -224,44 +241,48 @@ run_install_download() {
     bash "$INSTALLER" "$@"
 }
 
-test_checksum_helpers_accept_match_and_reject_mismatch() {
+test_asset_digest_is_parsed_from_release_metadata() {
   new_home
   local work="$TEST_ROOT/units"
   mkdir -p "$work"
-  printf 'hello\n' > "$work/artifact"
-  local h
-  h="$(sha256sum "$work/artifact" | awk '{print $1}')"
-  printf '%s  artifact\n' "$h" > "$work/good"
-  printf '%s  artifact\n' "0000000000000000000000000000000000000000000000000000000000000000" > "$work/bad"
-  printf '%s  other\n' "$h" > "$work/missing"
+  cat > "$work/release.json" <<'JSON'
+{
+  "assets": [
+    {"name": "artifact", "digest": "sha256:ABCDEF0123456789"},
+    {"name": "no-digest", "digest": ""}
+  ]
+}
+JSON
   (
     export MACROSCOPE_SOURCE_ONLY=1
     # shellcheck disable=SC1090
     . "$INSTALLER"
-    if ! verify_artifact_checksum "$work/artifact" artifact "$work/good" unit >/dev/null 2>&1; then exit 11; fi
-    if verify_artifact_checksum "$work/artifact" artifact "$work/bad" unit >/dev/null 2>&1; then exit 12; fi
-    if verify_artifact_checksum "$work/artifact" artifact "$work/missing" unit >/dev/null 2>&1; then exit 13; fi
+    # shellcheck disable=SC2034 # read by the sourced asset_sha256
+    RELEASE_METADATA="$work/release.json"
+    [ "$(asset_sha256 artifact)" = "abcdef0123456789" ] || exit 11
+    [ -z "$(asset_sha256 no-digest)" ] || exit 12
+    [ -z "$(asset_sha256 absent)" ] || exit 13
     exit 0
   )
   local code=$?
-  [ "$code" -eq 0 ] || fail "verify_artifact_checksum misbehaved (code $code)"
-  pass "verify_artifact_checksum accepts a match and rejects mismatch/missing entries"
+  [ "$code" -eq 0 ] || fail "asset_sha256 misbehaved (code $code)"
+  pass "asset_sha256 extracts a lowercase digest and is empty when unavailable"
 }
 
-test_download_verifies_against_manifest() {
+test_download_verifies_against_github_digest() {
   new_home
   setup_download_mocks
-  write_manifest good
+  write_release_metadata good
   run_install_download --yes --tools none --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/out" 2>&1
   [ -x "$TEST_HOME/.local/bin/macroscope" ] || fail "verified binary was not installed"
-  grep -Fq "Verified Macroscope CLI binary against SHA-256 manifest" "$TEST_ROOT/out" || fail "missing verification success message"
-  pass "downloaded binary is verified against the SHA-256 manifest"
+  grep -Fq "Verified Macroscope CLI binary against GitHub-reported SHA-256" "$TEST_ROOT/out" || fail "missing verification success message"
+  pass "downloaded binary is verified against GitHub's reported SHA-256"
 }
 
 test_download_fails_closed_on_checksum_mismatch() {
   new_home
   setup_download_mocks
-  write_manifest corrupt-binary
+  write_release_metadata corrupt-binary
   set +e
   run_install_download --yes --tools none --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/out" 2>&1
   local code=$?
@@ -272,34 +293,34 @@ test_download_fails_closed_on_checksum_mismatch() {
   pass "checksum mismatch fails closed before install"
 }
 
-test_missing_manifest_warns_and_installs_by_default() {
+test_missing_digest_warns_and_installs_by_default() {
   new_home
   setup_download_mocks
-  rm -f "$FIX/manifest"
+  rm -f "$FIX/release.json" # GitHub metadata unavailable (e.g. 404 / rate limit)
   run_install_download --yes --tools none --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/out" 2>&1
   [ -x "$TEST_HOME/.local/bin/macroscope" ] || fail "transitional grace did not install the binary"
   grep -Fq "WITHOUT integrity verification" "$TEST_ROOT/out" || fail "grace path did not warn loudly"
-  pass "missing manifest warns loudly but installs (transitional grace)"
+  pass "unavailable digest warns loudly but installs (transitional grace)"
 }
 
-test_missing_manifest_fails_closed_under_strict() {
+test_missing_digest_fails_closed_under_strict() {
   new_home
   setup_download_mocks
-  rm -f "$FIX/manifest"
+  rm -f "$FIX/release.json"
   set +e
   MACROSCOPE_REQUIRE_CHECKSUM=1 run_install_download --yes --tools none --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/out" 2>&1
   local code=$?
   set -e
-  [ "$code" -ne 0 ] || fail "strict mode did not fail on missing manifest"
-  [ ! -e "$TEST_HOME/.local/bin/macroscope" ] || fail "binary installed under strict mode without a manifest"
+  [ "$code" -ne 0 ] || fail "strict mode did not fail on unavailable digest"
+  [ ! -e "$TEST_HOME/.local/bin/macroscope" ] || fail "binary installed under strict mode without a digest"
   grep -Fq "MACROSCOPE_REQUIRE_CHECKSUM=1" "$TEST_ROOT/out" || fail "strict failure message missing"
-  pass "missing manifest fails closed under MACROSCOPE_REQUIRE_CHECKSUM=1"
+  pass "unavailable digest fails closed under MACROSCOPE_REQUIRE_CHECKSUM=1"
 }
 
 test_plugin_bundle_is_verified_before_extraction() {
   new_home
   setup_download_mocks
-  write_manifest corrupt-bundle
+  write_release_metadata corrupt-bundle
   set +e
   run_install_download --yes --tools claude --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/out" 2>&1
   local code=$?
@@ -1322,11 +1343,11 @@ test_wizard_lifecycle_plan
 test_completion_prints_after_successful_wizard
 test_failed_wizard_is_not_reported_as_success
 test_completion_keeps_setup_and_verification_in_quick_start
-test_checksum_helpers_accept_match_and_reject_mismatch
-test_download_verifies_against_manifest
+test_asset_digest_is_parsed_from_release_metadata
+test_download_verifies_against_github_digest
 test_download_fails_closed_on_checksum_mismatch
-test_missing_manifest_warns_and_installs_by_default
-test_missing_manifest_fails_closed_under_strict
+test_missing_digest_warns_and_installs_by_default
+test_missing_digest_fails_closed_under_strict
 test_plugin_bundle_is_verified_before_extraction
 
 echo "All $PASS installer tests passed."

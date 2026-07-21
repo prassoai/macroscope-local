@@ -91,14 +91,14 @@ APPLY_COMPLETE=0
 ROLLBACK_LOG=""
 SAVED_TTY_STATE=""
 
-# Integrity verification of downloaded release artifacts.
-#   REQUIRE_CHECKSUM=1 fails closed when a release publishes no SHA256SUMS
-#   manifest. Default (0) applies a loud, transitional grace for releases that
-#   predate manifest publishing; a manifest that is present but does NOT match
-#   is always fatal regardless of this setting.
+# Integrity verification of downloaded release artifacts against the SHA-256
+# GitHub reports for each release asset.
+#   REQUIRE_CHECKSUM=1 fails closed when GitHub reports no SHA-256 for an asset.
+#   Default (0) applies a loud, transitional grace in that case; a reported
+#   SHA-256 that does NOT match is always fatal regardless of this setting.
 REQUIRE_CHECKSUM="${MACROSCOPE_REQUIRE_CHECKSUM:-0}"
-RELEASE_MANIFEST=""
-RELEASE_MANIFEST_STATE=""
+RELEASE_METADATA=""
+RELEASE_METADATA_STATE=""
 
 usage() {
   cat <<'EOF'
@@ -1644,6 +1644,16 @@ release_asset_url() {
   fi
 }
 
+# release_api_url -> GitHub REST endpoint for the resolved release's metadata.
+release_api_url() {
+  local repo="prassoai/macroscope-local"
+  if [ "$INSTALL_VERSION" = "latest" ]; then
+    printf 'https://api.github.com/repos/%s/releases/latest' "$repo"
+  else
+    printf 'https://api.github.com/repos/%s/releases/tags/%s' "$repo" "$INSTALL_VERSION"
+  fi
+}
+
 # sha256_of FILE -> lowercase hex SHA-256, portable across sha256sum/shasum.
 # Returns 2 when no SHA-256 tool is available.
 sha256_of() {
@@ -1656,30 +1666,63 @@ sha256_of() {
   fi
 }
 
-# ensure_release_manifest downloads the release's SHA256SUMS exactly once and
-# records whether it exists (present/absent) so both artifacts share one fetch.
-ensure_release_manifest() {
-  [ -z "$RELEASE_MANIFEST_STATE" ] || return 0
-  local dest="$TMP_DIR/SHA256SUMS"
-  if curl -fsSL --proto '=https' --proto-redir '=https' "$(release_asset_url SHA256SUMS)" -o "$dest" 2>/dev/null; then
-    RELEASE_MANIFEST="$dest"
-    RELEASE_MANIFEST_STATE="present"
+# ensure_release_metadata fetches the release's JSON from the GitHub REST API
+# exactly once. GitHub reports a per-asset SHA-256 in each asset's `digest`
+# field, which we verify downloads against — no bespoke manifest needed.
+ensure_release_metadata() {
+  [ -z "$RELEASE_METADATA_STATE" ] || return 0
+  local dest="$TMP_DIR/release.json"
+  if curl -fsSL --proto '=https' --proto-redir '=https' \
+      -H 'Accept: application/vnd.github+json' \
+      "$(release_api_url)" -o "$dest" 2>/dev/null; then
+    RELEASE_METADATA="$dest"
+    RELEASE_METADATA_STATE="present"
   else
-    RELEASE_MANIFEST_STATE="absent"
+    RELEASE_METADATA_STATE="absent"
   fi
 }
 
-# verify_artifact_checksum FILE MANIFEST_NAME MANIFEST_PATH LABEL
-# Compares FILE's SHA-256 against its entry in a sha256sum-format manifest.
-# Fails closed on a missing entry, a missing hashing tool, or any mismatch.
-verify_artifact_checksum() {
-  local file="$1" name="$2" manifest="$3" label="$4"
-  local expected actual
-  expected="$(awk -v n="$name" '{ sub(/^\*/, "", $2); if ($2 == n) { print tolower($1); exit } }' "$manifest")"
+# asset_sha256 ASSET_NAME -> lowercase hex SHA-256 GitHub reports for the asset,
+# or empty when the release metadata is unavailable or carries no sha256 digest.
+asset_sha256() {
+  python3 - "$RELEASE_METADATA" "$1" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as f:
+        data = json.load(f)
+except (OSError, ValueError):
+    sys.exit(0)
+for asset in data.get("assets", []):
+    if asset.get("name") == sys.argv[2]:
+        digest = asset.get("digest") or ""
+        if digest.startswith("sha256:"):
+            print(digest[len("sha256:"):].strip().lower())
+        break
+PY
+}
+
+# verify_downloaded_artifact FILE ASSET_NAME LABEL
+# Verifies a freshly downloaded release artifact against GitHub's reported
+# SHA-256 before install. A reported digest is always enforced (any mismatch
+# aborts); when no digest is available it is fatal only under
+# REQUIRE_CHECKSUM=1, otherwise it degrades to a loud, transitional grace.
+verify_downloaded_artifact() {
+  local file="$1" name="$2" label="$3"
+  ensure_release_metadata
+  local expected=""
+  [ "$RELEASE_METADATA_STATE" != "present" ] || expected="$(asset_sha256 "$name")"
   if [ -z "$expected" ]; then
-    error "Integrity manifest has no entry for ${name}; refusing to install ${label}."
-    return 1
+    if [ "$REQUIRE_CHECKSUM" = "1" ]; then
+      error "GitHub reports no SHA-256 for ${name} on release '${INSTALL_VERSION}' and MACROSCOPE_REQUIRE_CHECKSUM=1 is set."
+      error "Refusing to install unverified ${label}."
+      return 1
+    fi
+    warn "SECURITY: GitHub reports no SHA-256 for ${name} on release '${INSTALL_VERSION}'."
+    warn "SECURITY: installing ${label} WITHOUT integrity verification (transitional grace)."
+    warn "SECURITY: set MACROSCOPE_REQUIRE_CHECKSUM=1 to require verification and fail closed."
+    return 0
   fi
+  local actual
   if ! actual="$(sha256_of "$file")"; then
     error "No SHA-256 tool (sha256sum or shasum) available to verify ${label}."
     return 1
@@ -1691,28 +1734,7 @@ verify_artifact_checksum() {
     error "  actual:   ${actual}"
     return 1
   fi
-  success "Verified ${label} against SHA-256 manifest"
-}
-
-# verify_downloaded_artifact FILE MANIFEST_NAME LABEL
-# Enforces integrity for a freshly downloaded release artifact. A present
-# manifest is always enforced; an absent one is fatal only under
-# REQUIRE_CHECKSUM=1, otherwise it degrades to a loud, transitional grace.
-verify_downloaded_artifact() {
-  local file="$1" name="$2" label="$3"
-  ensure_release_manifest
-  if [ "$RELEASE_MANIFEST_STATE" = "absent" ]; then
-    if [ "$REQUIRE_CHECKSUM" = "1" ]; then
-      error "Release '${INSTALL_VERSION}' publishes no SHA256SUMS manifest and MACROSCOPE_REQUIRE_CHECKSUM=1 is set."
-      error "Refusing to install unverified ${label}."
-      return 1
-    fi
-    warn "SECURITY: release '${INSTALL_VERSION}' publishes no SHA256SUMS manifest."
-    warn "SECURITY: installing ${label} WITHOUT integrity verification (transitional grace)."
-    warn "SECURITY: set MACROSCOPE_REQUIRE_CHECKSUM=1 to require verification and fail closed."
-    return 0
-  fi
-  verify_artifact_checksum "$file" "$name" "$RELEASE_MANIFEST" "$label"
+  success "Verified ${label} against GitHub-reported SHA-256"
 }
 
 stage_binary() {
