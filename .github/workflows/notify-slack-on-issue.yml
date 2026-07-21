@@ -1,0 +1,64 @@
+name: Notify Slack on new issue
+
+# Posts a message to Slack whenever an issue is opened or reopened.
+# Requires a repository secret `SLACK_WEBHOOK_URL` (a Slack Incoming Webhook URL).
+# If the secret is not set, the job logs a notice and exits successfully.
+
+on:
+  issues:
+    types: [opened, reopened]
+
+permissions: {}
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post to Slack
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          # Untrusted, user-controlled values — passed via env and consumed with
+          # jq --arg only. Never interpolate these directly into the shell.
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_URL: ${{ github.event.issue.html_url }}
+          ISSUE_AUTHOR: ${{ github.event.issue.user.login }}
+          ISSUE_ACTION: ${{ github.event.action }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SLACK_WEBHOOK_URL:-}" ]; then
+            echo "::notice::SLACK_WEBHOOK_URL is not set; skipping Slack notification."
+            exit 0
+          fi
+
+          payload=$(jq -n \
+            --arg repo "$REPO" \
+            --arg num "$ISSUE_NUMBER" \
+            --arg title "$ISSUE_TITLE" \
+            --arg url "$ISSUE_URL" \
+            --arg author "$ISSUE_AUTHOR" \
+            --arg action "$ISSUE_ACTION" \
+            '{
+              text: ("Issue \($action) in " + $repo + ": #" + $num + " " + $title),
+              blocks: [
+                {
+                  type: "section",
+                  text: {
+                    type: "mrkdwn",
+                    text: (":memo: *Issue \($action)* in `" + $repo + "`\n<" + $url + "|#" + $num + " " + $title + ">\nopened by *" + $author + "*")
+                  }
+                }
+              ]
+            }')
+
+          code=$(curl -sS --connect-timeout 20 --max-time 60 \
+            -o /dev/null -w "%{http_code}" \
+            -X POST -H "Content-Type: application/json" \
+            --data "$payload" "$SLACK_WEBHOOK_URL")
+
+          echo "Slack responded with HTTP $code"
+          if [ "$code" != "200" ]; then
+            echo "::error::Slack webhook returned HTTP $code"
+            exit 1
+          fi
