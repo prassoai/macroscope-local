@@ -39,14 +39,21 @@ jobs:
             --arg url "$ISSUE_URL" \
             --arg author "$ISSUE_AUTHOR" \
             --arg action "$ISSUE_ACTION" \
-            '{
-              text: ("Issue \($action) in " + $repo + ": #" + $num + " " + $title),
+            '
+            # Escape Slack mrkdwn control characters so user-controlled fields
+            # (issue title/author) cannot inject links or broadcast mentions
+            # like <!channel>. Order matters: escape & first. Per Slack docs.
+            def slack_escape: gsub("&"; "&amp;") | gsub("<"; "&lt;") | gsub(">"; "&gt;");
+            ($title | slack_escape) as $safe_title
+            | ($author | slack_escape) as $safe_author
+            | {
+              text: ("Issue \($action) in " + $repo + ": #" + $num + " " + $safe_title),
               blocks: [
                 {
                   type: "section",
                   text: {
                     type: "mrkdwn",
-                    text: (":memo: *Issue \($action)* in `" + $repo + "`\n<" + $url + "|#" + $num + " " + $title + ">\nopened by *" + $author + "*")
+                    text: (":memo: *Issue \($action)* in `" + $repo + "`\n<" + $url + "|#" + $num + " " + $safe_title + ">\nopened by *" + $safe_author + "*")
                   }
                 }
               ]
