@@ -12,11 +12,11 @@ Using the Macroscope CLI requires an active Macroscope account.
 curl -sSL https://raw.githubusercontent.com/prassoai/macroscope-local/main/install.sh | bash
 ```
 
-The installer previews every planned change — binaries, PATH edits, editor integrations, and permissions — and asks for confirmation before writing anything. It stages and validates the new binary and plugin bundle before replacing existing state, and preserves `~/.macroscope`, saved credentials, unrelated editor settings, and file modes.
+The installer previews every planned change — binaries, PATH edits, and editor integrations — and asks for confirmation before writing anything. It stages and validates the new binary and plugin bundle before replacing existing state, and preserves `~/.macroscope`, saved credentials, unrelated editor settings, and file modes.
 
-Interactive installs propose command auto-approval by default; choose **Install without command auto-approval** at the final confirmation to decline.
+The installer does not add standing shell allow-rules or approval hooks. Use the coding agent's own auto mode when you want an unattended review flow.
 
-Mandatory auto-updates reuse the integration and command-permission choices in the install manifest without showing the installer plan or asking for confirmation. If those saved choices are missing or incomplete, the installer falls back to the normal interactive selection and confirmation flow.
+Mandatory auto-updates reuse the integration and PATH choices in the install manifest without showing the installer plan or asking for confirmation. If those saved choices are missing or incomplete, the installer falls back to the normal interactive selection and confirmation flow.
 
 ## Quick start
 
@@ -44,18 +44,16 @@ Preview without writing, or install only the editors you use:
 
 ```bash
 curl -sSL https://raw.githubusercontent.com/prassoai/macroscope-local/main/install.sh |
-  bash -s -- --dry-run --tools claude,codex --host-permissions skip --no-path
+  bash -s -- --dry-run --tools claude,codex --no-path
 ```
 
-| Flag                       | Description                                                                     |
-| -------------------------- | ------------------------------------------------------------------------------- |
-| `--dry-run`                | Show the plan without making persistent writes                                  |
-| `--tools <list>`           | Comma-separated editors to integrate (`claude`, `codex`, `cursor`, `opencode`)  |
-| `--host-permissions grant` | Let editors auto-approve Macroscope commands instead of prompting each time     |
-| `--host-permissions skip`  | Leave permissions unchanged (editors may prompt per command)                    |
-| `--no-path`                | Make no shell or PATH edits                                                     |
-| `--shell-config <path>`    | Write PATH changes to a specific dotfile                                         |
-| `--yes`                    | Confirm the displayed plan non-interactively (never implies a permission grant) |
+| Flag                    | Description                                                                    |
+| ----------------------- | ------------------------------------------------------------------------------ |
+| `--dry-run`             | Show the plan without making persistent writes                                 |
+| `--tools <list>`        | Comma-separated editors to integrate (`claude`, `codex`, `cursor`, `opencode`) |
+| `--no-path`             | Make no shell or PATH edits                                                    |
+| `--shell-config <path>` | Write PATH changes to a specific dotfile                                       |
+| `--yes`                 | Confirm the displayed plan non-interactively                                   |
 
 Integrations honor `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `OPENCODE_CONFIG_DIR`, and Cursor's `~/.cursor` locations when set.
 
