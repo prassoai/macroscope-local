@@ -743,8 +743,9 @@ print_change_details() {
   # _ccd_note: dim explanatory text.
   _ccd_note() { printf '      %s%s%s\n' "$DIM" "$1" "$RESET"; }
   {
-    printf '\n%sExact changes to be merged%s\n' "$BOLD" "$RESET"
-    printf '  %sYour existing settings are preserved — only the + lines below are added.%s\n' "$DIM" "$RESET"
+    printf '\n%sCommand auto-approval rules%s\n' "$BOLD" "$RESET"
+    printf '  %sMacroscope ensures the entries below are allow-listed for the selected agents.%s\n' "$DIM" "$RESET"
+    printf '  %sExisting rules are kept, entries already present are left unchanged, and nothing is removed.%s\n' "$DIM" "$RESET"
     if tool_selected claude; then
       _ccd_file "$claude_config/settings.json"
       _ccd_key 'permissions.allow'
@@ -772,6 +773,8 @@ print_change_details() {
       _ccd_add '"macroscope": "allow"'
       _ccd_add '"mktemp *": "allow"'
       _ccd_add '"mktemp": "allow"'
+      _ccd_note 'if "permission" or "permission.bash" is currently a plain string'
+      _ccd_note '(e.g. "ask"), it is expanded to object form, preserving that value.'
     fi
     printf '\n  %sNothing else is auto-approved.%s\n' "$DIM" "$RESET"
   } > /dev/tty
