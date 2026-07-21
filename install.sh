@@ -734,7 +734,7 @@ print_plan() {
     printf '%d. Launch the setup wizard\n' "$index"
   fi
   if host_permission_grant_applies && [ "$ASSUME_YES" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
-    printf '\n%sTip:%s choose "Show exact changes" to inspect the config snippets first, or add %s--host-permissions skip%s to install without command auto-approval.\n' "$DIM" "$RESET" "$BOLD" "$RESET"
+    printf '\n%sTip:%s at the prompt, choose %s"Show exact changes"%s to inspect the snippets, or %s"Install without command auto-approval"%s to proceed without granting.\n' "$DIM" "$RESET" "$BOLD" "$RESET" "$BOLD" "$RESET"
   fi
 }
 
@@ -803,17 +803,24 @@ confirm_plan() {
   [ "$INSTALL_MODE" = "update" ] && prompt='Update and continue?'
   [ "$RESUME_COMMAND" -eq 1 ] && prompt='Update and run the review?'
 
-  # When the plan modifies security-relevant host permission config, offer an
-  # inline option to inspect the exact snippets before consenting.
+  # When the plan modifies security-relevant host permission config, offer
+  # inline options to inspect the exact snippets, or to proceed without the
+  # grant — so declining does not require Ctrl-C and re-running with a flag.
   if host_permission_grant_applies; then
     while true; do
-      if ! prompt_menu "$prompt" "Yes" "Show exact changes" "No"; then
+      if ! prompt_menu "$prompt" "Yes" "Show exact changes" "Install without command auto-approval" "No"; then
         info "Cancelled before making changes."
         return 3
       fi
       case "$TUI_RESULT" in
         0) return 0 ;;
         1) print_change_details ;;
+        2)
+          HOST_PERMISSIONS="skip"
+          info "Command auto-approval will not be granted. Updated plan:"
+          print_plan
+          break
+          ;;
         *) info "Cancelled before making changes."; return 3 ;;
       esac
     done
