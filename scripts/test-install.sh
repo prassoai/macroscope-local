@@ -840,15 +840,83 @@ PY
   pass "interactive updates reselect integrations instead of preserving a CLI-only trap"
 }
 
+test_resumed_update_reuses_saved_choices_without_prompts() {
+  new_home
+  run_install --yes --tools claude --host-permissions grant --no-path --no-wizard >"$TEST_ROOT/initial"
+  run_interactive_install "$TEST_ROOT/update" 0 \
+    --mode update --resume-command --no-wizard --events || fail "resumed update did not complete"
+  ! grep -Fq 'Macroscope update will:' "$TEST_ROOT/update" || fail "resumed update exposed the change plan"
+  ! grep -Fq 'Current integrations are selected below.' "$TEST_ROOT/update" || fail "resumed update prompted for integrations"
+  ! grep -Fq 'Optional Macroscope command auto-approval' "$TEST_ROOT/update" || fail "resumed update prompted for host permissions"
+  ! grep -Fq 'Update and run the review?' "$TEST_ROOT/update" || fail "resumed update requested confirmation"
+  python3 - "$TEST_HOME/.local/state/macroscope/install.json" <<'PY' || fail "resumed update changed saved choices"
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as f: data = json.load(f)
+assert data["tools"] == ["claude"]
+assert data["hostPermissions"] == "grant"
+PY
+  pass "resumed updates silently reuse saved integration and permission choices"
+}
+
+test_resumed_update_does_not_expand_saved_config() {
+  new_home
+  run_install --yes --tools claude --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/initial"
+  run_interactive_install "$TEST_ROOT/update" 0 \
+    --mode update --resume-command --no-wizard --events || fail "saved-config update did not complete"
+  [ -d "$TEST_HOME/.claude/plugins/cache/macroscope-local" ] || fail "saved Claude integration was not retained"
+  [ ! -e "$TEST_HOME/plugins/macroscope" ] || fail "saved-config update silently added the Codex plugin"
+  [ ! -e "$TEST_HOME/.cursor/plugins/local/macroscope" ] || fail "saved-config update silently added the Cursor plugin"
+  [ ! -e "$TEST_HOME/.config/opencode/plugins/macroscope.js" ] || fail "saved-config update silently added the OpenCode plugin"
+  ! grep -Fq 'Bash(macroscope *)' "$TEST_HOME/.claude/settings.json" || fail "saved-config update silently added an auto-approval rule"
+  [ ! -e "$TEST_HOME/.claude/hooks/macroscope-bash-autoallow.sh" ] || fail "saved-config update silently added the auto-approval hook"
+  python3 - "$TEST_HOME/.local/state/macroscope/install.json" <<'PY' || fail "saved-config update changed the manifest"
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as f: data = json.load(f)
+assert data["tools"] == ["claude"]
+assert data["hostPermissions"] == "skip"
+PY
+  pass "resumed updates do not expand saved plugins or auto-approval permissions"
+}
+
+test_resumed_update_prompts_for_incomplete_state() {
+  new_home
+  mkdir -p "$TEST_HOME/.local/bin" "$TEST_HOME/.local/state/macroscope"
+  cp "$TEST_BINARY_DEFAULT" "$TEST_HOME/.local/bin/macroscope"
+  printf '{}\n' > "$TEST_HOME/.local/state/macroscope/install.json"
+  run_interactive_install "$TEST_ROOT/update" 0 \
+    --mode update --resume-command --no-path --no-wizard --events \
+    "space to toggle="$'\n' \
+    "Update and run the review?="$'\n' || fail "incomplete-state update did not complete"
+  grep -Fq 'Macroscope update will:' "$TEST_ROOT/update" || fail "incomplete-state update hid the change plan"
+  grep -Fq 'No Macroscope host integrations are currently selected.' "$TEST_ROOT/update" || fail "incomplete-state update did not prompt for integrations"
+  grep -Fq 'Allow Macroscope and mktemp command auto-approval for claude, cursor and opencode' "$TEST_ROOT/update" || fail "incomplete-state update did not explain host permissions"
+  ! grep -Fq 'Allow coding agents to auto-approve Macroscope commands?' "$TEST_ROOT/update" || fail "incomplete-state update showed a separate permission prompt"
+  grep -Fq 'Update and run the review?' "$TEST_ROOT/update" || fail "incomplete-state update did not request confirmation"
+  pass "resumed updates keep prompts when saved install choices are incomplete"
+}
+
+test_resumed_update_prompts_without_saved_path_policy() {
+  new_home
+  mkdir -p "$TEST_HOME/.local/state/macroscope"
+  printf '%s\n' '{"schemaVersion":1,"tools":["claude"],"hostPermissions":"skip","pathFile":null,"permissionOwnership":{}}' > "$TEST_HOME/.local/state/macroscope/install.json"
+  run_interactive_install "$TEST_ROOT/update" 0 \
+    --mode update --resume-command --no-wizard --events \
+    "space to toggle="$'\n' \
+    "Update and run the review?="$'\n' || fail "legacy-state update did not complete"
+  grep -Fq 'Macroscope update will:' "$TEST_ROOT/update" || fail "legacy state without pathPolicy hid the change plan"
+  grep -Fq 'Current integrations are selected below.' "$TEST_ROOT/update" || fail "legacy state without pathPolicy skipped integration confirmation"
+  grep -Fq 'Update and run the review?' "$TEST_ROOT/update" || fail "legacy state without pathPolicy skipped update confirmation"
+  pass "resumed updates prompt when legacy state has no saved PATH policy"
+}
+
 test_interactive_lists_select_only_claude_and_permissions() {
   new_home
   run_interactive_install "$TEST_ROOT/install" 0 \
     --no-path --no-wizard --events \
     "space to toggle="$'\e[B \e[B \e[B \n' \
-    "Allow coding agents to auto-approve Macroscope commands?="$'\e[A\n' \
     "Proceed?="$'\n' || fail "interactive list selections did not complete"
-  grep -Fq 'Optional Macroscope command auto-approval' "$TEST_ROOT/install" || fail "permission prompt did not name auto-approval"
-  grep -Fq 'Adds Macroscope and mktemp shell allow-rules to Claude Code, Cursor, and OpenCode, plus a Claude Code PreToolUse hook.' "$TEST_ROOT/install" || fail "permission prompt did not explain the config changes"
+  grep -Fq 'Allow Macroscope and mktemp command auto-approval for claude' "$TEST_ROOT/install" || fail "confirmation plan did not explain auto-approval"
+  ! grep -Fq 'Allow coding agents to auto-approve Macroscope commands?' "$TEST_ROOT/install" || fail "install showed a separate permission prompt"
   python3 - "$TEST_HOME/.local/state/macroscope/install.json" <<'PY' || fail "interactive choices were not persisted"
 import json, sys
 with open(sys.argv[1], encoding="utf-8") as f: data = json.load(f)
@@ -862,6 +930,23 @@ PY
   [ ! -e "$TEST_HOME/.cursor/plugins/local/macroscope" ] || fail "deselected Cursor integration was installed"
   [ ! -e "$TEST_HOME/.config/opencode/plugins/macroscope.js" ] || fail "deselected OpenCode integration was installed"
   pass "interactive lists select only Claude and grant host permissions with arrow keys"
+}
+
+test_confirmation_can_install_without_auto_approval() {
+  new_home
+  run_interactive_install "$TEST_ROOT/install" 0 \
+    --tools claude --no-path --no-wizard --events \
+    "Proceed?="$'\e[B\e[B\n' || fail "confirmation could not disable auto-approval"
+  grep -Fq 'Installing without command auto-approval.' "$TEST_ROOT/install" || fail "confirmation did not report the auto-approval choice"
+  [ "$(grep -Fc 'Proceed?' "$TEST_ROOT/install")" -eq 1 ] || fail "auto-approval choice triggered a duplicate confirmation"
+  ! grep -Fq 'Bash(macroscope *)' "$TEST_HOME/.claude/settings.json" || fail "disabled auto-approval still added a Claude allow-rule"
+  [ ! -e "$TEST_HOME/.claude/hooks/macroscope-bash-autoallow.sh" ] || fail "disabled auto-approval still installed the Claude hook"
+  python3 - "$TEST_HOME/.local/state/macroscope/install.json" <<'PY' || fail "disabled auto-approval was not persisted"
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as f: data = json.load(f)
+assert data["hostPermissions"] == "skip"
+PY
+  pass "final confirmation can install without command auto-approval"
 }
 
 test_interactive_confirmation_list_can_cancel() {
@@ -901,7 +986,6 @@ test_interactive_escape_does_not_block() {
     --no-path --no-wizard --events \
     "space to toggle="$'\e' \
     $'\e[4A'=$'\n' \
-    "Allow coding agents to auto-approve Macroscope commands?"=$'\n' \
     "Proceed?"=$'\n' || fail "standalone escape blocked the integration list"
   pass "standalone escape leaves the integration list responsive"
 }
@@ -934,6 +1018,19 @@ test_plan_groups_selected_integration_installs() {
   grep -Fq "4. Seed local-build configuration at $TEST_HOME/.macroscope/config.yaml" "$TEST_ROOT/out" || fail "action after grouped integrations was not renumbered"
   [ "$(grep -Ec '^[0-9]+\. Install or update the .* plugin' "$TEST_ROOT/out")" -eq 1 ] || fail "integration installs still occupy multiple numbered actions"
   pass "plan groups selected integration installs into one action"
+}
+
+test_plan_groups_auto_approval_changes() {
+  new_home
+  run_install --mode initial --dry-run --tools all --host-permissions grant --no-path --no-wizard >"$TEST_ROOT/out"
+  grep -Fq '4. Allow Macroscope and mktemp command auto-approval for claude, cursor and opencode' "$TEST_ROOT/out" || fail "auto-approval changes were not grouped into one numbered action"
+  grep -Fq "   ($TEST_HOME/.claude/settings.json and $TEST_HOME/.claude/hooks/macroscope-bash-autoallow.sh)" "$TEST_ROOT/out" || fail "grouped Claude permission paths are incorrect"
+  grep -Fq "   ($TEST_HOME/.cursor/cli-config.json)" "$TEST_ROOT/out" || fail "grouped Cursor permission path is incorrect"
+  grep -Fq "   ($TEST_HOME/.config/opencode/opencode.json)" "$TEST_ROOT/out" || fail "grouped OpenCode permission path is incorrect"
+  [ "$(grep -Ec '^[0-9]+\. Allow .* command auto-approval' "$TEST_ROOT/out")" -eq 1 ] || fail "auto-approval changes occupy multiple numbered actions"
+  ! grep -Fq '⚠ Standing command auto-approval' "$TEST_ROOT/out" || fail "auto-approval plan retained the warning highlight"
+  ! grep -Fq 'Tip: at the prompt' "$TEST_ROOT/out" || fail "auto-approval plan retained the redundant tip"
+  pass "plan groups auto-approval changes without warning or tip copy"
 }
 
 test_plan_uses_natural_lifecycle_labels() {
@@ -1002,8 +1099,13 @@ test_completion_keeps_setup_and_verification_in_quick_start() {
   run_install --yes --tools none --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/out"
   ! grep -Fq 'Setup wizard not requested.' "$TEST_ROOT/out" || fail "completion still prints the skipped-wizard notice"
   ! grep -Fq 'Verify installation:' "$TEST_ROOT/out" || fail "completion still has a separate verification section"
-  grep -Fq 'macroscope setup               # Run setup anytime' "$TEST_ROOT/out" || fail "Quick start is missing the setup command"
-  grep -Fq 'macroscope --help              # Verify installation' "$TEST_ROOT/out" || fail "Quick start is missing the verification command"
+  grep -Fq 'macroscope setup               # Sign in and select a workspace' "$TEST_ROOT/out" || fail "Quick start is missing the setup command"
+  grep -Fq 'macroscope --help              # Show all supported commands' "$TEST_ROOT/out" || fail "Quick start is missing the verification command"
+  grep -Fq 'Agent        Review                    Autopilot' "$TEST_ROOT/out" || fail "coding-agent command headers are missing"
+  grep -Fq 'Claude Code  /macroscope:codereview   /macroscope:autoloop' "$TEST_ROOT/out" || fail "Claude Code commands do not match the docs"
+  grep -Fq 'Codex        /macroscope:codereview   /macroscope:autoloop' "$TEST_ROOT/out" || fail "Codex commands do not match the docs"
+  grep -Fq 'Cursor       /codereview              /autoloop' "$TEST_ROOT/out" || fail "Cursor commands do not match the docs"
+  grep -Fq 'OpenCode     /macroscope-codereview   /macroscope-autoloop' "$TEST_ROOT/out" || fail "OpenCode commands do not match the docs"
   pass "completion keeps setup and verification commands in Quick start"
 }
 
@@ -1043,13 +1145,19 @@ test_claude_config_dir_is_honored
 test_claude_cli_verifies_plugin_discovery
 test_opencode_config_dirs_are_honored
 test_interactive_update_repairs_empty_tool_selection
+test_resumed_update_reuses_saved_choices_without_prompts
+test_resumed_update_does_not_expand_saved_config
+test_resumed_update_prompts_for_incomplete_state
+test_resumed_update_prompts_without_saved_path_policy
 test_interactive_lists_select_only_claude_and_permissions
+test_confirmation_can_install_without_auto_approval
 test_interactive_confirmation_list_can_cancel
 test_interactive_interrupt_restores_terminal
 test_interactive_confirmation_interrupt_restores_terminal
 test_interactive_escape_does_not_block
 test_update_plan_omits_negative_actions
 test_plan_groups_selected_integration_installs
+test_plan_groups_auto_approval_changes
 test_plan_uses_natural_lifecycle_labels
 test_wizard_lifecycle_plan
 test_completion_prints_after_successful_wizard
