@@ -2811,11 +2811,10 @@ print_installation_completion() {
   printf "${GREEN}${BOLD}Installation Complete!${RESET}\n"
   printf "${GREEN}${BOLD}════════════════════════════════════════════════${RESET}\n"
   echo ""
-  printf "${BOLD}Verify installation:${RESET}\n"
-  printf "  ${CYAN}macroscope --help${RESET}\n"
-  echo ""
   printf "${BOLD}Quick start:${RESET}\n"
   printf "  ${CYAN}macroscope${RESET}                     ${DIM}# Launch the interactive wizard${RESET}\n"
+  printf "  ${CYAN}macroscope setup${RESET}               ${DIM}# Run setup anytime${RESET}\n"
+  printf "  ${CYAN}macroscope --help${RESET}              ${DIM}# Verify installation${RESET}\n"
   printf "  ${CYAN}macroscope codereview --base <base_branch>${RESET} ${DIM}# Run the CLI directly${RESET}\n"
   printf "  ${CYAN}/macroscope:codereview${RESET}           ${DIM}# Local review${RESET}\n"
   printf "  ${CYAN}/macroscope:autoloop${RESET}             ${DIM}# Autopilot review-fix-push cycle${RESET}\n"
@@ -2839,7 +2838,6 @@ print_installation_completion() {
 
 launch_wizard() {
   if [ "$WIZARD_MODE" != "yes" ] || [ "${MACROSCOPE_SKIP_WIZARD:-0}" = "1" ]; then
-    info "Setup wizard not requested. Run 'macroscope setup' anytime."
     return
   fi
 

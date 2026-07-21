@@ -937,6 +937,16 @@ test_wizard_lifecycle_plan() {
   pass "wizard defaults to initial-only"
 }
 
+test_completion_keeps_setup_and_verification_in_quick_start() {
+  new_home
+  run_install --yes --tools none --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/out"
+  ! grep -Fq 'Setup wizard not requested.' "$TEST_ROOT/out" || fail "completion still prints the skipped-wizard notice"
+  ! grep -Fq 'Verify installation:' "$TEST_ROOT/out" || fail "completion still has a separate verification section"
+  grep -Fq 'macroscope setup               # Run setup anytime' "$TEST_ROOT/out" || fail "Quick start is missing the setup command"
+  grep -Fq 'macroscope --help              # Verify installation' "$TEST_ROOT/out" || fail "Quick start is missing the verification command"
+  pass "completion keeps setup and verification commands in Quick start"
+}
+
 test_dry_run_is_read_only
 test_empty_version_binary_is_rejected_before_apply
 test_selected_tool_assets_are_validated_before_apply
@@ -981,5 +991,6 @@ test_update_plan_omits_negative_actions
 test_plan_groups_selected_integration_installs
 test_plan_uses_natural_lifecycle_labels
 test_wizard_lifecycle_plan
+test_completion_keeps_setup_and_verification_in_quick_start
 
 echo "All $PASS installer tests passed."
