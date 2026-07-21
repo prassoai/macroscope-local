@@ -293,28 +293,42 @@ test_download_fails_closed_on_checksum_mismatch() {
   pass "checksum mismatch fails closed before install"
 }
 
-test_missing_digest_warns_and_installs_by_default() {
+test_absent_digest_warns_and_installs_by_default() {
   new_home
   setup_download_mocks
-  rm -f "$FIX/release.json" # GitHub metadata unavailable (e.g. 404 / rate limit)
+  write_release_metadata no-digest # metadata fetched OK, but GitHub reports no digest
   run_install_download --yes --tools none --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/out" 2>&1
   [ -x "$TEST_HOME/.local/bin/macroscope" ] || fail "transitional grace did not install the binary"
   grep -Fq "WITHOUT integrity verification" "$TEST_ROOT/out" || fail "grace path did not warn loudly"
-  pass "unavailable digest warns loudly but installs (transitional grace)"
+  pass "absent digest warns loudly but installs (transitional grace)"
 }
 
-test_missing_digest_fails_closed_under_strict() {
+test_absent_digest_fails_closed_under_strict() {
   new_home
   setup_download_mocks
-  rm -f "$FIX/release.json"
+  write_release_metadata no-digest
   set +e
   MACROSCOPE_REQUIRE_CHECKSUM=1 run_install_download --yes --tools none --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/out" 2>&1
   local code=$?
   set -e
-  [ "$code" -ne 0 ] || fail "strict mode did not fail on unavailable digest"
+  [ "$code" -ne 0 ] || fail "strict mode did not fail on absent digest"
   [ ! -e "$TEST_HOME/.local/bin/macroscope" ] || fail "binary installed under strict mode without a digest"
   grep -Fq "MACROSCOPE_REQUIRE_CHECKSUM=1" "$TEST_ROOT/out" || fail "strict failure message missing"
-  pass "unavailable digest fails closed under MACROSCOPE_REQUIRE_CHECKSUM=1"
+  pass "absent digest fails closed under MACROSCOPE_REQUIRE_CHECKSUM=1"
+}
+
+test_metadata_fetch_error_fails_closed() {
+  new_home
+  setup_download_mocks
+  rm -f "$FIX/release.json" # API fetch fails (network/server error, rate limit)
+  set +e
+  run_install_download --yes --tools none --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/out" 2>&1
+  local code=$?
+  set -e
+  [ "$code" -ne 0 ] || fail "metadata fetch error did not fail the install"
+  [ ! -e "$TEST_HOME/.local/bin/macroscope" ] || fail "binary installed despite metadata fetch error"
+  grep -Fq "Could not fetch release metadata" "$TEST_ROOT/out" || fail "missing fetch-error message"
+  pass "metadata fetch error fails closed even without strict mode"
 }
 
 test_plugin_bundle_is_verified_before_extraction() {
@@ -1346,8 +1360,9 @@ test_completion_keeps_setup_and_verification_in_quick_start
 test_asset_digest_is_parsed_from_release_metadata
 test_download_verifies_against_github_digest
 test_download_fails_closed_on_checksum_mismatch
-test_missing_digest_warns_and_installs_by_default
-test_missing_digest_fails_closed_under_strict
+test_absent_digest_warns_and_installs_by_default
+test_absent_digest_fails_closed_under_strict
+test_metadata_fetch_error_fails_closed
 test_plugin_bundle_is_verified_before_extraction
 
 echo "All $PASS installer tests passed."

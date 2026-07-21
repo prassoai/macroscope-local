@@ -1669,6 +1669,9 @@ sha256_of() {
 # ensure_release_metadata fetches the release's JSON from the GitHub REST API
 # exactly once. GitHub reports a per-asset SHA-256 in each asset's `digest`
 # field, which we verify downloads against — no bespoke manifest needed.
+# State is "ok" when the fetch succeeded and "error" for any failure (network,
+# TLS, 5xx, rate-limit, disk); a failure is deliberately NOT conflated with a
+# release that genuinely reports no digest, so callers can fail closed on it.
 ensure_release_metadata() {
   [ -z "$RELEASE_METADATA_STATE" ] || return 0
   local dest="$TMP_DIR/release.json"
@@ -1676,9 +1679,9 @@ ensure_release_metadata() {
       -H 'Accept: application/vnd.github+json' \
       "$(release_api_url)" -o "$dest" 2>/dev/null; then
     RELEASE_METADATA="$dest"
-    RELEASE_METADATA_STATE="present"
+    RELEASE_METADATA_STATE="ok"
   else
-    RELEASE_METADATA_STATE="absent"
+    RELEASE_METADATA_STATE="error"
   fi
 }
 
@@ -1703,14 +1706,28 @@ PY
 
 # verify_downloaded_artifact FILE ASSET_NAME LABEL
 # Verifies a freshly downloaded release artifact against GitHub's reported
-# SHA-256 before install. A reported digest is always enforced (any mismatch
-# aborts); when no digest is available it is fatal only under
-# REQUIRE_CHECKSUM=1, otherwise it degrades to a loud, transitional grace.
+# SHA-256 before install. This guards against transport corruption / MITM of
+# the download; it is NOT a trust root against a compromised release or GitHub
+# account (an attacker with release-write access controls both the bytes and
+# the digest GitHub reports). Defending against that requires an independent
+# signature and is intentionally out of scope here.
+#
+# Failure modes are kept distinct:
+#   - metadata fetch failed  -> fail closed always (we cannot verify; not proof
+#                               the release omits a checksum)
+#   - metadata OK, no digest -> transitional grace (warn), or fail closed under
+#                               REQUIRE_CHECKSUM=1
+#   - metadata OK, digest set -> verify; any mismatch aborts
 verify_downloaded_artifact() {
   local file="$1" name="$2" label="$3"
   ensure_release_metadata
-  local expected=""
-  [ "$RELEASE_METADATA_STATE" != "present" ] || expected="$(asset_sha256 "$name")"
+  if [ "$RELEASE_METADATA_STATE" = "error" ]; then
+    error "Could not fetch release metadata from GitHub to verify ${label} (network or server error)."
+    error "Refusing to install unverified ${label}; please retry."
+    return 1
+  fi
+  local expected
+  expected="$(asset_sha256 "$name")"
   if [ -z "$expected" ]; then
     if [ "$REQUIRE_CHECKSUM" = "1" ]; then
       error "GitHub reports no SHA-256 for ${name} on release '${INSTALL_VERSION}' and MACROSCOPE_REQUIRE_CHECKSUM=1 is set."
