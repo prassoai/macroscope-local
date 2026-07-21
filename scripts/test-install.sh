@@ -848,9 +848,7 @@ test_interactive_lists_select_only_claude_and_permissions() {
     "Allow your coding assistants to run Macroscope commands?="$'\e[A\n' \
     "Proceed?="$'\n' || fail "interactive list selections did not complete"
   grep -Fq 'Optional coding assistant command approvals' "$TEST_ROOT/install" || fail "permission prompt did not frame the change as optional"
-  grep -Fq 'This only changes those coding assistants' "$TEST_ROOT/install" || fail "permission prompt did not scope the config changes"
-  grep -Fq 'If you skip this, Macroscope still works' "$TEST_ROOT/install" || fail "permission prompt did not explain skip behavior"
-  grep -Fq 'prompt you before each Macroscope command' "$TEST_ROOT/install" || fail "permission prompt did not explain the approval tradeoff"
+  grep -Fq 'Let Claude Code, Cursor, and OpenCode run Macroscope commands without asking every time.' "$TEST_ROOT/install" || fail "permission prompt did not explain the approval benefit"
   python3 - "$TEST_HOME/.local/state/macroscope/install.json" <<'PY' || fail "interactive choices were not persisted"
 import json, sys
 with open(sys.argv[1], encoding="utf-8") as f: data = json.load(f)

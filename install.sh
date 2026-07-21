@@ -528,10 +528,7 @@ resolve_host_permissions() {
     return
   fi
   printf '\n%sOptional coding assistant command approvals%s\n' "$BOLD" "$RESET" > /dev/tty
-  printf 'Macroscope can add allow-rules to Claude Code, Cursor, and OpenCode so they can run macroscope\n' > /dev/tty
-  printf "and supporting mktemp commands without asking every time. This only changes those coding assistants'\n" > /dev/tty
-  printf 'command approval settings. If you skip this, Macroscope still works, but your assistants may\n' > /dev/tty
-  printf 'prompt you before each Macroscope command.\n' > /dev/tty
+  printf 'Let Claude Code, Cursor, and OpenCode run Macroscope commands without asking every time.\n' > /dev/tty
   prompt_yes_no "Allow your coding assistants to run Macroscope commands?" "no"
   if [ "$TUI_RESULT" = "yes" ]; then HOST_PERMISSIONS="grant"; else HOST_PERMISSIONS="skip"; fi
 }
