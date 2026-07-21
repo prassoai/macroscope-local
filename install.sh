@@ -705,7 +705,7 @@ print_plan() {
   done
   if [ "$HOST_PERMISSIONS" = "grant" ]; then
     if host_permission_grant_applies; then
-      printf '   %s⚠ Grants standing command auto-approval — lets these agents run Macroscope without asking each time:%s\n' "$YELLOW" "$RESET"
+      printf '\n%s⚠ Standing command auto-approval%s — the step(s) below let these agents run Macroscope without asking each time:\n' "$YELLOW" "$RESET"
     fi
     if tool_selected claude; then
       printf '%d. Modify %s/settings.json: add Bash allow-rules and register the Macroscope PreToolUse hook\n' "$index" "$(get_claude_config_dir)"
