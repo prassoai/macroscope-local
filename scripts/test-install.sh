@@ -895,6 +895,20 @@ test_resumed_update_prompts_for_incomplete_state() {
   pass "resumed updates keep prompts when saved install choices are incomplete"
 }
 
+test_resumed_update_prompts_without_saved_path_policy() {
+  new_home
+  mkdir -p "$TEST_HOME/.local/state/macroscope"
+  printf '%s\n' '{"schemaVersion":1,"tools":["claude"],"hostPermissions":"skip","pathFile":null,"permissionOwnership":{}}' > "$TEST_HOME/.local/state/macroscope/install.json"
+  run_interactive_install "$TEST_ROOT/update" 0 \
+    --mode update --resume-command --no-wizard --events \
+    "space to toggle="$'\n' \
+    "Update and run the review?="$'\n' || fail "legacy-state update did not complete"
+  grep -Fq 'Macroscope update will:' "$TEST_ROOT/update" || fail "legacy state without pathPolicy hid the change plan"
+  grep -Fq 'Current integrations are selected below.' "$TEST_ROOT/update" || fail "legacy state without pathPolicy skipped integration confirmation"
+  grep -Fq 'Update and run the review?' "$TEST_ROOT/update" || fail "legacy state without pathPolicy skipped update confirmation"
+  pass "resumed updates prompt when legacy state has no saved PATH policy"
+}
+
 test_interactive_lists_select_only_claude_and_permissions() {
   new_home
   run_interactive_install "$TEST_ROOT/install" 0 \
@@ -1134,6 +1148,7 @@ test_interactive_update_repairs_empty_tool_selection
 test_resumed_update_reuses_saved_choices_without_prompts
 test_resumed_update_does_not_expand_saved_config
 test_resumed_update_prompts_for_incomplete_state
+test_resumed_update_prompts_without_saved_path_policy
 test_interactive_lists_select_only_claude_and_permissions
 test_confirmation_can_install_without_auto_approval
 test_interactive_confirmation_list_can_cancel

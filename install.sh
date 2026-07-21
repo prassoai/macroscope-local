@@ -203,8 +203,10 @@ try:
     configured = (
         "tools" in data
         and "hostPermissions" in data
+        and "pathPolicy" in data
         and all(tool in ("claude", "codex", "cursor", "opencode") for tool in tools)
         and host_permissions in ("grant", "skip", "preserve")
+        and path_policy in ("auto", "managed", "skip")
     )
     if not isinstance(tools, list) or not all(isinstance(tool, str) for tool in tools):
         raise TypeError("tools must be a string array")
