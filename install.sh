@@ -98,7 +98,7 @@ Options:
   --tools claude,codex,cursor,opencode|all|none
                                     Select host integrations
   --host-permissions prompt|grant|skip
-                                    Control host shell permission automation
+                                    Control optional coding-assistant command allow-rules
   --no-path                         Never edit shell configuration (remembered for updates)
   --shell-config PATH               Edit exactly this shell configuration file
   --wizard                          Launch setup after installation
@@ -527,9 +527,9 @@ resolve_host_permissions() {
     HOST_PERMISSIONS="skip"
     return
   fi
-  printf '\n%sOptional host permission automation%s\n' "$BOLD" "$RESET" > /dev/tty
-  printf 'This adds Macroscope/mktemp shell allow-rules. Claude Code also receives a PreToolUse hook.\n' > /dev/tty
-  prompt_yes_no "Grant these permissions?" "no"
+  printf '\n%sOptional coding assistant command approvals%s\n' "$BOLD" "$RESET" > /dev/tty
+  printf 'Let Claude Code, Cursor, and OpenCode run Macroscope commands without asking every time. This adds Macroscope and mktemp shell allow-rules, plus a Claude Code PreToolUse hook.\n' > /dev/tty
+  prompt_yes_no "Allow your coding assistants to run Macroscope commands?" "no"
   if [ "$TUI_RESULT" = "yes" ]; then HOST_PERMISSIONS="grant"; else HOST_PERMISSIONS="skip"; fi
 }
 
