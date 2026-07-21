@@ -1,6 +1,8 @@
 # Macroscope CLI
 
-Local-first AI code review for your terminal and editor, with an optional autopilot loop. Integrates with Claude Code, Codex, Cursor, and OpenCode.
+**[Macroscope](https://macroscope.com)** is an AI code reviewer that catches bugs and helps you ship higher-quality code.
+
+The **Macroscope CLI** brings code review directly to your terminal and coding agents, so you can trigger reviews without opening a pull request.
 
 Using the Macroscope CLI requires an active Macroscope account.
 
