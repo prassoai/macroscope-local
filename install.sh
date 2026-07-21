@@ -91,6 +91,15 @@ APPLY_COMPLETE=0
 ROLLBACK_LOG=""
 SAVED_TTY_STATE=""
 
+# Integrity verification of downloaded release artifacts against the SHA-256
+# GitHub reports for each release asset.
+#   REQUIRE_CHECKSUM=1 fails closed when GitHub reports no SHA-256 for an asset.
+#   Default (0) applies a loud, transitional grace in that case; a reported
+#   SHA-256 that does NOT match is always fatal regardless of this setting.
+REQUIRE_CHECKSUM="${MACROSCOPE_REQUIRE_CHECKSUM:-0}"
+RELEASE_METADATA=""
+RELEASE_METADATA_STATE=""
+
 usage() {
   cat <<'EOF'
 Usage: install.sh [version] [options]
@@ -1625,6 +1634,126 @@ resolve_version() {
   info "Requested version: ${BOLD}${INSTALL_VERSION}${RESET}"
 }
 
+# release_asset_url ASSET_NAME -> download URL for the resolved release.
+release_asset_url() {
+  local repo="prassoai/macroscope-local"
+  if [ "$INSTALL_VERSION" = "latest" ]; then
+    printf 'https://github.com/%s/releases/latest/download/%s' "$repo" "$1"
+  else
+    printf 'https://github.com/%s/releases/download/%s/%s' "$repo" "$INSTALL_VERSION" "$1"
+  fi
+}
+
+# release_api_url -> GitHub REST endpoint for the resolved release's metadata.
+release_api_url() {
+  local repo="prassoai/macroscope-local"
+  if [ "$INSTALL_VERSION" = "latest" ]; then
+    printf 'https://api.github.com/repos/%s/releases/latest' "$repo"
+  else
+    printf 'https://api.github.com/repos/%s/releases/tags/%s' "$repo" "$INSTALL_VERSION"
+  fi
+}
+
+# sha256_of FILE -> lowercase hex SHA-256, portable across sha256sum/shasum.
+# Returns 2 when no SHA-256 tool is available.
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  else
+    return 2
+  fi
+}
+
+# ensure_release_metadata fetches the release's JSON from the GitHub REST API
+# exactly once. GitHub reports a per-asset SHA-256 in each asset's `digest`
+# field, which we verify downloads against — no bespoke manifest needed.
+# State is "ok" when the fetch succeeded and "error" for any failure (network,
+# TLS, 5xx, rate-limit, disk); a failure is deliberately NOT conflated with a
+# release that genuinely reports no digest, so callers can fail closed on it.
+ensure_release_metadata() {
+  [ -z "$RELEASE_METADATA_STATE" ] || return 0
+  local dest="$TMP_DIR/release.json"
+  if curl -fsSL --proto '=https' --proto-redir '=https' \
+      -H 'Accept: application/vnd.github+json' \
+      "$(release_api_url)" -o "$dest" 2>/dev/null; then
+    RELEASE_METADATA="$dest"
+    RELEASE_METADATA_STATE="ok"
+  else
+    RELEASE_METADATA_STATE="error"
+  fi
+}
+
+# asset_sha256 ASSET_NAME -> lowercase hex SHA-256 GitHub reports for the asset,
+# or empty when the release metadata is unavailable or carries no sha256 digest.
+asset_sha256() {
+  python3 - "$RELEASE_METADATA" "$1" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as f:
+        data = json.load(f)
+except (OSError, ValueError):
+    sys.exit(0)
+for asset in data.get("assets", []):
+    if asset.get("name") == sys.argv[2]:
+        digest = asset.get("digest") or ""
+        if digest.startswith("sha256:"):
+            print(digest[len("sha256:"):].strip().lower())
+        break
+PY
+}
+
+# verify_downloaded_artifact FILE ASSET_NAME LABEL
+# Verifies a freshly downloaded release artifact against GitHub's reported
+# SHA-256 before install. This guards against transport corruption / MITM of
+# the download; it is NOT a trust root against a compromised release or GitHub
+# account (an attacker with release-write access controls both the bytes and
+# the digest GitHub reports). Defending against that requires an independent
+# signature and is intentionally out of scope here.
+#
+# Failure modes are kept distinct:
+#   - metadata fetch failed  -> fail closed always (we cannot verify; not proof
+#                               the release omits a checksum)
+#   - metadata OK, no digest -> transitional grace (warn), or fail closed under
+#                               REQUIRE_CHECKSUM=1
+#   - metadata OK, digest set -> verify; any mismatch aborts
+verify_downloaded_artifact() {
+  local file="$1" name="$2" label="$3"
+  ensure_release_metadata
+  if [ "$RELEASE_METADATA_STATE" = "error" ]; then
+    error "Could not fetch release metadata from GitHub to verify ${label} (network or server error)."
+    error "Refusing to install unverified ${label}; please retry."
+    return 1
+  fi
+  local expected
+  expected="$(asset_sha256 "$name")"
+  if [ -z "$expected" ]; then
+    if [ "$REQUIRE_CHECKSUM" = "1" ]; then
+      error "GitHub reports no SHA-256 for ${name} on release '${INSTALL_VERSION}' and MACROSCOPE_REQUIRE_CHECKSUM=1 is set."
+      error "Refusing to install unverified ${label}."
+      return 1
+    fi
+    warn "SECURITY: GitHub reports no SHA-256 for ${name} on release '${INSTALL_VERSION}'."
+    warn "SECURITY: installing ${label} WITHOUT integrity verification (transitional grace)."
+    warn "SECURITY: set MACROSCOPE_REQUIRE_CHECKSUM=1 to require verification and fail closed."
+    return 0
+  fi
+  local actual
+  if ! actual="$(sha256_of "$file")"; then
+    error "No SHA-256 tool (sha256sum or shasum) available to verify ${label}."
+    return 1
+  fi
+  actual="$(printf '%s' "$actual" | tr '[:upper:]' '[:lower:]')"
+  if [ "$expected" != "$actual" ]; then
+    error "Integrity check FAILED for ${label} — refusing to install."
+    error "  expected: ${expected}"
+    error "  actual:   ${actual}"
+    return 1
+  fi
+  success "Verified ${label} against GitHub-reported SHA-256"
+}
+
 stage_binary() {
   step "Downloading Macroscope CLI..."
 
@@ -1656,18 +1785,13 @@ stage_binary() {
     return
   fi
 
-  local repo="prassoai/macroscope-local"
-  local url=""
-
-  if [ "$INSTALL_VERSION" = "latest" ]; then
-    url="https://github.com/${repo}/releases/latest/download/macroscope-${OS}-${ARCH}"
-  else
-    url="https://github.com/${repo}/releases/download/${INSTALL_VERSION}/macroscope-${OS}-${ARCH}"
-  fi
+  local asset="macroscope-${OS}-${ARCH}"
+  local url
+  url="$(release_asset_url "$asset")"
 
   info "Downloading from: ${DIM}${url}${RESET}"
 
-  if ! curl -fL --progress-bar "$url" -o "$TMP_DIR/macroscope"; then
+  if ! curl -fL --proto '=https' --proto-redir '=https' --progress-bar "$url" -o "$TMP_DIR/macroscope"; then
     error "Failed to download macroscope"
     echo ""
     echo "Possible reasons:"
@@ -1676,9 +1800,11 @@ stage_binary() {
     echo "  Invalid version specified: ${INSTALL_VERSION}"
     echo ""
     echo "Check available releases at:"
-    echo "  https://github.com/${repo}/releases"
+    echo "  https://github.com/prassoai/macroscope-local/releases"
     exit 1
   fi
+
+  verify_downloaded_artifact "$TMP_DIR/macroscope" "$asset" "Macroscope CLI binary" || exit 1
 
   chmod +x "$TMP_DIR/macroscope"
 
@@ -1764,16 +1890,14 @@ fetch_plugin_bundle() {
       success "Fetched plugin bundle from ${BOLD}${MACROSCOPE_PLUGIN_BUNDLE_SOURCE}${RESET}"
     fi
   else
-    if [ "$INSTALL_VERSION" = "latest" ]; then
-      bundle_url="https://github.com/prassoai/macroscope-local/releases/latest/download/macroscope-plugin-bundle.tar.gz"
-    else
-      bundle_url="https://github.com/prassoai/macroscope-local/releases/download/${INSTALL_VERSION}/macroscope-plugin-bundle.tar.gz"
-    fi
+    local bundle_asset="macroscope-plugin-bundle.tar.gz"
+    bundle_url="$(release_asset_url "$bundle_asset")"
 
     info "Downloading plugin bundle from: ${DIM}${bundle_url}${RESET}"
 
     mkdir -p "$CHECKOUT_DIR"
-    if curl -fL --progress-bar "$bundle_url" -o "$bundle_archive"; then
+    if curl -fL --proto '=https' --proto-redir '=https' --progress-bar "$bundle_url" -o "$bundle_archive"; then
+      verify_downloaded_artifact "$bundle_archive" "$bundle_asset" "Macroscope plugin bundle" || exit 1
       tar -xzf "$bundle_archive" -C "$CHECKOUT_DIR"
       success "Fetched plugin bundle from ${BOLD}${INSTALL_VERSION}${RESET}"
     else
@@ -3209,4 +3333,8 @@ main() {
   fi
 }
 
-main "$@"
+# Allow tests to source this script for the helper functions without running
+# the installer. Normal execution (including `curl ... | bash`) is unaffected.
+if [ "${MACROSCOPE_SOURCE_ONLY:-0}" != "1" ]; then
+  main "$@"
+fi

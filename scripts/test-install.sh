@@ -156,6 +156,205 @@ tree_digest() {
   find "$1" -mindepth 1 -print | LC_ALL=C sort | shasum | awk '{print $1}'
 }
 
+# test_sha256 FILE -> hex SHA-256, portable across sha256sum (Linux) and
+# shasum -a 256 (stock macOS), matching the fallback the installer relies on.
+test_sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  else
+    shasum -a 256 "$1" | awk '{print $1}'
+  fi
+}
+
+OS_TAG="$(uname -s | tr '[:upper:]' '[:lower:]')"
+ARCH_TAG="$(uname -m)"
+case "$ARCH_TAG" in
+  x86_64) ARCH_TAG="amd64" ;;
+  aarch64 | arm64) ARCH_TAG="arm64" ;;
+esac
+
+# setup_download_mocks builds fixture artifacts and a mock `curl` that serves
+# release assets from local files, so tests can exercise the real download +
+# integrity-verification path in install.sh instead of the local-source shortcut.
+setup_download_mocks() {
+  FIX="$TEST_ROOT/fixtures"
+  MOCK_BIN="$TEST_ROOT/mockbin"
+  mkdir -p "$FIX" "$MOCK_BIN"
+
+  printf '#!/bin/sh\nprintf "test-version\\n"\n' > "$FIX/binary"
+  chmod +x "$FIX/binary"
+  tar -czf "$FIX/bundle" -C "$REPO_ROOT" .
+
+  cat > "$MOCK_BIN/curl" <<'CURL'
+#!/bin/bash
+set -euo pipefail
+dest="" url="" prev=""
+for a in "$@"; do
+  if [ "$prev" = "-o" ]; then dest="$a"; prev=""; continue; fi
+  case "$a" in
+    -o) prev="-o" ;;
+    http://* | https://*) url="$a" ;;
+  esac
+done
+[ -n "$url" ] && [ -n "$dest" ] || { echo "mock curl: bad args: $*" >&2; exit 2; }
+case "$url" in
+  *://api.github.com/*) src="$MOCK_CURL_FIX/release.json" ;;
+  *)
+    base="${url##*/}"
+    case "$base" in
+      macroscope-plugin-bundle.tar.gz) src="$MOCK_CURL_FIX/bundle" ;;
+      macroscope-*) src="$MOCK_CURL_FIX/binary" ;;
+      *) echo "mock curl: unknown asset: $base" >&2; exit 2 ;;
+    esac
+    ;;
+esac
+[ -f "$src" ] || exit 22
+cp "$src" "$dest"
+CURL
+  chmod +x "$MOCK_BIN/curl"
+}
+
+# write_release_metadata [good|corrupt-binary|corrupt-bundle|no-digest]
+# writes a GitHub-style release JSON reporting a per-asset sha256 `digest`,
+# optionally poisoning a hash or omitting digests to exercise the grace path.
+write_release_metadata() {
+  local mode="${1:-good}" bhash bundlehash
+  local zero="0000000000000000000000000000000000000000000000000000000000000000"
+  bhash="$(test_sha256 "$FIX/binary")"
+  bundlehash="$(test_sha256 "$FIX/bundle")"
+  [ "$mode" != "corrupt-binary" ] || bhash="$zero"
+  [ "$mode" != "corrupt-bundle" ] || bundlehash="$zero"
+  local bdigest="\"sha256:${bhash}\"" bundledigest="\"sha256:${bundlehash}\""
+  if [ "$mode" = "no-digest" ]; then
+    bdigest="\"\""
+    bundledigest="\"\""
+  fi
+  cat > "$FIX/release.json" <<JSON
+{
+  "tag_name": "test",
+  "assets": [
+    {"name": "macroscope-${OS_TAG}-${ARCH_TAG}", "digest": ${bdigest}},
+    {"name": "macroscope-plugin-bundle.tar.gz", "digest": ${bundledigest}}
+  ]
+}
+JSON
+}
+
+run_install_download() {
+  env \
+    HOME="$TEST_HOME" \
+    SHELL="/bin/zsh" \
+    PATH="$MOCK_BIN:/usr/bin:/bin" \
+    MOCK_CURL_FIX="$FIX" \
+    MACROSCOPE_REQUIRE_CHECKSUM="${MACROSCOPE_REQUIRE_CHECKSUM:-0}" \
+    MACROSCOPE_TEST_NONINTERACTIVE=1 \
+    bash "$INSTALLER" "$@"
+}
+
+test_asset_digest_is_parsed_from_release_metadata() {
+  new_home
+  local work="$TEST_ROOT/units"
+  mkdir -p "$work"
+  cat > "$work/release.json" <<'JSON'
+{
+  "assets": [
+    {"name": "artifact", "digest": "sha256:ABCDEF0123456789"},
+    {"name": "no-digest", "digest": ""}
+  ]
+}
+JSON
+  (
+    export MACROSCOPE_SOURCE_ONLY=1
+    # shellcheck disable=SC1090
+    . "$INSTALLER"
+    # shellcheck disable=SC2034 # read by the sourced asset_sha256
+    RELEASE_METADATA="$work/release.json"
+    [ "$(asset_sha256 artifact)" = "abcdef0123456789" ] || exit 11
+    [ -z "$(asset_sha256 no-digest)" ] || exit 12
+    [ -z "$(asset_sha256 absent)" ] || exit 13
+    exit 0
+  )
+  local code=$?
+  [ "$code" -eq 0 ] || fail "asset_sha256 misbehaved (code $code)"
+  pass "asset_sha256 extracts a lowercase digest and is empty when unavailable"
+}
+
+test_download_verifies_against_github_digest() {
+  new_home
+  setup_download_mocks
+  write_release_metadata good
+  run_install_download --yes --tools none --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/out" 2>&1
+  [ -x "$TEST_HOME/.local/bin/macroscope" ] || fail "verified binary was not installed"
+  grep -Fq "Verified Macroscope CLI binary against GitHub-reported SHA-256" "$TEST_ROOT/out" || fail "missing verification success message"
+  pass "downloaded binary is verified against GitHub's reported SHA-256"
+}
+
+test_download_fails_closed_on_checksum_mismatch() {
+  new_home
+  setup_download_mocks
+  write_release_metadata corrupt-binary
+  set +e
+  run_install_download --yes --tools none --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/out" 2>&1
+  local code=$?
+  set -e
+  [ "$code" -ne 0 ] || fail "checksum mismatch did not fail the install"
+  [ ! -e "$TEST_HOME/.local/bin/macroscope" ] || fail "binary installed despite checksum mismatch"
+  grep -Fq "Integrity check FAILED" "$TEST_ROOT/out" || fail "missing integrity failure message"
+  pass "checksum mismatch fails closed before install"
+}
+
+test_absent_digest_warns_and_installs_by_default() {
+  new_home
+  setup_download_mocks
+  write_release_metadata no-digest # metadata fetched OK, but GitHub reports no digest
+  run_install_download --yes --tools none --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/out" 2>&1
+  [ -x "$TEST_HOME/.local/bin/macroscope" ] || fail "transitional grace did not install the binary"
+  grep -Fq "WITHOUT integrity verification" "$TEST_ROOT/out" || fail "grace path did not warn loudly"
+  pass "absent digest warns loudly but installs (transitional grace)"
+}
+
+test_absent_digest_fails_closed_under_strict() {
+  new_home
+  setup_download_mocks
+  write_release_metadata no-digest
+  set +e
+  MACROSCOPE_REQUIRE_CHECKSUM=1 run_install_download --yes --tools none --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/out" 2>&1
+  local code=$?
+  set -e
+  [ "$code" -ne 0 ] || fail "strict mode did not fail on absent digest"
+  [ ! -e "$TEST_HOME/.local/bin/macroscope" ] || fail "binary installed under strict mode without a digest"
+  grep -Fq "MACROSCOPE_REQUIRE_CHECKSUM=1" "$TEST_ROOT/out" || fail "strict failure message missing"
+  pass "absent digest fails closed under MACROSCOPE_REQUIRE_CHECKSUM=1"
+}
+
+test_metadata_fetch_error_fails_closed() {
+  new_home
+  setup_download_mocks
+  rm -f "$FIX/release.json" # API fetch fails (network/server error, rate limit)
+  set +e
+  run_install_download --yes --tools none --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/out" 2>&1
+  local code=$?
+  set -e
+  [ "$code" -ne 0 ] || fail "metadata fetch error did not fail the install"
+  [ ! -e "$TEST_HOME/.local/bin/macroscope" ] || fail "binary installed despite metadata fetch error"
+  grep -Fq "Could not fetch release metadata" "$TEST_ROOT/out" || fail "missing fetch-error message"
+  pass "metadata fetch error fails closed even without strict mode"
+}
+
+test_plugin_bundle_is_verified_before_extraction() {
+  new_home
+  setup_download_mocks
+  write_release_metadata corrupt-bundle
+  set +e
+  run_install_download --yes --tools claude --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/out" 2>&1
+  local code=$?
+  set -e
+  [ "$code" -ne 0 ] || fail "bundle checksum mismatch did not fail the install"
+  [ ! -e "$TEST_HOME/.local/bin/macroscope" ] || fail "binary installed despite bundle mismatch"
+  grep -Fq "Integrity check FAILED for Macroscope plugin bundle" "$TEST_ROOT/out" || fail "missing bundle integrity failure message"
+  pass "plugin bundle is verified before extraction"
+}
+
 test_dry_run_is_read_only() {
   new_home
   local before after
@@ -169,8 +368,13 @@ test_dry_run_is_read_only() {
 
 test_empty_version_binary_is_rejected_before_apply() {
   new_home
+  # A binary whose --version prints nothing must be rejected. Use a purpose-built
+  # fixture rather than /usr/bin/true, whose GNU build prints a version string.
+  local noversion="$TEST_ROOT/noversion"
+  printf '#!/bin/sh\nexit 0\n' > "$noversion"
+  chmod +x "$noversion"
   set +e
-  TEST_BINARY=/usr/bin/true run_install --yes --tools none --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/out" 2>"$TEST_ROOT/err"
+  TEST_BINARY="$noversion" run_install --yes --tools none --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/out" 2>"$TEST_ROOT/err"
   local code=$?
   set -e
   [ "$code" -ne 0 ] || fail "empty-version binary passed validation"
@@ -198,7 +402,7 @@ test_existing_install_directory_mode_is_preserved() {
   chmod 700 "$TEST_HOME/.local/bin"
   run_install --yes --tools none --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/out"
   local mode=""
-  mode="$(stat -f '%Lp' "$TEST_HOME/.local/bin" 2>/dev/null || stat -c '%a' "$TEST_HOME/.local/bin")"
+  mode="$(stat -c '%a' "$TEST_HOME/.local/bin" 2>/dev/null || stat -f '%Lp' "$TEST_HOME/.local/bin")"
   [ "$mode" = "700" ] || fail "existing install directory mode changed to $mode"
   pass "existing install directory mode is preserved"
 }
@@ -1163,5 +1367,12 @@ test_wizard_lifecycle_plan
 test_completion_prints_after_successful_wizard
 test_failed_wizard_is_not_reported_as_success
 test_completion_keeps_setup_and_verification_in_quick_start
+test_asset_digest_is_parsed_from_release_metadata
+test_download_verifies_against_github_digest
+test_download_fails_closed_on_checksum_mismatch
+test_absent_digest_warns_and_installs_by_default
+test_absent_digest_fails_closed_under_strict
+test_metadata_fetch_error_fails_closed
+test_plugin_bundle_is_verified_before_extraction
 
 echo "All $PASS installer tests passed."
