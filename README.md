@@ -14,6 +14,8 @@ curl -sSL https://raw.githubusercontent.com/prassoai/macroscope-local/main/insta
 
 The installer previews every planned change — binaries, PATH edits, editor integrations, and permissions — and asks for confirmation before writing anything. It stages and validates the new binary and plugin bundle before replacing existing state, and preserves `~/.macroscope`, saved credentials, unrelated editor settings, and file modes.
 
+Mandatory auto-updates reuse the integration and command-permission choices in the install manifest without showing the installer plan or asking for confirmation. If those saved choices are missing or incomplete, the installer falls back to the normal interactive selection and confirmation flow.
+
 ## Quick start
 
 Launch the interactive wizard:

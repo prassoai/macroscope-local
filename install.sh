@@ -77,10 +77,12 @@ OUTPUT_FORMAT="text"
 RESUME_COMMAND=0
 STATE_FILE=""
 STATE_LOADED=0
+STATE_CONFIGURED=0
 STATE_TOOLS=""
 STATE_HOST_PERMISSIONS=""
 STATE_PATH_FILE=""
 STATE_PATH_POLICY=""
+SAVED_AUTO_UPDATE=0
 PATH_ACTION="skip"
 PATH_TARGET=""
 PATH_POLICY="auto"
@@ -198,6 +200,12 @@ try:
     host_permissions = data.get("hostPermissions", "")
     path_file = data.get("pathFile")
     path_policy = data.get("pathPolicy")
+    configured = (
+        "tools" in data
+        and "hostPermissions" in data
+        and all(tool in ("claude", "codex", "cursor", "opencode") for tool in tools)
+        and host_permissions in ("grant", "skip", "preserve")
+    )
     if not isinstance(tools, list) or not all(isinstance(tool, str) for tool in tools):
         raise TypeError("tools must be a string array")
     if not isinstance(host_permissions, str):
@@ -216,12 +224,14 @@ except Exception:
     print("")
     print("")
     print("invalid")
+    print("incomplete")
     raise SystemExit
 print(",".join(tools))
 print(host_permissions)
 print(path_file or "")
 print(path_policy)
 print("valid")
+print("configured" if configured else "incomplete")
 PY
 )"
   STATE_TOOLS="$(printf '%s\n' "$values" | sed -n '1p')"
@@ -229,6 +239,7 @@ PY
   STATE_PATH_FILE="$(printf '%s\n' "$values" | sed -n '3p')"
   STATE_PATH_POLICY="$(printf '%s\n' "$values" | sed -n '4p')"
   [ "$(printf '%s\n' "$values" | sed -n '5p')" = "valid" ] && STATE_LOADED=1
+  [ "$(printf '%s\n' "$values" | sed -n '6p')" = "configured" ] && STATE_CONFIGURED=1
   return 0
 }
 
@@ -300,6 +311,34 @@ selected_tools_plan_label() {
       printf ', %s' "${tools[$index]}"
     fi
   done
+}
+
+selected_permission_tools_plan_label() {
+  local tools=()
+  local tool=""
+  local index=0
+  local last=0
+  for tool in claude cursor opencode; do
+    tool_selected "$tool" && tools+=("$tool")
+  done
+  last=$((${#tools[@]} - 1))
+  for index in "${!tools[@]}"; do
+    if [ "$index" -eq 0 ]; then
+      printf '%s' "${tools[$index]}"
+    elif [ "$index" -eq "$last" ]; then
+      printf ' and %s' "${tools[$index]}"
+    else
+      printf ', %s' "${tools[$index]}"
+    fi
+  done
+}
+
+tool_permission_plan_path() {
+  case "$1" in
+    claude) printf '%s/settings.json and %s/hooks/macroscope-bash-autoallow.sh' "$(get_claude_config_dir)" "$(get_claude_config_dir)" ;;
+    cursor) printf '%s/.cursor/cli-config.json' "$HOME" ;;
+    opencode) printf '%s/opencode.json' "$(get_opencode_config_dir)" ;;
+  esac
 }
 
 tool_installed() {
@@ -531,7 +570,7 @@ select_tools() {
       default_tools="$(detect_installed_tools)"
     fi
     prompt_default="$default_tools"
-    if has_interactive_tty && [ "$ASSUME_YES" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
+    if has_interactive_tty && [ "$ASSUME_YES" -eq 0 ] && [ "$DRY_RUN" -eq 0 ] && [ "$SAVED_AUTO_UPDATE" -eq 0 ]; then
       if [ -z "$prompt_default" ]; then
         printf '\n%sNo Macroscope host integrations are currently selected.%s\n' "$YELLOW" "$RESET" > /dev/tty
         printf 'Select integrations now so a CLI-only install is not preserved accidentally.\n' > /dev/tty
@@ -573,10 +612,10 @@ resolve_host_permissions() {
     HOST_PERMISSIONS="skip"
     return
   fi
-  printf '\n%sOptional Macroscope command auto-approval%s\n' "$BOLD" "$RESET" > /dev/tty
-  printf 'Adds Macroscope and mktemp shell allow-rules to Claude Code, Cursor, and OpenCode, plus a Claude Code PreToolUse hook.\n' > /dev/tty
-  prompt_yes_no "Allow coding agents to auto-approve Macroscope commands?" "no"
-  if [ "$TUI_RESULT" = "yes" ]; then HOST_PERMISSIONS="grant"; else HOST_PERMISSIONS="skip"; fi
+  # The final confirmation menu is the single decision point for optional
+  # command auto-approval. It presents both the exact changes and an install-
+  # without-auto-approval choice, so a separate yes/no prompt is redundant.
+  HOST_PERMISSIONS="grant"
 }
 
 active_path_contains_install_dir() {
@@ -652,10 +691,28 @@ resolve_lifecycle() {
   fi
 }
 
+# Mandatory updates that resume the original command reuse an explicit saved
+# install configuration. They do not ask users to reconsider integration or
+# permission choices that were already made during installation. Manual
+# updates, dry runs, overrides, and incomplete legacy state keep the normal
+# plan and confirmation flow.
+resolve_saved_auto_update() {
+  SAVED_AUTO_UPDATE=0
+  [ "$INSTALL_MODE" = "update" ] || return 0
+  [ "$RESUME_COMMAND" -eq 1 ] || return 0
+  [ "$STATE_CONFIGURED" -eq 1 ] || return 0
+  [ -z "$TOOLS_SPEC" ] || return 0
+  [ "$HOST_PERMISSIONS" = "prompt" ] || return 0
+  [ "$SKIP_PATH" -eq 0 ] || return 0
+  [ -z "$SHELL_CONFIG_OVERRIDE" ] || return 0
+  [ "$DRY_RUN" -eq 0 ] || return 0
+  SAVED_AUTO_UPDATE=1
+}
+
 # host_permission_grant_applies is true only when the permission grant will
 # actually modify a selected tool's config. Codex has no host-permission step,
 # so `--tools codex --host-permissions grant` must not show the auto-approval
-# warning or the "Show exact changes" prompt.
+# grouped plan action or the "Show exact changes" confirmation option.
 host_permission_grant_applies() {
   [ "$HOST_PERMISSIONS" = "grant" ] || return 1
   tool_selected claude || tool_selected cursor || tool_selected opencode
@@ -705,18 +762,10 @@ print_plan() {
   done
   if [ "$HOST_PERMISSIONS" = "grant" ]; then
     if host_permission_grant_applies; then
-      printf '\n%s⚠ Standing command auto-approval%s — the step(s) below let these agents run Macroscope without asking each time:\n' "$YELLOW" "$RESET"
-    fi
-    if tool_selected claude; then
-      printf '%d. Modify %s/settings.json: add Bash allow-rules and register the Macroscope PreToolUse hook\n' "$index" "$(get_claude_config_dir)"
-      index=$((index + 1))
-    fi
-    if tool_selected cursor; then
-      printf '%d. Modify %s/.cursor/cli-config.json: add Macroscope and mktemp shell allow-rules\n' "$index" "$HOME"
-      index=$((index + 1))
-    fi
-    if tool_selected opencode; then
-      printf '%d. Modify %s/opencode.json: add Macroscope and mktemp shell allow-rules\n' "$index" "$(get_opencode_config_dir)"
+      printf '%d. Allow Macroscope and mktemp command auto-approval for %s\n' "$index" "$(selected_permission_tools_plan_label)"
+      for tool in claude cursor opencode; do
+        tool_selected "$tool" && printf '   (%s)\n' "$(tool_permission_plan_path "$tool")"
+      done
       index=$((index + 1))
     fi
   elif [ "$HOST_PERMISSIONS" = "preserve" ]; then
@@ -732,9 +781,6 @@ print_plan() {
   fi
   if [ "$WIZARD_MODE" = "yes" ]; then
     printf '%d. Launch the setup wizard\n' "$index"
-  fi
-  if host_permission_grant_applies && [ "$ASSUME_YES" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
-    printf '\n%sTip:%s at the prompt, choose %s"Show exact changes"%s to inspect the snippets, or %s"Install without command auto-approval"%s to proceed without granting.\n' "$DIM" "$RESET" "$BOLD" "$RESET" "$BOLD" "$RESET"
   fi
 }
 
@@ -794,6 +840,7 @@ print_change_details() {
 
 confirm_plan() {
   [ "$DRY_RUN" -eq 0 ] || return 0
+  [ "$SAVED_AUTO_UPDATE" -eq 0 ] || return 0
   [ "$ASSUME_YES" -eq 0 ] || return 0
   if ! has_interactive_tty; then
     error "A terminal is required for confirmation. Re-run with --yes after reviewing --dry-run."
@@ -817,9 +864,8 @@ confirm_plan() {
         1) print_change_details ;;
         2)
           HOST_PERMISSIONS="skip"
-          info "Command auto-approval will not be granted. Updated plan:"
-          print_plan
-          break
+          info "Installing without command auto-approval."
+          return 0
           ;;
         *) info "Cancelled before making changes."; return 3 ;;
       esac
@@ -3090,11 +3136,14 @@ main() {
   resolve_codex_bundled_binary
   load_install_state
   resolve_lifecycle
+  resolve_saved_auto_update
   select_tools
   resolve_host_permissions
   resolve_path_action
   resolve_version
-  print_plan
+  if [ "$SAVED_AUTO_UPDATE" -eq 0 ]; then
+    print_plan
+  fi
 
   if [ "$DRY_RUN" -eq 1 ]; then
     info "Dry run complete; no persistent files were changed."
