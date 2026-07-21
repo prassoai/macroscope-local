@@ -8,7 +8,7 @@ Macroscope CLI release artifacts plus the installer for Codex, Claude Code, Curs
 curl -sSL https://raw.githubusercontent.com/prassoai/macroscope-local/main/install.sh | bash
 ```
 
-The installer first displays every planned binary, PATH, integration, permission, and wizard action, then asks for confirmation. Initial interactive installs present all four host integrations as selected by default and launch setup after a successful install.
+The installer first displays every planned binary, PATH, integration, permission, and wizard action, then asks for confirmation. Initial interactive installs present all four host integrations as selected by default and launch setup after a successful install. Interactive updates show the current integration selection again; an older CLI-only install defaults that prompt to all integrations so it cannot be preserved accidentally.
 It stages and validates the new binary and plugin bundle before replacing install-owned state. Normal installs preserve `~/.macroscope`, saved credentials, unrelated host settings, and file modes.
 For a full local removal after the CLI is available, run `macroscope uninstall`.
 
@@ -20,6 +20,10 @@ curl -sSL https://raw.githubusercontent.com/prassoai/macroscope-local/main/insta
 ```
 
 `--host-permissions grant` separately opts into Macroscope/mktemp shell allow-rules and the Claude Code `PreToolUse` hook. `--yes` confirms the displayed plan but never implies that permission grant. PATH changes are skipped when `~/.local/bin` is already active and re-evaluated on future updates; otherwise only the login shell's preferred file is changed. Use `--shell-config PATH` for a managed dotfile or `--no-path` to make no shell edits; the installer remembers either explicit choice for future updates.
+
+Claude Code plugin files, settings, hooks, cleanup, and verification honor `CLAUDE_CONFIG_DIR` when it is set; otherwise they use the standard `~/.claude` location. When the `claude` executable is available, installation also checks `claude plugin list --json` and `claude plugin details` so an enabled-but-undiscoverable plugin is reported instead of passing filesystem-only verification.
+
+OpenCode plugin files, commands, skills, permissions, cleanup, and rollback prefer `OPENCODE_CONFIG_DIR`, then `$XDG_CONFIG_HOME/opencode`, and otherwise use `~/.config/opencode`. Codex already follows `CODEX_HOME`; Cursor uses its documented `~/.cursor` global locations.
 
 If your `codex` CLI is too old to load local plugins, the installer will place a small wrapper in `~/.local/bin/codex` that forwards to the newer Codex.app bundled binary.
 
