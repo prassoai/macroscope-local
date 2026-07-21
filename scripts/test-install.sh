@@ -41,6 +41,8 @@ run_install() {
     MACROSCOPE_LOCAL_BINARY_SOURCE="${TEST_BINARY:-$TEST_BINARY_DEFAULT}" \
     MACROSCOPE_PLUGIN_BUNDLE_SOURCE="${TEST_PLUGIN_BUNDLE:-$REPO_ROOT}" \
     MACROSCOPE_CODEX_BUNDLED_BINARY="${TEST_CODEX_BUNDLED_BINARY:-}" \
+    MACROSCOPE_CODEX_APP_BINARY="${TEST_CODEX_APP_BINARY:-$TEST_SUITE_ROOT/missing-codex-app}" \
+    MACROSCOPE_CHATGPT_APP_BINARY="${TEST_CHATGPT_APP_BINARY:-$TEST_SUITE_ROOT/missing-chatgpt-app}" \
     MACROSCOPE_TEST_NONINTERACTIVE=1 \
     bash "$INSTALLER" "$@"
 }
@@ -49,7 +51,7 @@ run_interactive_install() {
   local output="$1"
   local expected_status="$2"
   shift 2
-  python3 - "$INSTALLER" "$TEST_HOME" "$TEST_BINARY_DEFAULT" "$REPO_ROOT" "$output" "$expected_status" "$@" <<'PY'
+  python3 - "$INSTALLER" "$TEST_HOME" "${TEST_BINARY:-$TEST_BINARY_DEFAULT}" "$REPO_ROOT" "$output" "$expected_status" "$@" <<'PY'
 import errno
 import os
 import pty
@@ -79,6 +81,9 @@ env.update({
     "PATH": "/usr/bin:/bin",
     "MACROSCOPE_LOCAL_BINARY_SOURCE": binary,
     "MACROSCOPE_PLUGIN_BUNDLE_SOURCE": bundle,
+    "MACROSCOPE_CODEX_BUNDLED_BINARY": os.environ.get("TEST_CODEX_BUNDLED_BINARY", ""),
+    "MACROSCOPE_CODEX_APP_BINARY": os.environ.get("TEST_CODEX_APP_BINARY") or "/nonexistent/test-codex-app",
+    "MACROSCOPE_CHATGPT_APP_BINARY": os.environ.get("TEST_CHATGPT_APP_BINARY") or "/nonexistent/test-chatgpt-app",
 })
 for name in (
     "MACROSCOPE_TEST_NONINTERACTIVE",
@@ -208,6 +213,19 @@ test_codex_wrapper_is_announced_in_plan() {
   TEST_CODEX_BUNDLED_BINARY="$bundled_codex" run_install --yes --tools codex --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/out"
   "$TEST_HOME/.local/bin/codex" --help | grep -Fq 'app-server' || fail "Codex wrapper did not preserve a quoted binary path"
   pass "Codex wrapper is announced and safely quoted"
+}
+
+test_codex_desktop_binary_is_found_in_chatgpt_app() {
+  new_home
+  local bundled_codex="$TEST_ROOT/chatgpt-codex"
+  printf '#!/bin/sh\n[ "${1:-}" != "--help" ] || printf "app-server\\n"\n' > "$bundled_codex"
+  chmod +x "$bundled_codex"
+  TEST_CODEX_APP_BINARY="$TEST_ROOT/missing-codex-app" \
+    TEST_CHATGPT_APP_BINARY="$bundled_codex" \
+    run_install --yes --tools codex --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/out"
+  grep -Fq "exec $bundled_codex" "$TEST_HOME/.local/bin/codex" || fail "Codex wrapper did not use the ChatGPT.app fallback binary"
+  ! grep -Fq 'does not support local plugins' "$TEST_ROOT/out" || fail "ChatGPT.app fallback still emitted a plugin-host warning"
+  pass "Codex desktop binary is discovered in ChatGPT.app"
 }
 
 test_option_terminator_allows_dash_prefixed_version() {
@@ -937,6 +955,46 @@ test_wizard_lifecycle_plan() {
   pass "wizard defaults to initial-only"
 }
 
+test_completion_prints_after_successful_wizard() {
+  new_home
+  local wizard_binary="$TEST_ROOT/successful-wizard"
+  cat > "$wizard_binary" <<'SH'
+#!/bin/sh
+if [ "${1:-}" = "setup" ]; then
+  printf 'WIZARD_FINISHED\n'
+  exit 0
+fi
+printf 'test-version\n'
+SH
+  chmod +x "$wizard_binary"
+  TEST_BINARY="$wizard_binary" run_interactive_install "$TEST_ROOT/out" 0 \
+    --yes --tools none --host-permissions skip --no-path --wizard --events || fail "successful wizard install did not complete"
+  local wizard_line="" completion_line=""
+  wizard_line="$(grep -n 'WIZARD_FINISHED' "$TEST_ROOT/out" | head -1 | cut -d: -f1)"
+  completion_line="$(grep -n 'Installation Complete!' "$TEST_ROOT/out" | head -1 | cut -d: -f1)"
+  [ -n "$wizard_line" ] && [ -n "$completion_line" ] && [ "$wizard_line" -lt "$completion_line" ] || fail "completion printed before the wizard succeeded"
+  pass "completion prints only after the setup wizard succeeds"
+}
+
+test_failed_wizard_is_not_reported_as_success() {
+  new_home
+  local wizard_binary="$TEST_ROOT/failing-wizard"
+  cat > "$wizard_binary" <<'SH'
+#!/bin/sh
+if [ "${1:-}" = "setup" ]; then
+  exit 42
+fi
+printf 'test-version\n'
+SH
+  chmod +x "$wizard_binary"
+  TEST_BINARY="$wizard_binary" run_interactive_install "$TEST_ROOT/out" 42 \
+    --yes --tools none --host-permissions skip --no-path --wizard --events || fail "wizard failure status was not propagated"
+  grep -Fq "Setup did not complete. The CLI is installed; rerun setup with: macroscope setup" "$TEST_ROOT/out" || fail "wizard failure recovery was not explained"
+  ! grep -Fq 'Installation Complete!' "$TEST_ROOT/out" || fail "failed wizard was reported as a completed installation"
+  [ -x "$TEST_HOME/.local/bin/macroscope" ] || fail "wizard failure removed the usable CLI"
+  pass "failed setup is recoverable and is not reported as installation success"
+}
+
 test_completion_keeps_setup_and_verification_in_quick_start() {
   new_home
   run_install --yes --tools none --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/out"
@@ -952,6 +1010,7 @@ test_empty_version_binary_is_rejected_before_apply
 test_selected_tool_assets_are_validated_before_apply
 test_existing_install_directory_mode_is_preserved
 test_codex_wrapper_is_announced_in_plan
+test_codex_desktop_binary_is_found_in_chatgpt_app
 test_option_terminator_allows_dash_prefixed_version
 test_invalid_state_falls_back_to_detected_tools
 test_repair_cleans_claude_local_settings
@@ -991,6 +1050,8 @@ test_update_plan_omits_negative_actions
 test_plan_groups_selected_integration_installs
 test_plan_uses_natural_lifecycle_labels
 test_wizard_lifecycle_plan
+test_completion_prints_after_successful_wizard
+test_failed_wizard_is_not_reported_as_success
 test_completion_keeps_setup_and_verification_in_quick_start
 
 echo "All $PASS installer tests passed."

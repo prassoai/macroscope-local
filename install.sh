@@ -61,7 +61,7 @@ CODEX_SHIM_INSTALLED=0
 CODEX_PLUGIN_HOST_WARNING=""
 
 CODEX_LOCAL_PLUGIN_VERSION="local"
-CODEX_BUNDLED_BINARY="${MACROSCOPE_CODEX_BUNDLED_BINARY:-/Applications/Codex.app/Contents/Resources/codex}"
+CODEX_BUNDLED_BINARY=""
 CODEX_SHIM_PATH=""
 
 DRY_RUN=0
@@ -742,6 +742,26 @@ codex_supports_plugins() {
   local codex_bin="$1"
   [ -x "$codex_bin" ] || return 1
   "$codex_bin" --help 2>/dev/null | grep -q "app-server"
+}
+
+resolve_codex_bundled_binary() {
+  if [ -n "${MACROSCOPE_CODEX_BUNDLED_BINARY:-}" ]; then
+    CODEX_BUNDLED_BINARY="$MACROSCOPE_CODEX_BUNDLED_BINARY"
+    return
+  fi
+
+  local candidate=""
+  local candidates=(
+    "${MACROSCOPE_CODEX_APP_BINARY:-/Applications/Codex.app/Contents/Resources/codex}"
+    "${MACROSCOPE_CHATGPT_APP_BINARY:-/Applications/ChatGPT.app/Contents/Resources/codex}"
+  )
+  CODEX_BUNDLED_BINARY="${candidates[0]}"
+  for candidate in "${candidates[@]}"; do
+    if codex_supports_plugins "$candidate"; then
+      CODEX_BUNDLED_BINARY="$candidate"
+      return
+    fi
+  done
 }
 
 codex_shim_will_install() {
@@ -1712,16 +1732,16 @@ install_codex_cli_shim() {
   current_codex="$(command -v codex || true)"
 
   if [ -n "$current_codex" ] && [ "$current_codex" = "$CODEX_BUNDLED_BINARY" ] && codex_supports_plugins "$current_codex"; then
-    success "Codex CLI already uses the bundled Codex.app binary: ${BOLD}${current_codex}${RESET}"
+    success "Codex CLI already uses the bundled Codex desktop binary: ${BOLD}${current_codex}${RESET}"
     return
   fi
 
   if [ ! -x "$CODEX_BUNDLED_BINARY" ] || ! codex_supports_plugins "$CODEX_BUNDLED_BINARY"; then
     if [ -n "$current_codex" ]; then
-      CODEX_PLUGIN_HOST_WARNING="Codex CLI at ${current_codex} does not support local plugins. Install or update Codex.app to use /macroscope:codereview from the CLI."
+      CODEX_PLUGIN_HOST_WARNING="Codex CLI at ${current_codex} does not support local plugins. Install or update the Codex desktop app to use /macroscope:codereview from the CLI."
       warn "$CODEX_PLUGIN_HOST_WARNING"
     else
-      CODEX_PLUGIN_HOST_WARNING="Codex CLI is not installed. Install Codex.app to use /macroscope:codereview from the CLI."
+      CODEX_PLUGIN_HOST_WARNING="Codex CLI is not installed. Install the Codex desktop app to use /macroscope:codereview from the CLI."
       warn "$CODEX_PLUGIN_HOST_WARNING"
     fi
     return
@@ -1749,10 +1769,10 @@ EOF
 
   if [ -n "$current_codex" ] && [ "$current_codex" != "$shim_path" ]; then
     success "Installed Codex CLI shim at ${BOLD}${shim_path}${RESET}"
-    info "${BOLD}codex${RESET} will now use the bundled Codex.app binary instead of ${current_codex}."
+    info "${BOLD}codex${RESET} will now use the bundled Codex desktop binary instead of ${current_codex}."
   else
     success "Installed Codex CLI shim at ${BOLD}${shim_path}${RESET}"
-    info "${BOLD}codex${RESET} is now available via the bundled Codex.app binary."
+    info "${BOLD}codex${RESET} is now available via the bundled Codex desktop binary."
   fi
 }
 
@@ -2825,7 +2845,7 @@ print_installation_completion() {
   printf "  /macroscope:autoloop runs the full review-fix-push-re-review autopilot cycle.\n"
   printf "  Claude Code launches reviews in a background worker.\n"
   if [ "$CODEX_SHIM_INSTALLED" = "1" ]; then
-    printf "  ${BOLD}codex${RESET} now points at the bundled Codex.app CLI so plugins work from the terminal.\n"
+    printf "  ${BOLD}codex${RESET} now points at the bundled Codex desktop CLI so plugins work from the terminal.\n"
   elif [ -n "$CODEX_PLUGIN_HOST_WARNING" ]; then
     printf "  ${YELLOW}%s${RESET}\n" "$CODEX_PLUGIN_HOST_WARNING"
   fi
@@ -2852,8 +2872,8 @@ launch_wizard() {
   fi
 
   if [ -z "$bin_path" ]; then
-    warn "Could not find installed macroscope binary; skipping wizard launch."
-    return
+    error "Could not find the installed macroscope binary. Run 'macroscope setup' after repairing the installation."
+    return 1
   fi
 
   echo ""
@@ -2878,8 +2898,11 @@ launch_wizard() {
     stty -echo < /dev/tty 2>/dev/null
   fi
 
-  if ! "$bin_path" setup < /dev/tty > /dev/tty 2>&1; then
-    warn "Wizard exited with a non-zero status. You can rerun it anytime with: macroscope setup"
+  local wizard_status=0
+  if "$bin_path" setup < /dev/tty > /dev/tty 2>&1; then
+    wizard_status=0
+  else
+    wizard_status=$?
   fi
 
   # Drain any remaining escape responses from the input buffer, then
@@ -2890,6 +2913,11 @@ launch_wizard() {
     dd bs=1024 count=1 < /dev/tty >/dev/null 2>&1 || true
     stty "$_old_tty" < /dev/tty 2>/dev/null
     SAVED_TTY_STATE=""
+  fi
+
+  if [ "$wizard_status" -ne 0 ]; then
+    error "Setup did not complete. The CLI is installed; rerun setup with: macroscope setup"
+    return "$wizard_status"
   fi
 }
 
@@ -2920,6 +2948,7 @@ main() {
   fi
 
   detect_platform
+  resolve_codex_bundled_binary
   load_install_state
   resolve_lifecycle
   select_tools
@@ -2980,8 +3009,8 @@ main() {
   write_install_state
   APPLY_COMPLETE=1
   verify_install
-  print_installation_completion
   launch_wizard
+  print_installation_completion
   if [ "$OUTPUT_FORMAT" = "json" ]; then
     printf '{"success":true,"dryRun":false,"mode":"%s","tools":"%s"}\n' "$INSTALL_MODE" "$SELECTED_TOOLS" >&3
   fi
