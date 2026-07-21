@@ -12,11 +12,7 @@ Using the Macroscope CLI requires an active Macroscope account.
 curl -sSL https://raw.githubusercontent.com/prassoai/macroscope-local/main/install.sh | bash
 ```
 
-The installer previews every planned change — binaries, PATH edits, editor integrations, and permissions — and asks for confirmation before writing anything. It downloads over HTTPS only, verifies each downloaded artifact against the SHA-256 checksum GitHub reports for that release asset before installing it, and stages and validates the new binary and plugin bundle before replacing existing state. It preserves `~/.macroscope`, saved credentials, unrelated editor settings, and file modes.
-
-A checksum **mismatch always aborts the install**, as does a failure to fetch the release metadata needed to verify (a network or server error is never treated as "no checksum"). If GitHub genuinely reports no checksum for an asset, the installer warns loudly and continues; set `MACROSCOPE_REQUIRE_CHECKSUM=1` to instead fail closed and refuse any download without a verified checksum.
-
-This checksum verification protects against transport corruption and man-in-the-middle tampering of the download. It is **not** a defense against a compromised release or GitHub account — an attacker with release-write access controls both the artifact bytes and the checksum GitHub reports for them. Defending against that requires an independent signature (e.g. cosign/Sigstore) and is intentionally out of scope for this check.
+The installer previews every planned change — binaries, PATH edits, editor integrations, and permissions — and asks for confirmation before writing anything. It stages and validates the new binary and plugin bundle before replacing existing state, and preserves `~/.macroscope`, saved credentials, unrelated editor settings, and file modes.
 
 Interactive installs propose command auto-approval by default; choose **Install without command auto-approval** at the final confirmation to decline.
 
