@@ -300,36 +300,149 @@ has_interactive_tty() {
   ( test -t 0 < /dev/tty ) 2>/dev/null
 }
 
-read_tty() {
-  local prompt="$1"
-  local answer=""
-  printf '%s' "$prompt" > /dev/tty
-  IFS= read -r answer < /dev/tty || true
-  printf '%s' "$answer"
+TUI_RESULT=""
+TUI_KEY=""
+
+tui_start() {
+  SAVED_TTY_STATE="$(stty -g < /dev/tty 2>/dev/null)" || return 1
+  stty -echo -icanon min 1 time 0 < /dev/tty
+  printf '\033[?25l' > /dev/tty
+}
+
+tui_stop() {
+  printf '\033[?25h' > /dev/tty
+  if [ -n "$SAVED_TTY_STATE" ]; then
+    stty "$SAVED_TTY_STATE" < /dev/tty 2>/dev/null || true
+    SAVED_TTY_STATE=""
+  fi
+}
+
+tui_read_key() {
+  local key=""
+  local prefix=""
+  local direction=""
+
+  TUI_KEY=""
+  IFS= read -r -n 1 key < /dev/tty || return 1
+  if [ "$key" = $'\033' ]; then
+    stty min 0 time 1 < /dev/tty
+    prefix="$(dd bs=1 count=1 < /dev/tty 2>/dev/null)"
+    case "$prefix" in
+      '['|'O')
+        direction="$(dd bs=1 count=1 < /dev/tty 2>/dev/null)"
+        case "$direction" in
+          A) TUI_KEY="up" ;;
+          B) TUI_KEY="down" ;;
+        esac
+        ;;
+    esac
+    stty min 1 time 0 < /dev/tty
+    return 0
+  fi
+
+  case "$key" in
+    '') TUI_KEY="enter" ;;
+    ' ') TUI_KEY="space" ;;
+    *) TUI_KEY="$key" ;;
+  esac
+}
+
+prompt_yes_no() {
+  local question="$1"
+  local default_answer="$2"
+  local selected=0
+  local first_render=1
+  local index=0
+  local labels=("Yes" "No")
+
+  [ "$default_answer" = "no" ] && selected=1
+  tui_start
+  printf '\n%s%s%s\n' "$BOLD" "$question" "$RESET" > /dev/tty
+  printf '  Up/down or j/k to move; enter to choose.\n' > /dev/tty
+
+  while true; do
+    if [ "$first_render" -eq 0 ]; then
+      printf '\033[2A' > /dev/tty
+    fi
+    first_render=0
+    for index in 0 1; do
+      printf '\r\033[2K' > /dev/tty
+      if [ "$index" -eq "$selected" ]; then
+        printf '%s%s>%s %s\n' "$CYAN" "$BOLD" "$RESET" "${labels[$index]}" > /dev/tty
+      else
+        printf '  %s\n' "${labels[$index]}" > /dev/tty
+      fi
+    done
+
+    if ! tui_read_key; then
+      tui_stop
+      return 1
+    fi
+    case "$TUI_KEY" in
+      up|k|K|down|j|J) selected=$((1 - selected)) ;;
+      y|Y) selected=0; break ;;
+      n|N) selected=1; break ;;
+      enter) break ;;
+    esac
+  done
+
+  tui_stop
+  if [ "$selected" -eq 0 ]; then TUI_RESULT="yes"; else TUI_RESULT="no"; fi
 }
 
 prompt_tools() {
   local default_tools="$1"
-  local default_label="${default_tools:-none}"
-  local tool=""
-  local label=""
+  local tools=(claude codex cursor opencode)
+  local labels=("Claude Code" "Codex" "Cursor" "OpenCode")
+  local checked=(0 0 0 0)
+  local selected=0
+  local first_render=1
+  local index=0
+  local result=""
 
-  [ "$default_tools" != "claude,codex,cursor,opencode" ] || default_label="all"
-
-  printf '\n%sIntegrations:%s\n' "$BOLD" "$RESET" > /dev/tty
-  for tool in claude codex cursor opencode; do
-    case "$tool" in
-      claude) label="Claude Code" ;;
-      codex) label="Codex" ;;
-      cursor) label="Cursor" ;;
-      opencode) label="OpenCode" ;;
-    esac
+  for index in 0 1 2 3; do
     case ",$default_tools," in
-      *",$tool,"*) printf '  [x] %s\n' "$label" > /dev/tty ;;
-      *) printf '  [ ] %s\n' "$label" > /dev/tty ;;
+      *",${tools[$index]},"*) checked[$index]=1 ;;
     esac
   done
-  read_tty "Install tools (comma-separated, all, or none) [$default_label]: "
+
+  tui_start
+  printf '\n%sIntegrations%s\n' "$BOLD" "$RESET" > /dev/tty
+  printf '  Up/down or j/k to move; space to toggle; enter to continue.\n' > /dev/tty
+
+  while true; do
+    if [ "$first_render" -eq 0 ]; then
+      printf '\033[4A' > /dev/tty
+    fi
+    first_render=0
+    for index in 0 1 2 3; do
+      printf '\r\033[2K' > /dev/tty
+      if [ "$index" -eq "$selected" ]; then
+        printf '%s%s>%s [%s] %s\n' "$CYAN" "$BOLD" "$RESET" "$([ "${checked[$index]}" -eq 1 ] && printf x || printf ' ')" "${labels[$index]}" > /dev/tty
+      else
+        printf '  [%s] %s\n' "$([ "${checked[$index]}" -eq 1 ] && printf x || printf ' ')" "${labels[$index]}" > /dev/tty
+      fi
+    done
+
+    if ! tui_read_key; then
+      tui_stop
+      return 1
+    fi
+    case "$TUI_KEY" in
+      up|k|K) selected=$(((selected + 3) % 4)) ;;
+      down|j|J) selected=$(((selected + 1) % 4)) ;;
+      space) checked[$selected]=$((1 - checked[$selected])) ;;
+      enter) break ;;
+    esac
+  done
+
+  tui_stop
+  for index in 0 1 2 3; do
+    if [ "${checked[$index]}" -eq 1 ]; then
+      result="${result:+$result,}${tools[$index]}"
+    fi
+  done
+  TUI_RESULT="${result:-none}"
 }
 
 select_tools() {
@@ -353,13 +466,15 @@ select_tools() {
       else
         printf '\n%sCurrent integrations are selected below.%s\n' "$BOLD" "$RESET" > /dev/tty
       fi
-      TOOLS_SPEC="$(prompt_tools "$prompt_default")"
+      prompt_tools "$prompt_default"
+      TOOLS_SPEC="$TUI_RESULT"
     fi
     normalized="$(normalize_tools "${TOOLS_SPEC:-${prompt_default:-none}}")"
   else
     default_tools="claude,codex,cursor,opencode"
     if has_interactive_tty && [ "$ASSUME_YES" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
-      TOOLS_SPEC="$(prompt_tools "$default_tools")"
+      prompt_tools "$default_tools"
+      TOOLS_SPEC="$TUI_RESULT"
     fi
     normalized="$(normalize_tools "${TOOLS_SPEC:-$default_tools}")"
   fi
@@ -385,11 +500,10 @@ resolve_host_permissions() {
     HOST_PERMISSIONS="skip"
     return
   fi
-  local answer=""
   printf '\n%sOptional host permission automation%s\n' "$BOLD" "$RESET" > /dev/tty
   printf 'This adds Macroscope/mktemp shell allow-rules. Claude Code also receives a PreToolUse hook.\n' > /dev/tty
-  answer="$(read_tty 'Grant these permissions? [y/N]: ')"
-  case "$(printf '%s' "$answer" | tr '[:upper:]' '[:lower:]')" in y|yes) HOST_PERMISSIONS="grant" ;; *) HOST_PERMISSIONS="skip" ;; esac
+  prompt_yes_no "Grant these permissions?" "no"
+  if [ "$TUI_RESULT" = "yes" ]; then HOST_PERMISSIONS="grant"; else HOST_PERMISSIONS="skip"; fi
 }
 
 active_path_contains_install_dir() {
@@ -468,8 +582,10 @@ resolve_lifecycle() {
 print_plan() {
   local index=1
   local verb="Install"
+  local plan_label="installation"
   [ "$INSTALL_MODE" = "update" ] && verb="Replace"
-  printf '\n%sMacroscope %s will:%s\n' "$BOLD" "$INSTALL_MODE" "$RESET"
+  [ "$INSTALL_MODE" = "update" ] && plan_label="update"
+  printf '\n%sMacroscope %s will:%s\n' "$BOLD" "$plan_label" "$RESET"
   printf '%d. %s %s/.local/bin/macroscope\n' "$index" "$verb" "$HOME"; index=$((index + 1))
   if [ "$PATH_ACTION" = "modify" ]; then
     printf '%d. Add %s/.local/bin to PATH in %s\n' "$index" "$HOME" "$PATH_TARGET"
@@ -535,11 +651,15 @@ confirm_plan() {
     error "A terminal is required for confirmation. Re-run with --yes after reviewing --dry-run."
     return 3
   fi
-  local prompt='Proceed? [Y/n]: '
-  [ "$INSTALL_MODE" = "update" ] && prompt='Update and continue? [Y/n]: '
-  [ "$RESUME_COMMAND" -eq 1 ] && prompt='Update and run the review? [Y/n]: '
-  local answer="$(read_tty "$prompt")"
-  case "$(printf '%s' "$answer" | tr '[:upper:]' '[:lower:]')" in n|no) info "Cancelled before making changes."; return 3 ;; *) return 0 ;; esac
+  local prompt='Proceed?'
+  [ "$INSTALL_MODE" = "update" ] && prompt='Update and continue?'
+  [ "$RESUME_COMMAND" -eq 1 ] && prompt='Update and run the review?'
+  prompt_yes_no "$prompt" "yes"
+  if [ "$TUI_RESULT" = "no" ]; then
+    info "Cancelled before making changes."
+    return 3
+  fi
+  return 0
 }
 
 repair_only_requested() {
@@ -2421,6 +2541,7 @@ rollback_install() {
 handle_exit() {
   local status="$1"
   if [ -n "$SAVED_TTY_STATE" ]; then
+    printf '\033[?25h' > /dev/tty 2>/dev/null || true
     stty "$SAVED_TTY_STATE" < /dev/tty 2>/dev/null || true
     SAVED_TTY_STATE=""
   fi
@@ -2742,6 +2863,7 @@ launch_wizard() {
 }
 
 main() {
+  trap 'handle_exit $?' EXIT
   parse_options "$@"
   if [ "$OUTPUT_FORMAT" = "json" ]; then
     exec 3>&1

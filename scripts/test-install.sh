@@ -45,6 +45,108 @@ run_install() {
     bash "$INSTALLER" "$@"
 }
 
+run_interactive_install() {
+  local output="$1"
+  local expected_status="$2"
+  shift 2
+  python3 - "$INSTALLER" "$TEST_HOME" "$TEST_BINARY_DEFAULT" "$REPO_ROOT" "$output" "$expected_status" "$@" <<'PY'
+import errno
+import os
+import pty
+import select
+import signal
+import sys
+import termios
+import time
+
+installer, home, binary, bundle, output, expected_status, *args = sys.argv[1:]
+try:
+    event_separator = args.index("--events")
+except ValueError:
+    raise SystemExit("missing --events separator")
+installer_args = args[:event_separator]
+events = []
+for event in args[event_separator + 1:]:
+    if "=" not in event:
+        raise SystemExit(f"invalid PTY event: {event!r}")
+    prompt, keys = event.split("=", 1)
+    events.append((prompt.encode(), keys.encode()))
+
+env = os.environ.copy()
+env.update({
+    "HOME": home,
+    "SHELL": "/bin/zsh",
+    "PATH": "/usr/bin:/bin",
+    "MACROSCOPE_LOCAL_BINARY_SOURCE": binary,
+    "MACROSCOPE_PLUGIN_BUNDLE_SOURCE": bundle,
+})
+for name in (
+    "MACROSCOPE_TEST_NONINTERACTIVE",
+    "CLAUDE_CONFIG_DIR",
+    "OPENCODE_CONFIG_DIR",
+    "XDG_CONFIG_HOME",
+):
+    env.pop(name, None)
+
+pid, fd = pty.fork()
+if pid == 0:
+    os.execve("/bin/bash", ["bash", installer, *installer_args], env)
+
+initial_tty = termios.tcgetattr(fd)
+captured = bytearray()
+next_event = 0
+deadline = time.monotonic() + 30
+status = None
+try:
+    while time.monotonic() < deadline:
+        ready, _, _ = select.select([fd], [], [], 0.2)
+        if ready:
+            try:
+                chunk = os.read(fd, 4096)
+            except OSError as exc:
+                if exc.errno != errno.EIO:
+                    raise
+                _, status = os.waitpid(pid, 0)
+                break
+            if not chunk:
+                _, status = os.waitpid(pid, 0)
+                break
+            captured.extend(chunk)
+            while next_event < len(events) and events[next_event][0] in captured:
+                os.write(fd, events[next_event][1])
+                next_event += 1
+        done, child_status = os.waitpid(pid, os.WNOHANG)
+        if done:
+            status = child_status
+            break
+    if status is None:
+        os.kill(pid, signal.SIGTERM)
+        _, status = os.waitpid(pid, 0)
+finally:
+    final_tty = termios.tcgetattr(fd)
+    os.close(fd)
+    with open(output, "wb") as f:
+        f.write(captured)
+
+actual_status = os.WEXITSTATUS(status) if os.WIFEXITED(status) else None
+interrupted = (
+    (os.WIFSIGNALED(status) and os.WTERMSIG(status) == signal.SIGINT)
+    or actual_status == 128 + signal.SIGINT
+)
+expected_exit = interrupted if expected_status == "interrupt" else actual_status == int(expected_status)
+tty_mask = termios.ECHO | termios.ICANON
+tty_restored = initial_tty[3] & tty_mask == final_tty[3] & tty_mask
+if next_event != len(events) or not expected_exit or not tty_restored:
+    sys.stderr.buffer.write(captured)
+    print(
+        f"PTY events {next_event}/{len(events)}, exit {actual_status}, "
+        f"expected {expected_status}, tty restored: {tty_restored}",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+PY
+}
+
 tree_digest() {
   find "$1" -mindepth 1 -print | LC_ALL=C sort | shasum | awk '{print $1}'
 }
@@ -705,83 +807,83 @@ test_opencode_config_dirs_are_honored() {
 test_interactive_update_repairs_empty_tool_selection() {
   new_home
   run_install --yes --tools none --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/initial"
-  python3 - "$INSTALLER" "$TEST_HOME" "$TEST_BINARY_DEFAULT" "$REPO_ROOT" "$TEST_ROOT/update" <<'PY' || fail "interactive update did not complete"
-import errno
-import os
-import pty
-import select
-import signal
-import sys
-import time
-
-installer, home, binary, bundle, output = sys.argv[1:6]
-env = os.environ.copy()
-env.update({
-    "HOME": home,
-    "SHELL": "/bin/zsh",
-    "PATH": "/usr/bin:/bin",
-    "MACROSCOPE_LOCAL_BINARY_SOURCE": binary,
-    "MACROSCOPE_PLUGIN_BUNDLE_SOURCE": bundle,
-})
-env.pop("MACROSCOPE_TEST_NONINTERACTIVE", None)
-env.pop("CLAUDE_CONFIG_DIR", None)
-env.pop("OPENCODE_CONFIG_DIR", None)
-env.pop("XDG_CONFIG_HOME", None)
-
-pid, fd = pty.fork()
-if pid == 0:
-    os.execve("/bin/bash", ["bash", installer, "--no-path", "--no-wizard"], env)
-
-captured = bytearray()
-sent_tools = False
-sent_confirm = False
-deadline = time.monotonic() + 30
-status = None
-try:
-    while time.monotonic() < deadline:
-        ready, _, _ = select.select([fd], [], [], 0.2)
-        if ready:
-            try:
-                chunk = os.read(fd, 4096)
-            except OSError as exc:
-                if exc.errno == errno.EIO:
-                    break
-                raise
-            if not chunk:
-                break
-            captured.extend(chunk)
-            if not sent_tools and b"Install tools (comma-separated" in captured:
-                os.write(fd, b"\n")
-                sent_tools = True
-            if sent_tools and not sent_confirm and b"Update and continue?" in captured:
-                os.write(fd, b"y\n")
-                sent_confirm = True
-        done, child_status = os.waitpid(pid, os.WNOHANG)
-        if done:
-            status = child_status
-            break
-    if status is None:
-        done, child_status = os.waitpid(pid, os.WNOHANG)
-        if done:
-            status = child_status
-        else:
-            os.kill(pid, signal.SIGTERM)
-            _, status = os.waitpid(pid, 0)
-finally:
-    os.close(fd)
-    with open(output, "wb") as f:
-        f.write(captured)
-
-if not sent_tools or not sent_confirm or not os.WIFEXITED(status) or os.WEXITSTATUS(status) != 0:
-    raise SystemExit(1)
-PY
+  run_interactive_install "$TEST_ROOT/update" 0 \
+    --no-path --no-wizard --events \
+    "space to toggle="$'\n' \
+    "Update and continue?="$'\n' || fail "interactive update did not complete"
   grep -Fq 'No Macroscope host integrations are currently selected.' "$TEST_ROOT/update" || fail "empty-selection warning was not shown"
+  grep -Fq 'Up/down or j/k to move; space to toggle; enter to continue.' "$TEST_ROOT/update" || fail "integration multiselect instructions were not shown"
+  ! grep -Fq 'comma-separated' "$TEST_ROOT/update" || fail "interactive update still requested free-text integrations"
   python3 - "$TEST_HOME/.local/state/macroscope/install.json" <<'PY' || fail "interactive update preserved an empty tool selection"
 import json, sys
 with open(sys.argv[1], encoding="utf-8") as f: data = json.load(f)
 assert data["tools"] == ["claude", "codex", "cursor", "opencode"]
 PY
   pass "interactive updates reselect integrations instead of preserving a CLI-only trap"
+}
+
+test_interactive_lists_select_only_claude_and_permissions() {
+  new_home
+  run_interactive_install "$TEST_ROOT/install" 0 \
+    --no-path --no-wizard --events \
+    "space to toggle="$'\e[B \e[B \e[B \n' \
+    "Grant these permissions?="$'\e[A\n' \
+    "Proceed?="$'\n' || fail "interactive list selections did not complete"
+  python3 - "$TEST_HOME/.local/state/macroscope/install.json" <<'PY' || fail "interactive choices were not persisted"
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as f: data = json.load(f)
+assert data["tools"] == ["claude"]
+assert data["hostPermissions"] == "grant"
+PY
+  [ -d "$TEST_HOME/.claude/plugins/cache/macroscope-local" ] || fail "selected Claude integration was not installed"
+  grep -Fq 'Bash(macroscope *)' "$TEST_HOME/.claude/settings.json" || fail "selected permission grant was not installed"
+  [ -x "$TEST_HOME/.claude/hooks/macroscope-bash-autoallow.sh" ] || fail "selected Claude permission hook was not installed"
+  [ ! -e "$TEST_HOME/plugins/macroscope" ] || fail "deselected Codex integration was installed"
+  [ ! -e "$TEST_HOME/.cursor/plugins/local/macroscope" ] || fail "deselected Cursor integration was installed"
+  [ ! -e "$TEST_HOME/.config/opencode/plugins/macroscope.js" ] || fail "deselected OpenCode integration was installed"
+  pass "interactive lists select only Claude and grant host permissions with arrow keys"
+}
+
+test_interactive_confirmation_list_can_cancel() {
+  new_home
+  run_interactive_install "$TEST_ROOT/cancel" 3 \
+    --tools none --host-permissions skip --no-path --no-wizard --events \
+    "Proceed?="$'\e[B\n' || fail "interactive confirmation did not cancel"
+  grep -Fq 'Up/down or j/k to move; enter to choose.' "$TEST_ROOT/cancel" || fail "confirmation list instructions were not shown"
+  grep -Fq 'Cancelled before making changes.' "$TEST_ROOT/cancel" || fail "confirmation cancellation was not reported"
+  [ ! -e "$TEST_HOME/.local/bin/macroscope" ] || fail "cancelled confirmation changed the install"
+  pass "interactive confirmation uses a cancellable yes/no list"
+}
+
+test_interactive_interrupt_restores_terminal() {
+  new_home
+  run_interactive_install "$TEST_ROOT/interrupt" interrupt \
+    --no-path --no-wizard --events \
+    "space to toggle="$'\003' || fail "interactive interrupt did not exit cleanly"
+  grep -Fq $'\033[?25h' "$TEST_ROOT/interrupt" || fail "interactive interrupt did not restore the cursor"
+  [ ! -e "$TEST_HOME/.local/bin/macroscope" ] || fail "interrupted selection changed the install"
+  pass "interactive interrupt restores the terminal before exiting"
+}
+
+test_interactive_confirmation_interrupt_restores_terminal() {
+  new_home
+  run_interactive_install "$TEST_ROOT/confirm-interrupt" interrupt \
+    --tools none --host-permissions skip --no-path --no-wizard --events \
+    "Proceed?"=$'\003' || fail "confirmation interrupt did not restore the terminal"
+  grep -Fq $'\033[?25h' "$TEST_ROOT/confirm-interrupt" || fail "confirmation interrupt did not restore the cursor"
+  [ ! -e "$TEST_HOME/.local/bin/macroscope" ] || fail "confirmation interrupt changed the install"
+  pass "confirmation interrupt restores the terminal before exiting"
+}
+
+test_interactive_escape_does_not_block() {
+  new_home
+  run_interactive_install "$TEST_ROOT/escape" 0 \
+    --no-path --no-wizard --events \
+    "space to toggle="$'\e' \
+    $'\e[4A'=$'\n' \
+    "Grant these permissions?"=$'\n' \
+    "Proceed?"=$'\n' || fail "standalone escape blocked the integration list"
+  pass "standalone escape leaves the integration list responsive"
 }
 
 test_update_plan_omits_negative_actions() {
@@ -799,6 +901,16 @@ test_update_plan_omits_negative_actions() {
   ! grep -Fq 'Do not launch the setup wizard' "$TEST_ROOT/out" || fail "update plan still lists skipped wizard launch"
   unset TEST_PATH
   pass "update plan lists only the three actions it performs"
+}
+
+test_plan_uses_natural_lifecycle_labels() {
+  new_home
+  run_install --mode initial --dry-run --tools none --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/initial"
+  grep -Fq 'Macroscope installation will:' "$TEST_ROOT/initial" || fail "initial plan uses an unnatural lifecycle label"
+  ! grep -Fq 'Macroscope initial will:' "$TEST_ROOT/initial" || fail "initial plan still prints the old lifecycle label"
+  run_install --mode update --dry-run --tools none --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/update"
+  grep -Fq 'Macroscope update will:' "$TEST_ROOT/update" || fail "update plan lifecycle label changed"
+  pass "plan uses natural lifecycle labels"
 }
 
 test_wizard_lifecycle_plan() {
@@ -847,7 +959,13 @@ test_claude_config_dir_is_honored
 test_claude_cli_verifies_plugin_discovery
 test_opencode_config_dirs_are_honored
 test_interactive_update_repairs_empty_tool_selection
+test_interactive_lists_select_only_claude_and_permissions
+test_interactive_confirmation_list_can_cancel
+test_interactive_interrupt_restores_terminal
+test_interactive_confirmation_interrupt_restores_terminal
+test_interactive_escape_does_not_block
 test_update_plan_omits_negative_actions
+test_plan_uses_natural_lifecycle_labels
 test_wizard_lifecycle_plan
 
 echo "All $PASS installer tests passed."
