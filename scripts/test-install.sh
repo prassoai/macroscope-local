@@ -725,6 +725,8 @@ env.update({
 })
 env.pop("MACROSCOPE_TEST_NONINTERACTIVE", None)
 env.pop("CLAUDE_CONFIG_DIR", None)
+env.pop("OPENCODE_CONFIG_DIR", None)
+env.pop("XDG_CONFIG_HOME", None)
 
 pid, fd = pty.fork()
 if pid == 0:
