@@ -417,6 +417,52 @@ prompt_yes_no() {
   if [ "$selected" -eq 0 ]; then TUI_RESULT="yes"; else TUI_RESULT="no"; fi
 }
 
+# prompt_menu renders a single-select vertical menu of the given labels and
+# sets TUI_RESULT to the zero-based index of the chosen entry. Mirrors
+# prompt_yes_no's rendering for an arbitrary number of options.
+prompt_menu() {
+  local question="$1"; shift
+  local labels=("$@")
+  local count="${#labels[@]}"
+  local selected=0
+  local first_render=1
+  local index=0
+
+  tui_start
+  printf '\n%s%s%s\n' "$BOLD" "$question" "$RESET" > /dev/tty
+  printf '  Up/down or j/k to move; enter to choose.\n' > /dev/tty
+
+  while true; do
+    if [ "$first_render" -eq 0 ]; then
+      printf '\033[%dA' "$count" > /dev/tty
+    fi
+    first_render=0
+    index=0
+    while [ "$index" -lt "$count" ]; do
+      printf '\r\033[2K' > /dev/tty
+      if [ "$index" -eq "$selected" ]; then
+        printf '%s%s>%s %s\n' "$CYAN" "$BOLD" "$RESET" "${labels[$index]}" > /dev/tty
+      else
+        printf '  %s\n' "${labels[$index]}" > /dev/tty
+      fi
+      index=$((index + 1))
+    done
+
+    if ! tui_read_key; then
+      tui_stop
+      return 1
+    fi
+    case "$TUI_KEY" in
+      up|k|K) selected=$(((selected + count - 1) % count)) ;;
+      down|j|J) selected=$(((selected + 1) % count)) ;;
+      enter) break ;;
+    esac
+  done
+
+  tui_stop
+  TUI_RESULT="$selected"
+}
+
 prompt_tools() {
   local default_tools="$1"
   local tools=(claude codex cursor opencode)
@@ -649,6 +695,7 @@ print_plan() {
     fi
   done
   if [ "$HOST_PERMISSIONS" = "grant" ]; then
+    printf '   %s⚠ Grants standing command auto-approval — lets these agents run Macroscope without asking each time:%s\n' "$YELLOW" "$RESET"
     if tool_selected claude; then
       printf '%d. Modify %s/settings.json: add Bash allow-rules and register the Macroscope PreToolUse hook\n' "$index" "$(get_claude_config_dir)"
       index=$((index + 1))
@@ -675,6 +722,39 @@ print_plan() {
   if [ "$WIZARD_MODE" = "yes" ]; then
     printf '%d. Launch the setup wizard\n' "$index"
   fi
+  if [ "$HOST_PERMISSIONS" = "grant" ] && [ "$ASSUME_YES" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
+    printf '\n%sTip:%s choose "Show exact changes" to inspect the config snippets first, or add %s--host-permissions skip%s to install without command auto-approval.\n' "$DIM" "$RESET" "$BOLD" "$RESET"
+  fi
+}
+
+# print_change_details shows the literal configuration snippets the installer
+# will merge, so the operator can verify the security-relevant permission
+# grants (command auto-approve rules + PreToolUse hook) before consenting.
+# Existing settings are preserved; only the keys shown below are added.
+print_change_details() {
+  local claude_config="$(get_claude_config_dir)"
+  local opencode_config="$(get_opencode_config_dir)"
+  {
+    printf '\n%sExact changes to be merged%s\n' "$BOLD" "$RESET"
+    printf '  %sExisting settings are preserved; only these entries are added.%s\n' "$DIM" "$RESET"
+    if tool_selected claude; then
+      printf '\n  %s/settings.json  → "permissions.allow" gains:\n' "$claude_config"
+      printf '      "Bash(macroscope *)", "Bash(macroscope:*)", "Bash(mktemp *)", "Bash(mktemp:*)"\n'
+      printf '    and a PreToolUse (Bash) hook is registered:\n'
+      printf '      %s/hooks/macroscope-bash-autoallow.sh\n' "$claude_config"
+      printf '      %sauto-approves a bare `macroscope` or `mktemp` command only; refuses anything\n' "$DIM"
+      printf '      with pipes, redirects, command substitution, or chaining.%s\n' "$RESET"
+    fi
+    if tool_selected cursor; then
+      printf '\n  %s/.cursor/cli-config.json  → "permissions.allow" gains:\n' "$HOME"
+      printf '      "Shell(macroscope)", "Shell(macroscope *)", "Shell(mktemp)", "Shell(mktemp *)"\n'
+    fi
+    if tool_selected opencode; then
+      printf '\n  %s/opencode.json  → "permission.bash" gains:\n' "$opencode_config"
+      printf '      "macroscope *": "allow", "macroscope": "allow", "mktemp *": "allow", "mktemp": "allow"\n'
+    fi
+    printf '\n  %sNothing else is auto-approved.%s\n' "$DIM" "$RESET"
+  } > /dev/tty
 }
 
 confirm_plan() {
@@ -687,6 +767,23 @@ confirm_plan() {
   local prompt='Proceed?'
   [ "$INSTALL_MODE" = "update" ] && prompt='Update and continue?'
   [ "$RESUME_COMMAND" -eq 1 ] && prompt='Update and run the review?'
+
+  # When the plan modifies security-relevant host permission config, offer an
+  # inline option to inspect the exact snippets before consenting.
+  if [ "$HOST_PERMISSIONS" = "grant" ] && [ -n "$SELECTED_TOOLS" ]; then
+    while true; do
+      if ! prompt_menu "$prompt" "Yes" "Show exact changes" "No"; then
+        info "Cancelled before making changes."
+        return 3
+      fi
+      case "$TUI_RESULT" in
+        0) return 0 ;;
+        1) print_change_details ;;
+        *) info "Cancelled before making changes."; return 3 ;;
+      esac
+    done
+  fi
+
   prompt_yes_no "$prompt" "yes"
   if [ "$TUI_RESULT" = "no" ]; then
     info "Cancelled before making changes."
