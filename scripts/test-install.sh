@@ -845,8 +845,12 @@ test_interactive_lists_select_only_claude_and_permissions() {
   run_interactive_install "$TEST_ROOT/install" 0 \
     --no-path --no-wizard --events \
     "space to toggle="$'\e[B \e[B \e[B \n' \
-    "Grant these permissions?="$'\e[A\n' \
+    "Allow your coding assistants to run Macroscope commands?="$'\e[A\n' \
     "Proceed?="$'\n' || fail "interactive list selections did not complete"
+  grep -Fq 'Optional coding assistant command approvals' "$TEST_ROOT/install" || fail "permission prompt did not frame the change as optional"
+  grep -Fq 'This only changes those coding assistants' "$TEST_ROOT/install" || fail "permission prompt did not scope the config changes"
+  grep -Fq 'If you skip this, Macroscope still works' "$TEST_ROOT/install" || fail "permission prompt did not explain skip behavior"
+  grep -Fq 'prompt you before each Macroscope command' "$TEST_ROOT/install" || fail "permission prompt did not explain the approval tradeoff"
   python3 - "$TEST_HOME/.local/state/macroscope/install.json" <<'PY' || fail "interactive choices were not persisted"
 import json, sys
 with open(sys.argv[1], encoding="utf-8") as f: data = json.load(f)
@@ -899,7 +903,7 @@ test_interactive_escape_does_not_block() {
     --no-path --no-wizard --events \
     "space to toggle="$'\e' \
     $'\e[4A'=$'\n' \
-    "Grant these permissions?"=$'\n' \
+    "Allow your coding assistants to run Macroscope commands?"=$'\n' \
     "Proceed?"=$'\n' || fail "standalone escape blocked the integration list"
   pass "standalone escape leaves the integration list responsive"
 }
