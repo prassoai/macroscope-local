@@ -68,7 +68,6 @@ DRY_RUN=0
 ASSUME_YES=0
 TOOLS_SPEC=""
 SELECTED_TOOLS=""
-HOST_PERMISSIONS="prompt"
 SKIP_PATH=0
 SHELL_CONFIG_OVERRIDE=""
 WIZARD_MODE="default"
@@ -79,7 +78,6 @@ STATE_FILE=""
 STATE_LOADED=0
 STATE_CONFIGURED=0
 STATE_TOOLS=""
-STATE_HOST_PERMISSIONS=""
 STATE_PATH_FILE=""
 STATE_PATH_POLICY=""
 SAVED_AUTO_UPDATE=0
@@ -108,8 +106,6 @@ Options:
   --dry-run                         Print the complete plan without changing files
   --tools claude,codex,cursor,opencode|all|none
                                     Select host integrations
-  --host-permissions prompt|grant|skip
-                                    Control optional coding-assistant command allow-rules
   --no-path                         Never edit shell configuration (remembered for updates)
   --shell-config PATH               Edit exactly this shell configuration file
   --wizard                          Launch setup after installation
@@ -137,7 +133,9 @@ parse_options() {
         fi
         case "$1" in
           --tools) TOOLS_SPEC="$2" ;;
-          --host-permissions) HOST_PERMISSIONS="$2" ;;
+          # Accepted as a no-op so older CLI binaries can still hand off to
+          # this installer during their mandatory update.
+          --host-permissions) ;;
           --shell-config) SHELL_CONFIG_OVERRIDE="$2" ;;
           --format) OUTPUT_FORMAT="$2" ;;
           --mode) INSTALL_MODE="$2" ;;
@@ -147,7 +145,7 @@ parse_options() {
       --tools=*|--host-permissions=*|--shell-config=*|--format=*|--mode=*)
         case "$1" in
           --tools=*) TOOLS_SPEC="${1#*=}" ;;
-          --host-permissions=*) HOST_PERMISSIONS="${1#*=}" ;;
+          --host-permissions=*) ;;
           --shell-config=*) SHELL_CONFIG_OVERRIDE="${1#*=}" ;;
           --format=*) OUTPUT_FORMAT="${1#*=}" ;;
           --mode=*) INSTALL_MODE="${1#*=}" ;;
@@ -177,7 +175,6 @@ parse_options() {
     shift
   done
 
-  case "$HOST_PERMISSIONS" in prompt|grant|skip) ;; *) error "--host-permissions must be prompt, grant, or skip"; exit 2 ;; esac
   case "$OUTPUT_FORMAT" in text|json) ;; *) error "--format must be text or json"; exit 2 ;; esac
   case "$INSTALL_MODE" in ""|initial|update) ;; *) error "--mode must be initial or update"; exit 2 ;; esac
   if [ -n "$SHELL_CONFIG_OVERRIDE" ] && [ "$SKIP_PATH" -eq 1 ]; then
@@ -206,21 +203,16 @@ try:
     if not isinstance(data, dict):
         raise TypeError("state must be an object")
     tools = data.get("tools", [])
-    host_permissions = data.get("hostPermissions", "")
     path_file = data.get("pathFile")
     path_policy = data.get("pathPolicy")
     configured = (
         "tools" in data
-        and "hostPermissions" in data
         and "pathPolicy" in data
         and all(tool in ("claude", "codex", "cursor", "opencode") for tool in tools)
-        and host_permissions in ("grant", "skip", "preserve")
         and path_policy in ("auto", "managed", "skip")
     )
     if not isinstance(tools, list) or not all(isinstance(tool, str) for tool in tools):
         raise TypeError("tools must be a string array")
-    if not isinstance(host_permissions, str):
-        raise TypeError("hostPermissions must be a string")
     if path_file is not None and not isinstance(path_file, str):
         raise TypeError("pathFile must be a string or null")
     if path_policy is None:
@@ -233,12 +225,10 @@ except Exception:
     print("")
     print("")
     print("")
-    print("")
     print("invalid")
     print("incomplete")
     raise SystemExit
 print(",".join(tools))
-print(host_permissions)
 print(path_file or "")
 print(path_policy)
 print("valid")
@@ -246,11 +236,10 @@ print("configured" if configured else "incomplete")
 PY
 )"
   STATE_TOOLS="$(printf '%s\n' "$values" | sed -n '1p')"
-  STATE_HOST_PERMISSIONS="$(printf '%s\n' "$values" | sed -n '2p')"
-  STATE_PATH_FILE="$(printf '%s\n' "$values" | sed -n '3p')"
-  STATE_PATH_POLICY="$(printf '%s\n' "$values" | sed -n '4p')"
-  [ "$(printf '%s\n' "$values" | sed -n '5p')" = "valid" ] && STATE_LOADED=1
-  [ "$(printf '%s\n' "$values" | sed -n '6p')" = "configured" ] && STATE_CONFIGURED=1
+  STATE_PATH_FILE="$(printf '%s\n' "$values" | sed -n '2p')"
+  STATE_PATH_POLICY="$(printf '%s\n' "$values" | sed -n '3p')"
+  [ "$(printf '%s\n' "$values" | sed -n '4p')" = "valid" ] && STATE_LOADED=1
+  [ "$(printf '%s\n' "$values" | sed -n '5p')" = "configured" ] && STATE_CONFIGURED=1
   return 0
 }
 
@@ -324,34 +313,6 @@ selected_tools_plan_label() {
   done
 }
 
-selected_permission_tools_plan_label() {
-  local tools=()
-  local tool=""
-  local index=0
-  local last=0
-  for tool in claude cursor opencode; do
-    tool_selected "$tool" && tools+=("$tool")
-  done
-  last=$((${#tools[@]} - 1))
-  for index in "${!tools[@]}"; do
-    if [ "$index" -eq 0 ]; then
-      printf '%s' "${tools[$index]}"
-    elif [ "$index" -eq "$last" ]; then
-      printf ' and %s' "${tools[$index]}"
-    else
-      printf ', %s' "${tools[$index]}"
-    fi
-  done
-}
-
-tool_permission_plan_path() {
-  case "$1" in
-    claude) printf '%s/settings.json and %s/hooks/macroscope-bash-autoallow.sh' "$(get_claude_config_dir)" "$(get_claude_config_dir)" ;;
-    cursor) printf '%s/.cursor/cli-config.json' "$HOME" ;;
-    opencode) printf '%s/opencode.json' "$(get_opencode_config_dir)" ;;
-  esac
-}
-
 tool_installed() {
   case "$1" in
     claude) [ -d "$(get_claude_config_dir)/plugins/cache/macroscope-local" ] ;;
@@ -360,13 +321,6 @@ tool_installed() {
     opencode) [ -f "$(get_opencode_config_dir)/plugins/macroscope.js" ] ;;
     *) return 1 ;;
   esac
-}
-
-host_permission_automation_present() {
-  { [ -f "$(get_claude_config_dir)/settings.json" ] && grep -Fq 'Bash(macroscope' "$(get_claude_config_dir)/settings.json"; } ||
-    [ -e "$(get_claude_config_dir)/hooks/macroscope-bash-autoallow.sh" ] ||
-    { [ -f "$HOME/.cursor/cli-config.json" ] && grep -Fq 'Shell(macroscope' "$HOME/.cursor/cli-config.json"; } ||
-    { [ -f "$(get_opencode_config_dir)/opencode.json" ] && grep -Fq '"macroscope ' "$(get_opencode_config_dir)/opencode.json"; }
 }
 
 has_interactive_tty() {
@@ -424,52 +378,8 @@ tui_read_key() {
   esac
 }
 
-prompt_yes_no() {
-  local question="$1"
-  local default_answer="$2"
-  local selected=0
-  local first_render=1
-  local index=0
-  local labels=("Yes" "No")
-
-  [ "$default_answer" = "no" ] && selected=1
-  tui_start
-  printf '\n%s%s%s\n' "$BOLD" "$question" "$RESET" > /dev/tty
-  printf '  Up/down or j/k to move; enter to choose.\n' > /dev/tty
-
-  while true; do
-    if [ "$first_render" -eq 0 ]; then
-      printf '\033[2A' > /dev/tty
-    fi
-    first_render=0
-    for index in 0 1; do
-      printf '\r\033[2K' > /dev/tty
-      if [ "$index" -eq "$selected" ]; then
-        printf '%s%s>%s %s\n' "$CYAN" "$BOLD" "$RESET" "${labels[$index]}" > /dev/tty
-      else
-        printf '  %s\n' "${labels[$index]}" > /dev/tty
-      fi
-    done
-
-    if ! tui_read_key; then
-      tui_stop
-      return 1
-    fi
-    case "$TUI_KEY" in
-      up|k|K|down|j|J) selected=$((1 - selected)) ;;
-      y|Y) selected=0; break ;;
-      n|N) selected=1; break ;;
-      enter) break ;;
-    esac
-  done
-
-  tui_stop
-  if [ "$selected" -eq 0 ]; then TUI_RESULT="yes"; else TUI_RESULT="no"; fi
-}
-
-# prompt_menu renders a single-select vertical menu of the given labels and
-# sets TUI_RESULT to the zero-based index of the chosen entry. Mirrors
-# prompt_yes_no's rendering for an arbitrary number of options.
+# prompt_menu renders a single-select vertical menu and sets TUI_RESULT to the
+# zero-based index of the selected entry.
 prompt_menu() {
   local question="$1"; shift
   local labels=("$@")
@@ -605,30 +515,6 @@ select_tools() {
   SELECTED_TOOLS="$normalized"
 }
 
-resolve_host_permissions() {
-  [ -n "$SELECTED_TOOLS" ] || { HOST_PERMISSIONS="skip"; return; }
-  if [ "$HOST_PERMISSIONS" != "prompt" ]; then
-    return
-  fi
-  if [ "$INSTALL_MODE" = "update" ]; then
-    case "$STATE_HOST_PERMISSIONS" in grant|skip|preserve) HOST_PERMISSIONS="$STATE_HOST_PERMISSIONS"; return ;; esac
-    # Legacy installs predate ownership tracking. Preserve their existing
-    # automation without adding or removing rules we cannot prove we own.
-    if [ "$STATE_LOADED" -eq 0 ] && host_permission_automation_present; then
-      HOST_PERMISSIONS="preserve"
-      return
-    fi
-  fi
-  if [ "$ASSUME_YES" -eq 1 ] || [ "$DRY_RUN" -eq 1 ] || ! has_interactive_tty; then
-    HOST_PERMISSIONS="skip"
-    return
-  fi
-  # The final confirmation menu is the single decision point for optional
-  # command auto-approval. It presents both the exact changes and an install-
-  # without-auto-approval choice, so a separate yes/no prompt is redundant.
-  HOST_PERMISSIONS="grant"
-}
-
 active_path_contains_install_dir() {
   case ":${PATH:-}:" in *":$HOME/.local/bin:"*) return 0 ;; *) return 1 ;; esac
 }
@@ -703,30 +589,18 @@ resolve_lifecycle() {
 }
 
 # Mandatory updates that resume the original command reuse an explicit saved
-# install configuration. They do not ask users to reconsider integration or
-# permission choices that were already made during installation. Manual
-# updates, dry runs, overrides, and incomplete legacy state keep the normal
-# plan and confirmation flow.
+# integration and PATH configuration. Manual updates, dry runs, overrides, and
+# incomplete legacy state keep the normal plan and confirmation flow.
 resolve_saved_auto_update() {
   SAVED_AUTO_UPDATE=0
   [ "$INSTALL_MODE" = "update" ] || return 0
   [ "$RESUME_COMMAND" -eq 1 ] || return 0
   [ "$STATE_CONFIGURED" -eq 1 ] || return 0
   [ -z "$TOOLS_SPEC" ] || return 0
-  [ "$HOST_PERMISSIONS" = "prompt" ] || return 0
   [ "$SKIP_PATH" -eq 0 ] || return 0
   [ -z "$SHELL_CONFIG_OVERRIDE" ] || return 0
   [ "$DRY_RUN" -eq 0 ] || return 0
   SAVED_AUTO_UPDATE=1
-}
-
-# host_permission_grant_applies is true only when the permission grant will
-# actually modify a selected tool's config. Codex has no host-permission step,
-# so `--tools codex --host-permissions grant` must not show the auto-approval
-# grouped plan action or the "Show exact changes" confirmation option.
-host_permission_grant_applies() {
-  [ "$HOST_PERMISSIONS" = "grant" ] || return 1
-  tool_selected claude || tool_selected cursor || tool_selected opencode
 }
 
 print_plan() {
@@ -771,19 +645,6 @@ print_plan() {
       index=$((index + 1))
     fi
   done
-  if [ "$HOST_PERMISSIONS" = "grant" ]; then
-    if host_permission_grant_applies; then
-      printf '%d. Allow Macroscope and mktemp command auto-approval for %s\n' "$index" "$(selected_permission_tools_plan_label)"
-      for tool in claude cursor opencode; do
-        tool_selected "$tool" && printf '   (%s)\n' "$(tool_permission_plan_path "$tool")"
-      done
-      index=$((index + 1))
-    fi
-  elif [ "$HOST_PERMISSIONS" = "preserve" ]; then
-    printf '%d. Preserve existing legacy host permission rules and hooks without adding new ones\n' "$index"; index=$((index + 1))
-  elif [ "$INSTALL_MODE" = "update" ] && host_permission_automation_present; then
-    printf '%d. Remove Macroscope-owned host permission rules and hooks while preserving pre-existing rules\n' "$index"; index=$((index + 1))
-  fi
   if [ "$INSTALL_MODE" = "update" ]; then
     printf '%d. Clean legacy Macroscope MCP artifacts after the update is staged\n' "$index"; index=$((index + 1))
   fi
@@ -795,58 +656,57 @@ print_plan() {
   fi
 }
 
-# print_change_details shows the literal configuration snippets the installer
-# will merge, so the operator can verify the security-relevant permission
-# grants (command auto-approve rules + PreToolUse hook) before consenting.
-# Existing settings are preserved; only the keys shown below are added.
 print_change_details() {
-  local claude_config="$(get_claude_config_dir)"
-  local opencode_config="$(get_opencode_config_dir)"
-  # _ccd_file: bold cyan header for a config path being edited.
-  _ccd_file() { printf '\n  %s%s%s%s\n' "$BOLD" "$CYAN" "$1" "$RESET"; }
-  # _ccd_key: the JSON key the additions land under.
-  _ccd_key() { printf '    %s:\n' "$1"; }
-  # _ccd_add: a diff-style "+" line for a single added entry.
-  _ccd_add() { printf '      %s+ %s%s\n' "$GREEN" "$1" "$RESET"; }
-  # _ccd_note: dim explanatory text.
-  _ccd_note() { printf '      %s%s%s\n' "$DIM" "$1" "$RESET"; }
+  local binary_action="Install"
+  local tool=""
+  [ "$INSTALL_MODE" = "update" ] && binary_action="Replace"
+
   {
-    printf '\n%sCommand auto-approval rules%s\n' "$BOLD" "$RESET"
-    printf '  %sMacroscope ensures the entries below are allow-listed for the selected agents.%s\n' "$DIM" "$RESET"
-    printf '  %sExisting rules are kept, entries already present are left unchanged, and nothing is removed.%s\n' "$DIM" "$RESET"
-    if tool_selected claude; then
-      _ccd_file "$claude_config/settings.json"
-      _ccd_key 'permissions.allow'
-      _ccd_add 'Bash(macroscope *)'
-      _ccd_add 'Bash(macroscope:*)'
-      _ccd_add 'Bash(mktemp *)'
-      _ccd_add 'Bash(mktemp:*)'
-      _ccd_key 'hooks.PreToolUse  (matcher: Bash)'
-      _ccd_add "$claude_config/hooks/macroscope-bash-autoallow.sh"
-      _ccd_note 'approves only a bare `macroscope` or `mktemp` command;'
-      _ccd_note 'refuses pipes, redirects, substitution, or chaining.'
+    printf '\n%sExact changes%s\n' "$BOLD" "$RESET"
+    printf '\n  %s%s/.local/bin/macroscope%s\n' "$CYAN" "$HOME" "$RESET"
+    if [ -n "${MACROSCOPE_LOCAL_BACK_REPO:-}" ]; then
+      printf '    %s+%s %s with a binary built from %s\n' "$GREEN" "$RESET" "$binary_action" "$MACROSCOPE_LOCAL_BACK_REPO"
+    elif [ -n "${MACROSCOPE_LOCAL_BINARY_SOURCE:-}" ]; then
+      printf '    %s+%s %s from %s\n' "$GREEN" "$RESET" "$binary_action" "$MACROSCOPE_LOCAL_BINARY_SOURCE"
+    else
+      printf '    %s+%s %s the %s release for %s-%s\n' "$GREEN" "$RESET" "$binary_action" "$INSTALL_VERSION" "$OS" "$ARCH"
     fi
-    if tool_selected cursor; then
-      _ccd_file "$HOME/.cursor/cli-config.json"
-      _ccd_key 'permissions.allow'
-      _ccd_add 'Shell(macroscope)'
-      _ccd_add 'Shell(macroscope *)'
-      _ccd_add 'Shell(mktemp)'
-      _ccd_add 'Shell(mktemp *)'
+
+    if [ "$PATH_ACTION" = "modify" ]; then
+      printf '\n  %s%s%s\n' "$CYAN" "$PATH_TARGET" "$RESET"
+      printf '    %s+%s Add %s/.local/bin to PATH\n' "$GREEN" "$RESET" "$HOME"
     fi
-    if tool_selected opencode; then
-      _ccd_file "$opencode_config/opencode.json"
-      _ccd_key 'permission.bash'
-      _ccd_add '"macroscope *": "allow"'
-      _ccd_add '"macroscope": "allow"'
-      _ccd_add '"mktemp *": "allow"'
-      _ccd_add '"mktemp": "allow"'
-      _ccd_note 'if "permission" or "permission.bash" is currently a plain string'
-      _ccd_note '(e.g. "ask"), it is expanded to object form, preserving that value.'
+
+    for tool in claude codex cursor opencode; do
+      if tool_selected "$tool"; then
+        printf '\n  %s%s%s\n' "$CYAN" "$tool" "$RESET"
+        printf '    %s+%s Install or refresh %s\n' "$GREEN" "$RESET" "$(tool_install_plan_path "$tool")"
+      elif [ "$INSTALL_MODE" = "update" ] && tool_installed "$tool"; then
+        printf '\n  %s%s%s\n' "$CYAN" "$tool" "$RESET"
+        printf '    %s-%s Remove Macroscope plugin integration at %s\n' "$RED" "$RESET" "$(tool_plan_path "$tool")"
+      fi
+    done
+
+    if tool_selected codex && codex_shim_will_install; then
+      printf '\n  %s%s/.local/bin/codex%s\n' "$CYAN" "$HOME" "$RESET"
+      printf '    %s+%s Install or refresh the managed Codex CLI wrapper\n' "$GREEN" "$RESET"
     fi
-    printf '\n  %sNothing else is auto-approved.%s\n' "$DIM" "$RESET"
+
+    if [ "$INSTALL_MODE" = "update" ]; then
+      printf '\n  %sLegacy MCP integration%s\n' "$CYAN" "$RESET"
+      printf '    %s-%s Remove stale macroscope-codereview registrations and binary artifacts if present\n' "$RED" "$RESET"
+    fi
+
+    if { [ -n "${MACROSCOPE_LOCAL_BACK_REPO:-}" ] || [ -n "${MACROSCOPE_LOCAL_BINARY_SOURCE:-}" ]; } && [ ! -f "$HOME/.macroscope/config.yaml" ]; then
+      printf '\n  %s%s/.macroscope/config.yaml%s\n' "$CYAN" "$HOME" "$RESET"
+      printf '    %s+%s Seed local-build configuration\n' "$GREEN" "$RESET"
+    fi
+
+    if [ "$WIZARD_MODE" = "yes" ]; then
+      printf '\n  %sSetup%s\n' "$CYAN" "$RESET"
+      printf '    %s+%s Launch the setup wizard after verification\n' "$GREEN" "$RESET"
+    fi
   } > /dev/tty
-  unset -f _ccd_file _ccd_key _ccd_add _ccd_note
 }
 
 confirm_plan() {
@@ -861,34 +721,17 @@ confirm_plan() {
   [ "$INSTALL_MODE" = "update" ] && prompt='Update and continue?'
   [ "$RESUME_COMMAND" -eq 1 ] && prompt='Update and run the review?'
 
-  # When the plan modifies security-relevant host permission config, offer
-  # inline options to inspect the exact snippets, or to proceed without the
-  # grant — so declining does not require Ctrl-C and re-running with a flag.
-  if host_permission_grant_applies; then
-    while true; do
-      if ! prompt_menu "$prompt" "Yes" "Show exact changes" "Install without command auto-approval" "No"; then
-        info "Cancelled before making changes."
-        return 3
-      fi
-      case "$TUI_RESULT" in
-        0) return 0 ;;
-        1) print_change_details ;;
-        2)
-          HOST_PERMISSIONS="skip"
-          info "Installing without command auto-approval."
-          return 0
-          ;;
-        *) info "Cancelled before making changes."; return 3 ;;
-      esac
-    done
-  fi
-
-  prompt_yes_no "$prompt" "yes"
-  if [ "$TUI_RESULT" = "no" ]; then
-    info "Cancelled before making changes."
-    return 3
-  fi
-  return 0
+  while true; do
+    if ! prompt_menu "$prompt" "Yes" "Show exact changes" "No"; then
+      info "Cancelled before making changes."
+      return 3
+    fi
+    case "$TUI_RESULT" in
+      0) return 0 ;;
+      1) print_change_details ;;
+      *) info "Cancelled before making changes."; return 3 ;;
+    esac
+  done
 }
 
 repair_only_requested() {
@@ -2333,227 +2176,15 @@ PY
   success "Installed Claude Code plugin to ${BOLD}${cache_dst}${RESET}"
 }
 
-# register_claude_bash_autoallow_hook installs the PreToolUse hook script
-# and registers it in Claude Code's settings.json. This closes a gap in the
-# plain allow-list patterns: Claude Code's Bash matcher tokenizes on
-# shell operators, so `Bash(macroscope *)` stops matching as soon as the
-# command contains a background operator. The hook inspects the raw command
-# string and approves only a single macroscope/mktemp command without redirects.
-register_claude_bash_autoallow_hook() {
-  local script_src="$(dirname "$0")/scripts/claude-bash-autoallow.sh"
-  if [ ! -f "$script_src" ]; then
-    script_src="$CHECKOUT_DIR/scripts/claude-bash-autoallow.sh"
-  fi
-  # When installed via `curl | bash`, the installer has no $0 path to
-  # resolve a sibling script from — in that case we embed the script
-  # via a HEREDOC below instead of copying from disk.
-  local claude_config="$(get_claude_config_dir)"
-  local hook_dst="$claude_config/hooks/macroscope-bash-autoallow.sh"
-  mkdir -p "$claude_config/hooks"
-
-  if [ -f "$script_src" ]; then
-    cp "$script_src" "$hook_dst"
-  else
-    cat > "$hook_dst" <<'EMBED'
-#!/usr/bin/env python3
-"""PreToolUse hook that auto-approves single macroscope or mktemp commands."""
-import json, re, sys
-
-def safe_simple_command(command, names):
-    candidate = command.strip()
-    if candidate.endswith("&"):
-        candidate = candidate[:-1].rstrip()
-    if not candidate or re.search(r"[\n\r;|`()<>]|[$][(]", candidate):
-        return None
-    if "&" in candidate:
-        return None
-    match = re.match(r"^([A-Za-z0-9_.-]+)(?:\s|$)", candidate)
-    return match.group(1) if match and match.group(1) in names else None
-
-def approved_command(command):
-    assignment = re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=[$][(](.*)[)]", command.strip())
-    if assignment:
-        return safe_simple_command(assignment.group(1), ("mktemp",))
-    return safe_simple_command(command, ("macroscope", "mktemp"))
-
-def main() -> int:
-    try:
-        payload = json.load(sys.stdin)
-    except Exception:
-        return 0
-    if payload.get("tool_name") != "Bash":
-        return 0
-    command = str(payload.get("tool_input", {}).get("command", "")).strip()
-    if not command:
-        return 0
-    name = approved_command(command)
-    if name:
-        print(json.dumps({
-            "hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "permissionDecision": "allow",
-                "permissionDecisionReason": f"macroscope-installer: auto-approve {name}",
-            },
-        }))
-        return 0
-    return 0
-
-if __name__ == "__main__":
-    sys.exit(main())
-EMBED
-  fi
-  chmod +x "$hook_dst"
-
-  python3 - "$claude_config/settings.json" "$hook_dst" <<'PY'
-import json, os, sys
-
-settings_path, hook_path = sys.argv[1:3]
-
-if os.path.exists(settings_path):
-    with open(settings_path, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    mode = os.stat(settings_path).st_mode
-else:
-    data = {}
-    mode = None
-
-hooks = data.setdefault("hooks", {})
-pre_tool_use = hooks.setdefault("PreToolUse", [])
-
-marker = "macroscope-installer: auto-approve"
-# Replace any prior entry we installed, preserve entries the user added.
-def is_ours(entry):
-    if not isinstance(entry, dict):
-        return False
-    for h in entry.get("hooks", []):
-        if not isinstance(h, dict):
-            continue
-        cmd = h.get("command", "")
-        if "macroscope-bash-autoallow" in cmd or marker in cmd:
-            return True
-    return False
-
-pre_tool_use[:] = [e for e in pre_tool_use if not is_ours(e)]
-pre_tool_use.append({
-    "matcher": "Bash",
-    "hooks": [{"type": "command", "command": hook_path}],
-})
-
-os.makedirs(os.path.dirname(settings_path), exist_ok=True)
-with open(settings_path, "w", encoding="utf-8") as f:
-    json.dump(data, f, indent=2)
-    f.write("\n")
-if mode is not None:
-    os.chmod(settings_path, mode)
-PY
-}
-
-apply_host_permissions() {
-  [ "$HOST_PERMISSIONS" = "grant" ] || return 0
-  step "Granting announced host shell permissions..."
-
-  tool_selected claude && python3 - "$(get_claude_config_dir)/settings.json" <<'PY'
-import json, os, sys, tempfile
-path = sys.argv[1]
-if os.path.islink(path): path = os.path.realpath(path)
-mode = os.stat(path).st_mode if os.path.exists(path) else None
-if os.path.exists(path):
-    with open(path, encoding="utf-8") as f: data = json.load(f)
-else: data = {}
-permissions = data.setdefault("permissions", {})
-allow = permissions.setdefault("allow", [])
-for rule in ("Bash(macroscope *)", "Bash(macroscope:*)", "Bash(mktemp *)", "Bash(mktemp:*)"):
-    if rule not in allow:
-        allow.append(rule)
-os.makedirs(os.path.dirname(path), exist_ok=True)
-fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".macroscope-settings-")
-try:
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2); f.write("\n")
-    if mode is not None: os.chmod(tmp, mode)
-    os.replace(tmp, path)
-finally:
-    if os.path.exists(tmp): os.unlink(tmp)
-PY
-  tool_selected claude && register_claude_bash_autoallow_hook
-
-  tool_selected cursor && python3 - "$HOME/.cursor/cli-config.json" <<'PY'
-import json, os, sys, tempfile
-path = sys.argv[1]
-if os.path.islink(path): path = os.path.realpath(path)
-mode = os.stat(path).st_mode if os.path.exists(path) else None
-if os.path.exists(path):
-    with open(path, encoding="utf-8") as f: data = json.load(f)
-else: data = {}
-permissions = data.setdefault("permissions", {})
-allow = permissions.setdefault("allow", [])
-permissions.setdefault("deny", [])
-for rule in ("Shell(macroscope)", "Shell(macroscope *)", "Shell(mktemp)", "Shell(mktemp *)"):
-    if rule not in allow: allow.append(rule)
-os.makedirs(os.path.dirname(path), exist_ok=True)
-fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".macroscope-config-")
-with os.fdopen(fd, "w", encoding="utf-8") as f: json.dump(data, f, indent=2); f.write("\n")
-if mode is not None: os.chmod(tmp, mode)
-os.replace(tmp, path)
-PY
-
-  tool_selected opencode && python3 - "$(get_opencode_config_dir)/opencode.json" <<'PY'
-import json, os, sys, tempfile
-path = sys.argv[1]
-if os.path.islink(path): path = os.path.realpath(path)
-mode = os.stat(path).st_mode if os.path.exists(path) else None
-if os.path.exists(path):
-    with open(path, encoding="utf-8") as f: data = json.load(f)
-else: data = {}
-permission = data.get("permission")
-if isinstance(permission, str):
-    if permission == "allow":
-        bash = None
-    else:
-        permission = {"*": permission}
-        data["permission"] = permission
-        bash = {}
-        permission["bash"] = bash
-elif isinstance(permission, dict):
-    bash = permission.get("bash")
-    if isinstance(bash, str):
-        if bash == "allow":
-            bash = None
-        else:
-            bash = {"*": bash}
-            permission["bash"] = bash
-    elif not isinstance(bash, dict):
-        bash = {}
-        permission["bash"] = bash
-else:
-    permission = {}
-    data["permission"] = permission
-    bash = {}
-    permission["bash"] = bash
-if isinstance(bash, dict):
-    for rule in ("macroscope *", "macroscope", "mktemp *", "mktemp"):
-        bash.setdefault(rule, "allow")
-os.makedirs(os.path.dirname(path), exist_ok=True)
-fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".macroscope-config-")
-with os.fdopen(fd, "w", encoding="utf-8") as f: json.dump(data, f, indent=2); f.write("\n")
-if mode is not None: os.chmod(tmp, mode)
-os.replace(tmp, path)
-PY
-  success "Applied only the explicitly approved host permission automation"
-}
-
 clean_tool_state() {
   local tool="$1"
   local remove_plugin="$2"
-  local remove_permissions="$3"
   local codex_home="$(get_codex_home)"
   local claude_config="$(get_claude_config_dir)"
-  local opencode_config="$(get_opencode_config_dir)"
-  python3 - "$tool" "$remove_plugin" "$remove_permissions" "$STATE_FILE" "$HOME" "$codex_home" "$claude_config" "$opencode_config" <<'PY'
+  python3 - "$tool" "$remove_plugin" "$HOME" "$codex_home" "$claude_config" <<'PY'
 import json, os, re, sys, tempfile
-tool, remove_plugin, remove_permissions, state_path, home, codex_home, claude_config, opencode_config = sys.argv[1:9]
+tool, remove_plugin, home, codex_home, claude_config = sys.argv[1:6]
 remove_plugin = remove_plugin == "1"
-remove_permissions = remove_permissions == "1"
 
 def load(path):
     if not os.path.exists(path): return None, None
@@ -2568,10 +2199,6 @@ def save(path, data, mode):
     with os.fdopen(fd, "w", encoding="utf-8") as f: json.dump(data, f, indent=2); f.write("\n")
     if mode is not None: os.chmod(tmp, mode)
     os.replace(tmp, path)
-
-state, _ = load(state_path)
-ownership = state.get("permissionOwnership", {}) if isinstance(state, dict) else {}
-legacy = not isinstance(state, dict)
 
 if tool == "claude":
     if remove_plugin:
@@ -2594,26 +2221,6 @@ if tool == "claude":
                 if isinstance(obj, dict) and key in obj:
                     del obj[key]; changed = True
                     if not obj: data.pop(section, None)
-        if remove_permissions:
-            known = {"Bash(macroscope)", "Bash(macroscope *)", "Bash(macroscope:*)", "Bash(mktemp)", "Bash(mktemp *)", "Bash(mktemp:*)"}
-            # A legacy install has no ownership manifest, so generic allow
-            # rules are indistinguishable from user-managed dotfile state.
-            # Only remove rules we can prove this installer recorded.
-            owned = set(ownership.get("claude", {}).get("inserted", [])) if not legacy else set()
-            permissions = data.get("permissions")
-            if isinstance(permissions, dict) and isinstance(permissions.get("allow"), list):
-                old = permissions["allow"]
-                permissions["allow"] = [x for x in old if x not in owned]
-                changed |= permissions["allow"] != old
-                if not permissions["allow"]: permissions.pop("allow", None)
-                if not permissions: data.pop("permissions", None)
-            hooks = data.get("hooks")
-            if isinstance(hooks, dict) and isinstance(hooks.get("PreToolUse"), list):
-                old = hooks["PreToolUse"]
-                hooks["PreToolUse"] = [e for e in old if not any("macroscope-bash-autoallow" in str(h.get("command", "")) or "macroscope-installer" in str(h.get("command", "")) for h in (e.get("hooks", []) if isinstance(e, dict) else []))]
-                changed |= hooks["PreToolUse"] != old
-                if not hooks["PreToolUse"]: hooks.pop("PreToolUse", None)
-                if not hooks: data.pop("hooks", None)
         if changed: save(path, data, mode)
 
 elif tool == "codex" and remove_plugin:
@@ -2639,30 +2246,6 @@ elif tool == "codex" and remove_plugin:
             with os.fdopen(fd, "w", encoding="utf-8") as f: f.write(text)
             os.chmod(tmp, mode); os.replace(tmp, config)
 
-elif tool == "cursor" and remove_permissions:
-    path = os.path.join(home, ".cursor/cli-config.json")
-    data, mode = load(path)
-    if isinstance(data, dict):
-        known = {"Shell(macroscope)", "Shell(macroscope *)", "Shell(mktemp)", "Shell(mktemp *)"}
-        owned = set(ownership.get("cursor", {}).get("inserted", [])) if not legacy else set()
-        permissions = data.get("permissions")
-        if isinstance(permissions, dict) and isinstance(permissions.get("allow"), list):
-            old = permissions["allow"]; permissions["allow"] = [x for x in old if x not in owned]
-            if permissions["allow"] != old: save(path, data, mode)
-
-elif tool == "opencode" and remove_permissions:
-    path = os.path.join(opencode_config, "opencode.json")
-    data, mode = load(path)
-    if isinstance(data, dict):
-        known = {"macroscope", "macroscope *", "mktemp", "mktemp *"}
-        owned = set(ownership.get("opencode", {}).get("inserted", [])) if not legacy else set()
-        permission = data.get("permission"); bash = permission.get("bash") if isinstance(permission, dict) else None
-        changed = False
-        if isinstance(bash, dict):
-            for key in owned: changed |= bash.pop(key, None) is not None
-            if not bash: permission.pop("bash", None)
-            if not permission: data.pop("permission", None)
-        if changed: save(path, data, mode)
 PY
 }
 
@@ -2726,7 +2309,6 @@ remove_tool_integration() {
   case "$tool" in
     claude)
       rm -rf "$(get_claude_config_dir)/plugins/marketplaces/macroscope-local" "$(get_claude_config_dir)/plugins/cache/macroscope-local"
-      rm -f "$(get_claude_config_dir)/hooks/macroscope-bash-autoallow.sh"
       ;;
     codex)
       rm -rf "$HOME/plugins/macroscope"
@@ -2739,75 +2321,19 @@ remove_tool_integration() {
       rm -rf "$(get_opencode_config_dir)/skills/codereview" "$(get_opencode_config_dir)/skills/autoloop"
       ;;
   esac
-  clean_tool_state "$tool" 1 1
+  clean_tool_state "$tool" 1
   success "Removed Macroscope-owned $tool integration state"
-}
-
-snapshot_permission_state() {
-  python3 - "$STATE_FILE" "$TMP_DIR/permission-before.json" "$HOME" "$(get_claude_config_dir)" "$(get_opencode_config_dir)" <<'PY'
-import json, os, sys
-state_path, output, home, claude_config, opencode_config = sys.argv[1:6]
-try:
-    with open(state_path, encoding="utf-8") as f: state = json.load(f)
-except Exception: state = {}
-prior = state.get("permissionOwnership", {})
-rules = {
-  "claude": (os.path.join(claude_config, "settings.json"), ("permissions", "allow"), ["Bash(macroscope *)", "Bash(macroscope:*)", "Bash(mktemp *)", "Bash(mktemp:*)"]),
-  "cursor": (os.path.join(home, ".cursor/cli-config.json"), ("permissions", "allow"), ["Shell(macroscope)", "Shell(macroscope *)", "Shell(mktemp)", "Shell(mktemp *)"]),
-  "opencode": (os.path.join(opencode_config, "opencode.json"), ("permission", "bash"), ["macroscope *", "macroscope", "mktemp *", "mktemp"]),
-}
-result = {}
-for tool, (path, keys, known) in rules.items():
-    try:
-        with open(path, encoding="utf-8") as f: value = json.load(f)
-        for key in keys: value = value.get(key, {}) if isinstance(value, dict) else {}
-        present = set(value if isinstance(value, list) else value.keys() if isinstance(value, dict) else [])
-    except Exception: present = set()
-    owned = set(prior.get(tool, {}).get("inserted", []))
-    known_present = present & set(known)
-    result[tool] = {
-        "presentBefore": sorted(known_present),
-        "preexisting": sorted(known_present - owned),
-        "ownedBefore": sorted(owned & present),
-    }
-with open(output, "w", encoding="utf-8") as f: json.dump(result, f)
-PY
 }
 
 write_install_state() {
   local path_file="$STATE_PATH_FILE"
   [ "$PATH_ACTION" = "modify" ] && path_file="$PATH_TARGET"
-  python3 - "$STATE_FILE" "$TMP_DIR/permission-before.json" "$SELECTED_TOOLS" "$HOST_PERMISSIONS" "$path_file" "$PATH_POLICY" "$INSTALLED_VERSION" "$HOME" "$(get_claude_config_dir)" "$(get_opencode_config_dir)" <<'PY'
+  python3 - "$STATE_FILE" "$SELECTED_TOOLS" "$path_file" "$PATH_POLICY" "$INSTALLED_VERSION" <<'PY'
 import json, os, sys, tempfile
-path, before_path, tools_csv, host_permissions, path_file, path_policy, version, home, claude_config, opencode_config = sys.argv[1:11]
-try:
-    with open(before_path, encoding="utf-8") as f: before = json.load(f)
-except Exception: before = {}
-rules_by_tool = {
- "claude": (os.path.join(claude_config, "settings.json"), ("permissions", "allow"), ["Bash(macroscope *)", "Bash(macroscope:*)", "Bash(mktemp *)", "Bash(mktemp:*)"]),
- "cursor": (os.path.join(home, ".cursor/cli-config.json"), ("permissions", "allow"), ["Shell(macroscope)", "Shell(macroscope *)", "Shell(mktemp)", "Shell(mktemp *)"]),
- "opencode": (os.path.join(opencode_config, "opencode.json"), ("permission", "bash"), ["macroscope *", "macroscope", "mktemp *", "mktemp"]),
-}
+path, tools_csv, path_file, path_policy, version = sys.argv[1:6]
 selected = [x for x in tools_csv.split(",") if x]
-ownership = {}
-for tool, (config_path, keys, rules) in rules_by_tool.items():
-    old = before.get(tool, {})
-    if host_permissions == "grant" and tool in selected:
-        try:
-            with open(config_path, encoding="utf-8") as f: value = json.load(f)
-            for key in keys: value = value.get(key, {}) if isinstance(value, dict) else {}
-            present_after = set(value if isinstance(value, list) else value.keys() if isinstance(value, dict) else []) & set(rules)
-        except Exception: present_after = set()
-        present_before = set(old.get("presentBefore", []))
-        carried = set(old.get("ownedBefore", [])) & present_after
-        inserted = carried | (present_after - present_before)
-        preexisting = (set(old.get("preexisting", [])) | (present_before - carried)) & present_after
-    else:
-        inserted = set()
-        preexisting = set(old.get("preexisting", []))
-    ownership[tool] = {"inserted": sorted(inserted), "preexisting": sorted(preexisting)}
-data = {"schemaVersion": 2, "version": version, "tools": selected, "hostPermissions": host_permissions,
-        "pathFile": path_file or None, "pathPolicy": path_policy, "permissionOwnership": ownership}
+data = {"schemaVersion": 3, "version": version, "tools": selected,
+        "pathFile": path_file or None, "pathPolicy": path_policy}
 os.makedirs(os.path.dirname(path), exist_ok=True)
 fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".macroscope-state-")
 with os.fdopen(fd, "w", encoding="utf-8") as f: json.dump(data, f, indent=2); f.write("\n")
@@ -3267,7 +2793,6 @@ main() {
   resolve_lifecycle
   resolve_saved_auto_update
   select_tools
-  resolve_host_permissions
   resolve_path_action
   resolve_version
   if [ "$SAVED_AUTO_UPDATE" -eq 0 ]; then
@@ -3289,7 +2814,6 @@ main() {
   stage_binary
   if [ -n "$SELECTED_TOOLS" ]; then fetch_plugin_bundle; fi
   validate_staged_artifacts
-  snapshot_permission_state
   snapshot_for_rollback
   APPLY_STARTED=1
 
@@ -3302,10 +2826,6 @@ main() {
   local tool=""
   for tool in claude codex cursor opencode; do
     if tool_selected "$tool"; then
-      if [ "$HOST_PERMISSIONS" = "skip" ] && [ "$INSTALL_MODE" = "update" ]; then
-        clean_tool_state "$tool" 0 1
-        [ "$tool" != "claude" ] || rm -f "$(get_claude_config_dir)/hooks/macroscope-bash-autoallow.sh"
-      fi
       case "$tool" in
         claude) install_claude_plugin ;;
         codex) install_codex_cli_shim; install_codex_plugin ;;
@@ -3316,7 +2836,6 @@ main() {
       remove_tool_integration "$tool"
     fi
   done
-  apply_host_permissions
   clean_legacy_mcp_state
   if [ "${MACROSCOPE_TEST_FAIL_AFTER_LEGACY_CLEANUP:-0}" = "1" ]; then
     error "Injected failure after legacy MCP cleanup"

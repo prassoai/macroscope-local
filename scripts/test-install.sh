@@ -359,7 +359,7 @@ test_dry_run_is_read_only() {
   new_home
   local before after
   before="$(tree_digest "$TEST_HOME")"
-  run_install --dry-run --tools claude,codex --host-permissions skip --no-wizard >"$TEST_ROOT/out"
+  run_install --dry-run --tools claude,codex --no-wizard >"$TEST_ROOT/out"
   after="$(tree_digest "$TEST_HOME")"
   [ "$before" = "$after" ] || fail "dry-run changed HOME"
   [ -z "$(find "$TEST_HOME" -mindepth 1 -print -quit)" ] || fail "dry-run created files"
@@ -374,7 +374,7 @@ test_empty_version_binary_is_rejected_before_apply() {
   printf '#!/bin/sh\nexit 0\n' > "$noversion"
   chmod +x "$noversion"
   set +e
-  TEST_BINARY="$noversion" run_install --yes --tools none --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/out" 2>"$TEST_ROOT/err"
+  TEST_BINARY="$noversion" run_install --yes --tools none --no-path --no-wizard >"$TEST_ROOT/out" 2>"$TEST_ROOT/err"
   local code=$?
   set -e
   [ "$code" -ne 0 ] || fail "empty-version binary passed validation"
@@ -388,7 +388,7 @@ test_selected_tool_assets_are_validated_before_apply() {
   cp -R "$REPO_ROOT" "$broken_bundle"
   rm -f "$broken_bundle/plugins/macroscope/skills/autoloop/SKILL.md"
   set +e
-  TEST_PLUGIN_BUNDLE="$broken_bundle" run_install --yes --tools opencode --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/out" 2>"$TEST_ROOT/err"
+  TEST_PLUGIN_BUNDLE="$broken_bundle" run_install --yes --tools opencode --no-path --no-wizard >"$TEST_ROOT/out" 2>"$TEST_ROOT/err"
   local code=$?
   set -e
   [ "$code" -ne 0 ] || fail "incomplete selected-tool assets passed validation"
@@ -400,7 +400,7 @@ test_existing_install_directory_mode_is_preserved() {
   new_home
   mkdir -p "$TEST_HOME/.local/bin"
   chmod 700 "$TEST_HOME/.local/bin"
-  run_install --yes --tools none --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/out"
+  run_install --yes --tools none --no-path --no-wizard >"$TEST_ROOT/out"
   local mode=""
   mode="$(stat -c '%a' "$TEST_HOME/.local/bin" 2>/dev/null || stat -f '%Lp' "$TEST_HOME/.local/bin")"
   [ "$mode" = "700" ] || fail "existing install directory mode changed to $mode"
@@ -412,9 +412,9 @@ test_codex_wrapper_is_announced_in_plan() {
   local bundled_codex="$TEST_ROOT/codex'quoted"
   printf '#!/bin/sh\n[ "${1:-}" != "--help" ] || printf "app-server\\n"\n' > "$bundled_codex"
   chmod +x "$bundled_codex"
-  TEST_CODEX_BUNDLED_BINARY="$bundled_codex" run_install --dry-run --tools codex --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/out"
+  TEST_CODEX_BUNDLED_BINARY="$bundled_codex" run_install --dry-run --tools codex --no-path --no-wizard >"$TEST_ROOT/out"
   grep -Fq "Install or update the managed Codex CLI wrapper at $TEST_HOME/.local/bin/codex" "$TEST_ROOT/out" || fail "Codex wrapper missing from plan"
-  TEST_CODEX_BUNDLED_BINARY="$bundled_codex" run_install --yes --tools codex --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/out"
+  TEST_CODEX_BUNDLED_BINARY="$bundled_codex" run_install --yes --tools codex --no-path --no-wizard >"$TEST_ROOT/out"
   "$TEST_HOME/.local/bin/codex" --help | grep -Fq 'app-server' || fail "Codex wrapper did not preserve a quoted binary path"
   pass "Codex wrapper is announced and safely quoted"
 }
@@ -426,7 +426,7 @@ test_codex_desktop_binary_is_found_in_chatgpt_app() {
   chmod +x "$bundled_codex"
   TEST_CODEX_APP_BINARY="$TEST_ROOT/missing-codex-app" \
     TEST_CHATGPT_APP_BINARY="$bundled_codex" \
-    run_install --yes --tools codex --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/out"
+    run_install --yes --tools codex --no-path --no-wizard >"$TEST_ROOT/out"
   grep -Fq "exec $bundled_codex" "$TEST_HOME/.local/bin/codex" || fail "Codex wrapper did not use the ChatGPT.app fallback binary"
   ! grep -Fq 'does not support local plugins' "$TEST_ROOT/out" || fail "ChatGPT.app fallback still emitted a plugin-host warning"
   pass "Codex desktop binary is discovered in ChatGPT.app"
@@ -434,7 +434,7 @@ test_codex_desktop_binary_is_found_in_chatgpt_app() {
 
 test_option_terminator_allows_dash_prefixed_version() {
   new_home
-  run_install --dry-run --tools none --host-permissions skip --no-wizard -- -beta >"$TEST_ROOT/out"
+  run_install --dry-run --tools none --no-wizard -- -beta >"$TEST_ROOT/out"
   grep -Fq 'Requested version: -beta' "$TEST_ROOT/out" || fail "-- did not preserve a dash-prefixed version"
   pass "option terminator preserves a dash-prefixed version"
 }
@@ -443,10 +443,10 @@ test_invalid_state_falls_back_to_detected_tools() {
   new_home
   mkdir -p "$TEST_HOME/.local/state/macroscope" "$TEST_HOME/.cursor/plugins/local/macroscope"
   printf '{' > "$TEST_HOME/.local/state/macroscope/install.json"
-  run_install --mode update --dry-run --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/out"
+  run_install --mode update --dry-run --no-path --no-wizard >"$TEST_ROOT/out"
   grep -Fq 'Install or update the following plugin for cursor' "$TEST_ROOT/out" || fail "invalid state did not fall back to detected integrations"
   printf '{"tools":null}\n' > "$TEST_HOME/.local/state/macroscope/install.json"
-  run_install --mode update --dry-run --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/out"
+  run_install --mode update --dry-run --no-path --no-wizard >"$TEST_ROOT/out"
   grep -Fq 'Install or update the following plugin for cursor' "$TEST_ROOT/out" || fail "invalid state schema did not fall back to detected integrations"
   pass "invalid state falls back to detected integrations"
 }
@@ -487,7 +487,7 @@ test_legacy_cleanup_does_not_kill_regex_near_process() {
   ln -s /bin/sleep "$decoy_path"
   "$decoy_path" 86400 &
   DECOY_PID=$!
-  run_install --mode update --yes --tools none --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/out"
+  run_install --mode update --yes --tools none --no-path --no-wizard >"$TEST_ROOT/out"
   if ! kill -0 "$DECOY_PID" 2>/dev/null; then
     fail "legacy cleanup killed a regex-near process"
   fi
@@ -497,11 +497,11 @@ test_legacy_cleanup_does_not_kill_regex_near_process() {
   pass "legacy cleanup only kills the literal executable path"
 }
 
-test_opencode_scalar_permissions_are_preserved() {
+test_opencode_permissions_are_untouched() {
   new_home
   mkdir -p "$TEST_HOME/.config/opencode"
   printf '{"permission":"allow"}\n' > "$TEST_HOME/.config/opencode/opencode.json"
-  run_install --yes --tools opencode --host-permissions grant --no-path --no-wizard >"$TEST_ROOT/out"
+  run_install --yes --tools opencode --no-path --no-wizard >"$TEST_ROOT/out"
   python3 - "$TEST_HOME/.config/opencode/opencode.json" <<'PY'
 import json, sys
 with open(sys.argv[1], encoding="utf-8") as f:
@@ -512,13 +512,15 @@ PY
 import json, sys
 with open(sys.argv[1], encoding="utf-8") as f:
     state = json.load(f)
-assert state["permissionOwnership"]["opencode"]["inserted"] == []
+assert state["schemaVersion"] == 3
+assert "hostPermissions" not in state
+assert "permissionOwnership" not in state
 PY
 
   new_home
   mkdir -p "$TEST_HOME/.config/opencode"
   printf '{"permission":{"bash":"allow","edit":"deny"}}\n' > "$TEST_HOME/.config/opencode/opencode.json"
-  run_install --yes --tools opencode --host-permissions grant --no-path --no-wizard >"$TEST_ROOT/out"
+  run_install --yes --tools opencode --no-path --no-wizard >"$TEST_ROOT/out"
   python3 - "$TEST_HOME/.config/opencode/opencode.json" <<'PY'
 import json, sys
 with open(sys.argv[1], encoding="utf-8") as f:
@@ -529,22 +531,20 @@ PY
   new_home
   mkdir -p "$TEST_HOME/.config/opencode"
   printf '{"permission":{"bash":"ask"}}\n' > "$TEST_HOME/.config/opencode/opencode.json"
-  run_install --yes --tools opencode --host-permissions grant --no-path --no-wizard >"$TEST_ROOT/out"
+  run_install --yes --tools opencode --no-path --no-wizard >"$TEST_ROOT/out"
   python3 - "$TEST_HOME/.config/opencode/opencode.json" <<'PY'
 import json, sys
 with open(sys.argv[1], encoding="utf-8") as f:
     data = json.load(f)
-bash = data["permission"]["bash"]
-assert bash["*"] == "ask"
-assert bash["macroscope *"] == "allow"
+assert data["permission"] == {"bash": "ask"}
 PY
-  pass "OpenCode scalar permissions are preserved"
+  pass "OpenCode permissions are untouched"
 }
 
 test_noninteractive_requires_consent() {
   new_home
   set +e
-  run_install --tools none --host-permissions skip --no-wizard >"$TEST_ROOT/out" 2>"$TEST_ROOT/err"
+  run_install --tools none --no-wizard >"$TEST_ROOT/out" 2>"$TEST_ROOT/err"
   local code=$?
   set -e
   [ "$code" -eq 3 ] || fail "unconfirmed noninteractive install exited $code, want 3"
@@ -562,7 +562,7 @@ test_no_controlling_tty_requires_consent() {
     PATH=/usr/bin:/bin \
     MACROSCOPE_LOCAL_BINARY_SOURCE=/usr/bin/true \
     MACROSCOPE_PLUGIN_BUNDLE_SOURCE="$REPO_ROOT" \
-    bash "$INSTALLER" --tools none --host-permissions skip --no-wizard \
+    bash "$INSTALLER" --tools none --no-wizard \
       >"$TEST_ROOT/out" 2>"$TEST_ROOT/err"
   local code=$?
   set -e
@@ -575,7 +575,7 @@ test_zsh_touches_one_profile_and_selected_tool_only() {
   new_home
   printf '# zsh\n' > "$TEST_HOME/.zshrc"
   printf '# bash\n' > "$TEST_HOME/.bashrc"
-  run_install --yes --tools claude --host-permissions skip --no-wizard >"$TEST_ROOT/out"
+  run_install --yes --tools claude --no-wizard >"$TEST_ROOT/out"
   grep -Fq '# Added by Macroscope installer' "$TEST_HOME/.zshrc" || fail "zshrc not updated"
   [ ! -e "$TEST_HOME/.zprofile" ] || fail "second zsh profile was created"
   [ "$(cat "$TEST_HOME/.bashrc")" = '# bash' ] || fail "bashrc was modified"
@@ -593,7 +593,7 @@ test_initial_install_does_not_modify_unselected_existing_tool() {
   new_home
   mkdir -p "$TEST_HOME/.cursor/plugins/local/macroscope"
   printf 'user-managed\n' > "$TEST_HOME/.cursor/plugins/local/macroscope/keep"
-  run_install --yes --tools claude --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/out"
+  run_install --yes --tools claude --no-path --no-wizard >"$TEST_ROOT/out"
   [ "$(cat "$TEST_HOME/.cursor/plugins/local/macroscope/keep")" = "user-managed" ] || fail "initial install modified an unselected existing tool"
   pass "initial install leaves unselected existing tool state untouched"
 }
@@ -601,7 +601,7 @@ test_initial_install_does_not_modify_unselected_existing_tool() {
 test_active_path_skips_profiles() {
   new_home
   TEST_PATH="$TEST_HOME/.local/bin:/usr/bin:/bin"
-  run_install --yes --tools none --host-permissions skip --no-wizard >"$TEST_ROOT/out"
+  run_install --yes --tools none --no-wizard >"$TEST_ROOT/out"
   [ ! -e "$TEST_HOME/.zshrc" ] && [ ! -e "$TEST_HOME/.zprofile" ] || fail "active PATH still changed profiles"
   python3 - "$TEST_HOME/.local/state/macroscope/install.json" <<'PY' || fail "active PATH was treated as an explicit opt-out"
 import json, sys
@@ -609,10 +609,10 @@ with open(sys.argv[1], encoding="utf-8") as f: data = json.load(f)
 assert data["pathPolicy"] == "auto"
 assert data["pathFile"] is None
 PY
-  run_install --mode update --yes --tools none --host-permissions skip --no-wizard >"$TEST_ROOT/out"
+  run_install --mode update --yes --tools none --no-wizard >"$TEST_ROOT/out"
   [ ! -e "$TEST_HOME/.zshrc" ] && [ ! -e "$TEST_HOME/.zprofile" ] || fail "still-active PATH changed profiles"
   unset TEST_PATH
-  run_install --mode update --yes --tools none --host-permissions skip --no-wizard >"$TEST_ROOT/out"
+  run_install --mode update --yes --tools none --no-wizard >"$TEST_ROOT/out"
   grep -Fq '# Added by Macroscope installer' "$TEST_HOME/.zprofile" || fail "missing ambient PATH was not repaired"
   python3 - "$TEST_HOME/.local/state/macroscope/install.json" <<'PY' || fail "repaired PATH was not recorded as managed"
 import json, sys
@@ -625,7 +625,7 @@ PY
 
 test_initial_defaults_to_all_tools() {
   new_home
-  run_install --yes --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/out"
+  run_install --yes --no-path --no-wizard >"$TEST_ROOT/out"
   [ -d "$TEST_HOME/.claude/plugins/cache/macroscope-local" ] || fail "default Claude plugin missing"
   [ -d "$TEST_HOME/plugins/macroscope" ] || fail "default Codex plugin missing"
   [ -d "$TEST_HOME/.cursor/plugins/local/macroscope" ] || fail "default Cursor plugin missing"
@@ -641,8 +641,8 @@ PY
 test_shell_config_override_is_exact() {
   new_home
   TEST_SHELL=/bin/bash
-  run_install --yes --tools none --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/out"
-  run_install --mode update --yes --tools none --host-permissions skip --shell-config "$TEST_HOME/dotfiles/shell.env" --no-wizard >"$TEST_ROOT/out"
+  run_install --yes --tools none --no-path --no-wizard >"$TEST_ROOT/out"
+  run_install --mode update --yes --tools none --shell-config "$TEST_HOME/dotfiles/shell.env" --no-wizard >"$TEST_ROOT/out"
   python3 - "$TEST_HOME/.local/state/macroscope/install.json" "$TEST_HOME/dotfiles/shell.env" <<'PY' || fail "shell override did not restore managed policy"
 import json, sys
 with open(sys.argv[1], encoding="utf-8") as f: data = json.load(f)
@@ -650,7 +650,7 @@ assert data["pathPolicy"] == "managed"
 assert data["pathFile"] == sys.argv[2]
 PY
   printf '# user shell config\n' > "$TEST_HOME/dotfiles/shell.env"
-  run_install --mode update --yes --tools none --host-permissions skip --no-wizard >"$TEST_ROOT/out"
+  run_install --mode update --yes --tools none --no-wizard >"$TEST_ROOT/out"
   grep -Fq '# Added by Macroscope installer' "$TEST_HOME/dotfiles/shell.env" || fail "shell override was not updated"
   [ ! -e "$TEST_HOME/.bashrc" ] && [ ! -e "$TEST_HOME/.bash_profile" ] || fail "shell override also changed default profiles"
   [ "$(grep -Fc '# Added by Macroscope installer' "$TEST_HOME/dotfiles/shell.env")" -eq 1 ] || fail "recorded shell target was duplicated"
@@ -660,27 +660,27 @@ PY
 
 test_no_path_policy_survives_update() {
   new_home
-  run_install --yes --tools none --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/out"
+  run_install --yes --tools none --no-path --no-wizard >"$TEST_ROOT/out"
   grep -Fq 'remember --no-path for future updates' "$TEST_ROOT/out" || fail "explicit --no-path persistence was not disclosed"
   printf '# user zsh config\n' > "$TEST_HOME/.zshrc"
-  run_install --mode update --yes --tools none --host-permissions skip --no-wizard >"$TEST_ROOT/out"
+  run_install --mode update --yes --tools none --no-wizard >"$TEST_ROOT/out"
   grep -Fq 'remembered --no-path; use --shell-config PATH to manage it' "$TEST_ROOT/out" || fail "remembered --no-path was not explained"
   [ "$(cat "$TEST_HOME/.zshrc")" = '# user zsh config' ] || fail "stored --no-path policy did not protect zshrc"
   [ ! -e "$TEST_HOME/.zprofile" ] || fail "stored --no-path policy created zprofile"
   python3 - "$TEST_HOME/.local/state/macroscope/install.json" <<'PY' || fail "--no-path policy was not persisted"
 import json, sys
 with open(sys.argv[1], encoding="utf-8") as f: data = json.load(f)
-assert data["schemaVersion"] == 2
+assert data["schemaVersion"] == 3
 assert data["pathPolicy"] == "skip"
 assert data["pathFile"] is None
 PY
 
   new_home
   local prior_target="$TEST_HOME/dotfiles/prior.env"
-  run_install --yes --tools none --host-permissions skip --shell-config "$prior_target" --no-wizard >"$TEST_ROOT/out"
-  run_install --mode update --yes --tools none --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/out"
+  run_install --yes --tools none --shell-config "$prior_target" --no-wizard >"$TEST_ROOT/out"
+  run_install --mode update --yes --tools none --no-path --no-wizard >"$TEST_ROOT/out"
   printf '# user now owns PATH\n' > "$prior_target"
-  run_install --mode update --yes --tools none --host-permissions skip --no-wizard >"$TEST_ROOT/out"
+  run_install --mode update --yes --tools none --no-wizard >"$TEST_ROOT/out"
   [ "$(cat "$prior_target")" = '# user now owns PATH' ] || fail "retained pathFile overrode skip policy"
   python3 - "$TEST_HOME/.local/state/macroscope/install.json" "$prior_target" <<'PY' || fail "--no-path discarded prior target history"
 import json, sys
@@ -696,12 +696,12 @@ test_legacy_path_policy_preserves_behavior() {
   mkdir -p "$TEST_HOME/.local/state/macroscope"
   local legacy_target="$TEST_HOME/dotfiles/legacy.env"
   printf '{"schemaVersion":1,"tools":[],"hostPermissions":"skip","pathFile":"%s","permissionOwnership":{}}\n' "$legacy_target" > "$TEST_HOME/.local/state/macroscope/install.json"
-  run_install --mode update --yes --tools none --host-permissions skip --no-wizard >"$TEST_ROOT/out"
+  run_install --mode update --yes --tools none --no-wizard >"$TEST_ROOT/out"
   grep -Fq '# Added by Macroscope installer' "$legacy_target" || fail "legacy managed path target was not repaired"
   python3 - "$TEST_HOME/.local/state/macroscope/install.json" "$legacy_target" <<'PY' || fail "legacy managed path policy was not preserved"
 import json, sys
 with open(sys.argv[1], encoding="utf-8") as f: data = json.load(f)
-assert data["schemaVersion"] == 2
+assert data["schemaVersion"] == 3
 assert data["pathPolicy"] == "managed"
 assert data["pathFile"] == sys.argv[2]
 PY
@@ -710,16 +710,16 @@ PY
   mkdir -p "$TEST_HOME/.local/state/macroscope"
   printf '{"schemaVersion":1,"tools":[],"hostPermissions":"skip","pathFile":null,"permissionOwnership":{}}\n' > "$TEST_HOME/.local/state/macroscope/install.json"
   TEST_PATH="$TEST_HOME/.local/bin:/usr/bin:/bin"
-  run_install --mode update --yes --tools none --host-permissions skip --no-wizard >"$TEST_ROOT/out"
+  run_install --mode update --yes --tools none --no-wizard >"$TEST_ROOT/out"
   [ ! -e "$TEST_HOME/.zshrc" ] && [ ! -e "$TEST_HOME/.zprofile" ] || fail "active legacy PATH changed a shell profile"
   python3 - "$TEST_HOME/.local/state/macroscope/install.json" <<'PY' || fail "legacy active PATH was not migrated to auto"
 import json, sys
 with open(sys.argv[1], encoding="utf-8") as f: data = json.load(f)
-assert data["schemaVersion"] == 2
+assert data["schemaVersion"] == 3
 assert data["pathPolicy"] == "auto"
 PY
   unset TEST_PATH
-  run_install --mode update --yes --tools none --host-permissions skip --no-wizard >"$TEST_ROOT/out"
+  run_install --mode update --yes --tools none --no-wizard >"$TEST_ROOT/out"
   grep -Fq '# Added by Macroscope installer' "$TEST_HOME/.zprofile" || fail "legacy automatic PATH behavior was not preserved"
   pass "legacy state preserves managed and automatic PATH behavior"
 }
@@ -727,91 +727,81 @@ PY
 test_recorded_shell_target_preserves_its_syntax() {
   new_home
   TEST_SHELL=/bin/fish
-  run_install --yes --tools none --host-permissions skip --shell-config "$TEST_HOME/.config/fish/config.fish" --no-wizard >"$TEST_ROOT/out"
+  run_install --yes --tools none --shell-config "$TEST_HOME/.config/fish/config.fish" --no-wizard >"$TEST_ROOT/out"
   printf '' > "$TEST_HOME/.config/fish/config.fish"
-  TEST_SHELL=/bin/zsh run_install --mode update --yes --tools none --host-permissions skip --no-wizard >"$TEST_ROOT/out"
+  TEST_SHELL=/bin/zsh run_install --mode update --yes --tools none --no-wizard >"$TEST_ROOT/out"
   grep -Fq 'set -Ux fish_user_paths' "$TEST_HOME/.config/fish/config.fish" || fail "saved fish target received non-fish syntax"
 
   new_home
   TEST_SHELL=/bin/zsh
-  run_install --yes --tools none --host-permissions skip --shell-config "$TEST_HOME/.zprofile" --no-wizard >"$TEST_ROOT/out"
+  run_install --yes --tools none --shell-config "$TEST_HOME/.zprofile" --no-wizard >"$TEST_ROOT/out"
   printf '' > "$TEST_HOME/.zprofile"
-  TEST_SHELL=/bin/fish run_install --mode update --yes --tools none --host-permissions skip --no-wizard >"$TEST_ROOT/out"
+  TEST_SHELL=/bin/fish run_install --mode update --yes --tools none --no-wizard >"$TEST_ROOT/out"
   grep -Fq 'export PATH=' "$TEST_HOME/.zprofile" || fail "saved zsh target received fish syntax"
   pass "recorded shell targets preserve their syntax"
   unset TEST_SHELL
 }
 
-test_permissions_are_opt_in_and_owned() {
+test_installer_never_adds_command_permissions() {
   new_home
   TEST_PATH="$TEST_HOME/.local/bin:/usr/bin:/bin"
   run_install --yes --tools claude,cursor,opencode --host-permissions grant --no-wizard >"$TEST_ROOT/out"
-  grep -q 'Bash(macroscope \*)' "$TEST_HOME/.claude/settings.json" || fail "Claude rule missing"
-  [ -x "$TEST_HOME/.claude/hooks/macroscope-bash-autoallow.sh" ] || fail "Claude hook missing"
-  grep -q 'Shell(macroscope \*)' "$TEST_HOME/.cursor/cli-config.json" || fail "Cursor rule missing"
-  grep -q '"macroscope \*": "allow"' "$TEST_HOME/.config/opencode/opencode.json" || fail "OpenCode rule missing"
-  python3 - "$TEST_HOME/.local/state/macroscope/install.json" <<'PY' || fail "permission ownership not recorded"
+  ! grep -q 'Bash(macroscope' "$TEST_HOME/.claude/settings.json" || fail "Claude rule was added"
+  [ ! -e "$TEST_HOME/.claude/hooks/macroscope-bash-autoallow.sh" ] || fail "Claude hook was added"
+  [ ! -e "$TEST_HOME/.cursor/cli-config.json" ] || ! grep -q 'Shell(macroscope' "$TEST_HOME/.cursor/cli-config.json" || fail "Cursor rule was added"
+  [ ! -e "$TEST_HOME/.config/opencode/opencode.json" ] || ! grep -q '"macroscope ' "$TEST_HOME/.config/opencode/opencode.json" || fail "OpenCode rule was added"
+  python3 - "$TEST_HOME/.local/state/macroscope/install.json" <<'PY' || fail "removed permission state was persisted"
 import json, sys
 with open(sys.argv[1]) as f: data = json.load(f)
-assert data["hostPermissions"] == "grant"
-assert data["permissionOwnership"]["claude"]["inserted"]
-assert data["permissionOwnership"]["cursor"]["inserted"]
-assert data["permissionOwnership"]["opencode"]["inserted"]
+assert data["schemaVersion"] == 3
+assert "hostPermissions" not in data
+assert "permissionOwnership" not in data
 PY
-  python3 - "$TEST_HOME/.claude/hooks/macroscope-bash-autoallow.sh" <<'PY' || fail "Claude hook command validation failed"
-import json, subprocess, sys
-hook = sys.argv[1]
-
-def decision(command):
-    payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": command}})
-    return subprocess.run([hook], input=payload, text=True, capture_output=True, check=True).stdout.strip()
-
-assert decision('macroscope codereview --raw &')
-assert decision('review_log=$(mktemp "${TMPDIR:-/tmp}/review.XXXXXX")')
-assert not decision('macroscope --help > ~/.zshrc')
-assert not decision('mktemp >> ~/.bash_profile')
-assert not decision('macroscope codereview &>review.log')
-assert not decision('macroscope --help; rm -rf "$HOME/data"')
-assert not decision('macroscope codereview | sh')
-assert not decision('macroscope "$(rm -rf "$HOME/data")"')
-PY
-  pass "host permission automation is explicit and ownership-tracked"
+  pass "installer never adds command permission automation"
   unset TEST_PATH
 }
 
-test_permission_updates_preserve_managed_symlinks() {
+test_update_preserves_recorded_permissions_in_managed_symlink() {
   new_home
-  mkdir -p "$TEST_ROOT/dotfiles" "$TEST_HOME/.claude"
-  printf '{}\n' > "$TEST_ROOT/dotfiles/claude-settings.json"
+  mkdir -p "$TEST_ROOT/dotfiles" "$TEST_HOME/.claude" "$TEST_HOME/.local/state/macroscope"
+  printf '{"permissions":{"allow":["Bash(macroscope *)","Bash(user-command *)"]}}\n' > "$TEST_ROOT/dotfiles/claude-settings.json"
   ln -s "$TEST_ROOT/dotfiles/claude-settings.json" "$TEST_HOME/.claude/settings.json"
-  run_install --yes --tools claude --host-permissions grant --no-path --no-wizard >"$TEST_ROOT/out"
-  [ -L "$TEST_HOME/.claude/settings.json" ] || fail "permission update replaced a managed settings symlink"
-  grep -q 'Bash(macroscope \*)' "$TEST_ROOT/dotfiles/claude-settings.json" || fail "permission update did not modify the symlink target"
-  pass "permission updates preserve managed settings symlinks"
+  printf '%s\n' '{"schemaVersion":2,"tools":["claude"],"hostPermissions":"grant","pathFile":null,"pathPolicy":"skip","permissionOwnership":{"claude":{"inserted":["Bash(macroscope *)"]}}}' > "$TEST_HOME/.local/state/macroscope/install.json"
+  run_install --mode update --yes --tools claude --no-path --no-wizard >"$TEST_ROOT/out"
+  [ -L "$TEST_HOME/.claude/settings.json" ] || fail "update replaced a managed settings symlink"
+  python3 - "$TEST_ROOT/dotfiles/claude-settings.json" <<'PY' || fail "update changed recorded permission rules"
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as f: data = json.load(f)
+assert data["permissions"]["allow"] == ["Bash(macroscope *)", "Bash(user-command *)"]
+PY
+  pass "updates preserve recorded permission rules in managed settings symlinks"
 }
 
 test_update_preserves_footprint_and_removes_deselected() {
   new_home
   TEST_PATH="$TEST_HOME/.local/bin:/usr/bin:/bin"
-  run_install --yes --tools claude --host-permissions grant --no-wizard >"$TEST_ROOT/initial"
+  run_install --yes --tools claude --no-wizard >"$TEST_ROOT/initial"
   run_install --mode update --yes >"$TEST_ROOT/update"
   python3 - "$TEST_HOME/.local/state/macroscope/install.json" <<'PY' || fail "update expanded integration footprint"
 import json, sys
 with open(sys.argv[1]) as f: data = json.load(f)
 assert data["tools"] == ["claude"]
-assert data["hostPermissions"] == "grant"
+assert "hostPermissions" not in data
+assert "permissionOwnership" not in data
 PY
   [ ! -e "$TEST_HOME/.cursor" ] && [ ! -e "$TEST_HOME/.config/opencode" ] || fail "update installed new tools"
-  run_install --mode update --yes --tools none --host-permissions skip >"$TEST_ROOT/remove"
+  mkdir -p "$TEST_HOME/.claude/hooks"
+  printf '#!/bin/sh\n# retained beta auto-approval hook\n' > "$TEST_HOME/.claude/hooks/macroscope-bash-autoallow.sh"
+  run_install --mode update --yes --tools none >"$TEST_ROOT/remove"
   [ ! -e "$TEST_HOME/.claude/plugins/cache/macroscope-local" ] || fail "deselected Claude plugin remains"
-  [ ! -e "$TEST_HOME/.claude/hooks/macroscope-bash-autoallow.sh" ] || fail "deselected Claude hook remains"
-  pass "update preserves prior footprint and explicitly removes deselected state"
+  [ -e "$TEST_HOME/.claude/hooks/macroscope-bash-autoallow.sh" ] || fail "deselecting Claude removed its existing approval hook"
+  pass "update removes deselected plugins without removing existing approval hooks"
   unset TEST_PATH TEST_BINARY
 }
 
-test_legacy_update_preserves_unowned_permissions() {
+test_update_preserves_existing_permission_rules_and_hook() {
   new_home
-  mkdir -p "$TEST_HOME/.claude/plugins/cache/macroscope-local" "$TEST_HOME/.claude/hooks"
+  mkdir -p "$TEST_HOME/.claude/plugins/cache/macroscope-local" "$TEST_HOME/.claude/hooks" "$TEST_HOME/.cursor" "$TEST_HOME/.config/opencode" "$TEST_HOME/.local/state/macroscope"
   cat > "$TEST_HOME/.claude/settings.json" <<'JSON'
 {
   "permissions": {
@@ -819,19 +809,26 @@ test_legacy_update_preserves_unowned_permissions() {
   }
 }
 JSON
+  printf '%s\n' '{"permissions":{"allow":["Shell(macroscope *)","Shell(user-command *)"]}}' > "$TEST_HOME/.cursor/cli-config.json"
+  printf '%s\n' '{"permission":{"bash":{"macroscope *":"allow","user-command *":"allow"}}}' > "$TEST_HOME/.config/opencode/opencode.json"
   printf '#!/bin/sh\n' > "$TEST_HOME/.claude/hooks/macroscope-bash-autoallow.sh"
   chmod +x "$TEST_HOME/.claude/hooks/macroscope-bash-autoallow.sh"
+  printf '%s\n' '{"schemaVersion":2,"tools":["claude"],"hostPermissions":"grant","pathFile":null,"pathPolicy":"skip","permissionOwnership":{"claude":{"inserted":["Bash(macroscope *)"]},"cursor":{"inserted":["Shell(macroscope *)"]},"opencode":{"inserted":["macroscope *"]}}}' > "$TEST_HOME/.local/state/macroscope/install.json"
   run_install --mode update --yes --no-path --no-wizard >"$TEST_ROOT/update"
-  python3 - "$TEST_HOME/.claude/settings.json" "$TEST_HOME/.local/state/macroscope/install.json" <<'PY' || fail "legacy permission state was not preserved"
+  python3 - "$TEST_HOME/.claude/settings.json" "$TEST_HOME/.cursor/cli-config.json" "$TEST_HOME/.config/opencode/opencode.json" "$TEST_HOME/.local/state/macroscope/install.json" <<'PY' || fail "existing permission state was not preserved"
 import json, sys
 with open(sys.argv[1]) as f: settings = json.load(f)
-with open(sys.argv[2]) as f: state = json.load(f)
+with open(sys.argv[2]) as f: cursor = json.load(f)
+with open(sys.argv[3]) as f: opencode = json.load(f)
+with open(sys.argv[4]) as f: state = json.load(f)
 assert settings["permissions"]["allow"] == ["Bash(macroscope *)"]
-assert state["hostPermissions"] == "preserve"
-assert state["permissionOwnership"]["claude"]["inserted"] == []
+assert cursor["permissions"]["allow"] == ["Shell(macroscope *)", "Shell(user-command *)"]
+assert opencode["permission"]["bash"] == {"macroscope *": "allow", "user-command *": "allow"}
+assert "hostPermissions" not in state
+assert "permissionOwnership" not in state
 PY
-  [ -x "$TEST_HOME/.claude/hooks/macroscope-bash-autoallow.sh" ] || fail "legacy hook was removed"
-  pass "legacy update preserves permission automation it cannot prove it owns"
+  [ -x "$TEST_HOME/.claude/hooks/macroscope-bash-autoallow.sh" ] || fail "update removed the existing approval hook"
+  pass "updates preserve existing approval rules and hooks even when legacy state recorded ownership"
 }
 
 test_legacy_explicit_skip_preserves_unowned_rules() {
@@ -852,14 +849,14 @@ import json, sys
 with open(sys.argv[1]) as f: settings = json.load(f)
 assert settings["permissions"]["allow"] == ["Bash(macroscope *)", "Bash(mktemp *)"]
 PY
-  [ ! -e "$TEST_HOME/.claude/hooks/macroscope-bash-autoallow.sh" ] || fail "explicit skip retained the installer-owned legacy hook"
-  pass "legacy explicit skip preserves unowned allow-rules"
+  [ -x "$TEST_HOME/.claude/hooks/macroscope-bash-autoallow.sh" ] || fail "deprecated skip flag removed the existing approval hook"
+  pass "deprecated permission flag is ignored while existing rules and hooks are preserved"
 }
 
 test_empty_recorded_footprint_does_not_expand_from_stale_files() {
   new_home
   TEST_PATH="$TEST_HOME/.local/bin:/usr/bin:/bin"
-  run_install --yes --tools none --host-permissions skip --no-wizard >"$TEST_ROOT/initial"
+  run_install --yes --tools none --no-wizard >"$TEST_ROOT/initial"
   mkdir -p "$TEST_HOME/.cursor/plugins/local/macroscope"
   cp "$REPO_ROOT/plugins/macroscope/.cursor-plugin/plugin.json" "$TEST_HOME/.cursor/plugins/local/macroscope/plugin.json"
   run_install --mode update --yes >"$TEST_ROOT/update"
@@ -880,7 +877,7 @@ test_failure_rolls_back_binary() {
   chmod +x "$TEST_HOME/.local/bin/macroscope"
   TEST_PATH="$TEST_HOME/.local/bin:/usr/bin:/bin"
   set +e
-  MACROSCOPE_TEST_FAIL_AFTER_BINARY=1 run_install --mode update --yes --tools none --host-permissions skip >"$TEST_ROOT/out" 2>"$TEST_ROOT/err"
+  MACROSCOPE_TEST_FAIL_AFTER_BINARY=1 run_install --mode update --yes --tools none >"$TEST_ROOT/out" 2>"$TEST_ROOT/err"
   local code=$?
   set -e
   [ "$code" -eq 70 ] || fail "injected failure exited $code"
@@ -898,7 +895,7 @@ test_rollback_handles_tabbed_home_without_truncation() {
   printf 'old-binary\n' > "$TEST_HOME/.local/bin/macroscope"
   chmod +x "$TEST_HOME/.local/bin/macroscope"
   set +e
-  MACROSCOPE_TEST_FAIL_AFTER_BINARY=1 run_install --mode update --yes --tools none --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/out" 2>"$TEST_ROOT/err"
+  MACROSCOPE_TEST_FAIL_AFTER_BINARY=1 run_install --mode update --yes --tools none --no-path --no-wizard >"$TEST_ROOT/out" 2>"$TEST_ROOT/err"
   local code=$?
   set -e
   [ "$code" -eq 70 ] || fail "tabbed-HOME injected failure exited $code"
@@ -916,7 +913,7 @@ test_plugin_failure_rolls_back_all_touched_state() {
   printf 'managed-zsh\n' > "$TEST_ROOT/dotfiles/zshrc"
   ln -s "$TEST_ROOT/dotfiles/zshrc" "$TEST_HOME/.zshrc"
   set +e
-  run_install --mode update --yes --tools claude --host-permissions skip --no-wizard >"$TEST_ROOT/out" 2>"$TEST_ROOT/err"
+  run_install --mode update --yes --tools claude --no-wizard >"$TEST_ROOT/out" 2>"$TEST_ROOT/err"
   local code=$?
   set -e
   [ "$code" -ne 0 ] || fail "invalid host settings did not fail the update"
@@ -936,7 +933,7 @@ JSON
   local before
   before="$(cat "$TEST_HOME/.claude.json")"
   set +e
-  MACROSCOPE_TEST_FAIL_AFTER_LEGACY_CLEANUP=1 run_install --mode update --yes --tools none --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/out" 2>"$TEST_ROOT/err"
+  MACROSCOPE_TEST_FAIL_AFTER_LEGACY_CLEANUP=1 run_install --mode update --yes --tools none --no-path --no-wizard >"$TEST_ROOT/out" 2>"$TEST_ROOT/err"
   local code=$?
   set -e
   [ "$code" -eq 71 ] || fail "injected legacy cleanup failure exited $code"
@@ -948,25 +945,27 @@ test_claude_config_dir_is_honored() {
   new_home
   local claude_config="$TEST_HOME/team-claude"
   TEST_CLAUDE_CONFIG_DIR="$claude_config"
-  run_install --yes --tools claude --host-permissions grant --no-path --no-wizard >"$TEST_ROOT/install"
+  run_install --yes --tools claude --no-path --no-wizard >"$TEST_ROOT/install"
   find "$claude_config/plugins/cache/macroscope-local/macroscope" -type f -path '*/.claude-plugin/plugin.json' -print -quit | grep -q . || fail "custom Claude cache was not populated"
   [ -f "$claude_config/settings.json" ] || fail "custom Claude settings were not populated"
-  [ -x "$claude_config/hooks/macroscope-bash-autoallow.sh" ] || fail "custom Claude hook was not populated"
+  [ ! -e "$claude_config/hooks/macroscope-bash-autoallow.sh" ] || fail "custom Claude config received a command approval hook"
   [ ! -e "$TEST_HOME/.claude" ] || fail "default Claude config was modified"
 
   cat > "$claude_config/.claude.json" <<'JSON'
 {"mcpServers":{"macroscope-codereview":{"command":"macroscope"},"keep":{"command":"keep"}}}
 JSON
-  run_install --mode update --yes --tools none --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/remove"
+  mkdir -p "$claude_config/hooks"
+  printf '#!/bin/sh\n# retained custom approval hook\n' > "$claude_config/hooks/macroscope-bash-autoallow.sh"
+  run_install --mode update --yes --tools none --no-path --no-wizard >"$TEST_ROOT/remove"
   [ ! -e "$claude_config/plugins/cache/macroscope-local" ] || fail "custom Claude cache was not removed"
-  [ ! -e "$claude_config/hooks/macroscope-bash-autoallow.sh" ] || fail "custom Claude hook was not removed"
+  [ -e "$claude_config/hooks/macroscope-bash-autoallow.sh" ] || fail "custom Claude approval hook was removed"
   python3 - "$claude_config/.claude.json" <<'PY' || fail "custom Claude MCP state was not cleaned"
 import json, sys
 with open(sys.argv[1], encoding="utf-8") as f: data = json.load(f)
 assert data["mcpServers"] == {"keep": {"command": "keep"}}
 PY
   unset TEST_CLAUDE_CONFIG_DIR
-  pass "CLAUDE_CONFIG_DIR controls Claude install, cleanup, permissions, and hooks"
+  pass "CLAUDE_CONFIG_DIR cleanup preserves existing approval hooks"
 }
 
 test_claude_cli_verifies_plugin_discovery() {
@@ -991,7 +990,7 @@ SH
   TEST_CLAUDE_CONFIG_DIR="$claude_config"
   TEST_CLAUDE_LOG="$TEST_ROOT/claude.log"
   TEST_PATH="$fake_bin:/usr/bin:/bin"
-  run_install --yes --tools claude --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/out"
+  run_install --yes --tools claude --no-path --no-wizard >"$TEST_ROOT/out"
   grep -Fq 'Claude Code CLI recognizes the enabled plugin and its components' "$TEST_ROOT/out" || fail "Claude plugin discovery was not verified"
   [ "$(grep -Fc "$claude_config|" "$TEST_CLAUDE_LOG")" -eq 2 ] || fail "Claude verification did not inherit CLAUDE_CONFIG_DIR"
   grep -Fq '|plugin list --json' "$TEST_CLAUDE_LOG" || fail "Claude plugin list was not called"
@@ -1005,13 +1004,13 @@ test_opencode_config_dirs_are_honored() {
   local opencode_config="$TEST_HOME/team-opencode"
   TEST_OPENCODE_CONFIG_DIR="$opencode_config"
   TEST_XDG_CONFIG_HOME="$TEST_HOME/ignored-xdg"
-  run_install --yes --tools opencode --host-permissions grant --no-path --no-wizard >"$TEST_ROOT/install"
+  run_install --yes --tools opencode --no-path --no-wizard >"$TEST_ROOT/install"
   [ -f "$opencode_config/plugins/macroscope.js" ] || fail "custom OpenCode plugin was not populated"
   [ -f "$opencode_config/commands/macroscope-codereview.md" ] || fail "custom OpenCode commands were not populated"
-  grep -Fq '"macroscope *": "allow"' "$opencode_config/opencode.json" || fail "custom OpenCode permissions were not populated"
+  [ ! -e "$opencode_config/opencode.json" ] || ! grep -Fq '"macroscope *": "allow"' "$opencode_config/opencode.json" || fail "custom OpenCode permissions were populated"
   [ ! -e "$TEST_HOME/.config/opencode" ] || fail "default OpenCode config was modified"
   [ ! -e "$TEST_HOME/ignored-xdg/opencode" ] || fail "XDG config overrode OPENCODE_CONFIG_DIR"
-  run_install --mode update --yes --tools none --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/remove"
+  run_install --mode update --yes --tools none --no-path --no-wizard >"$TEST_ROOT/remove"
   [ ! -e "$opencode_config/plugins/macroscope.js" ] || fail "custom OpenCode plugin was not removed"
   [ ! -e "$opencode_config/skills/codereview" ] || fail "custom OpenCode skills were not removed"
   unset TEST_OPENCODE_CONFIG_DIR TEST_XDG_CONFIG_HOME
@@ -1019,7 +1018,7 @@ test_opencode_config_dirs_are_honored() {
   new_home
   local xdg_config="$TEST_HOME/xdg"
   TEST_XDG_CONFIG_HOME="$xdg_config"
-  run_install --yes --tools opencode --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/xdg-install"
+  run_install --yes --tools opencode --no-path --no-wizard >"$TEST_ROOT/xdg-install"
   [ -f "$xdg_config/opencode/plugins/macroscope.js" ] || fail "XDG OpenCode plugin was not populated"
   [ ! -e "$TEST_HOME/.config/opencode" ] || fail "default OpenCode config was modified with XDG_CONFIG_HOME set"
   unset TEST_XDG_CONFIG_HOME
@@ -1028,7 +1027,7 @@ test_opencode_config_dirs_are_honored() {
 
 test_interactive_update_repairs_empty_tool_selection() {
   new_home
-  run_install --yes --tools none --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/initial"
+  run_install --yes --tools none --no-path --no-wizard >"$TEST_ROOT/initial"
   run_interactive_install "$TEST_ROOT/update" 0 \
     --no-path --no-wizard --events \
     "space to toggle="$'\n' \
@@ -1046,25 +1045,26 @@ PY
 
 test_resumed_update_reuses_saved_choices_without_prompts() {
   new_home
-  run_install --yes --tools claude --host-permissions grant --no-path --no-wizard >"$TEST_ROOT/initial"
+  run_install --yes --tools claude --no-path --no-wizard >"$TEST_ROOT/initial"
   run_interactive_install "$TEST_ROOT/update" 0 \
     --mode update --resume-command --no-wizard --events || fail "resumed update did not complete"
   ! grep -Fq 'Macroscope update will:' "$TEST_ROOT/update" || fail "resumed update exposed the change plan"
   ! grep -Fq 'Current integrations are selected below.' "$TEST_ROOT/update" || fail "resumed update prompted for integrations"
-  ! grep -Fq 'Optional Macroscope command auto-approval' "$TEST_ROOT/update" || fail "resumed update prompted for host permissions"
+  ! grep -Fq 'command auto-approval' "$TEST_ROOT/update" || fail "resumed update mentioned removed permission automation"
   ! grep -Fq 'Update and run the review?' "$TEST_ROOT/update" || fail "resumed update requested confirmation"
   python3 - "$TEST_HOME/.local/state/macroscope/install.json" <<'PY' || fail "resumed update changed saved choices"
 import json, sys
 with open(sys.argv[1], encoding="utf-8") as f: data = json.load(f)
 assert data["tools"] == ["claude"]
-assert data["hostPermissions"] == "grant"
+assert "hostPermissions" not in data
+assert "permissionOwnership" not in data
 PY
-  pass "resumed updates silently reuse saved integration and permission choices"
+  pass "resumed updates silently reuse saved integration and PATH choices"
 }
 
 test_resumed_update_does_not_expand_saved_config() {
   new_home
-  run_install --yes --tools claude --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/initial"
+  run_install --yes --tools claude --no-path --no-wizard >"$TEST_ROOT/initial"
   run_interactive_install "$TEST_ROOT/update" 0 \
     --mode update --resume-command --no-wizard --events || fail "saved-config update did not complete"
   [ -d "$TEST_HOME/.claude/plugins/cache/macroscope-local" ] || fail "saved Claude integration was not retained"
@@ -1077,9 +1077,10 @@ test_resumed_update_does_not_expand_saved_config() {
 import json, sys
 with open(sys.argv[1], encoding="utf-8") as f: data = json.load(f)
 assert data["tools"] == ["claude"]
-assert data["hostPermissions"] == "skip"
+assert "hostPermissions" not in data
+assert "permissionOwnership" not in data
 PY
-  pass "resumed updates do not expand saved plugins or auto-approval permissions"
+  pass "resumed updates do not expand saved plugins or add approval permissions"
 }
 
 test_resumed_update_prompts_for_incomplete_state() {
@@ -1093,8 +1094,7 @@ test_resumed_update_prompts_for_incomplete_state() {
     "Update and run the review?="$'\n' || fail "incomplete-state update did not complete"
   grep -Fq 'Macroscope update will:' "$TEST_ROOT/update" || fail "incomplete-state update hid the change plan"
   grep -Fq 'No Macroscope host integrations are currently selected.' "$TEST_ROOT/update" || fail "incomplete-state update did not prompt for integrations"
-  grep -Fq 'Allow Macroscope and mktemp command auto-approval for claude, cursor and opencode' "$TEST_ROOT/update" || fail "incomplete-state update did not explain host permissions"
-  ! grep -Fq 'Allow coding agents to auto-approve Macroscope commands?' "$TEST_ROOT/update" || fail "incomplete-state update showed a separate permission prompt"
+  ! grep -Fq 'command auto-approval' "$TEST_ROOT/update" || fail "incomplete-state update mentioned removed permission automation"
   grep -Fq 'Update and run the review?' "$TEST_ROOT/update" || fail "incomplete-state update did not request confirmation"
   pass "resumed updates keep prompts when saved install choices are incomplete"
 }
@@ -1113,55 +1113,79 @@ test_resumed_update_prompts_without_saved_path_policy() {
   pass "resumed updates prompt when legacy state has no saved PATH policy"
 }
 
-test_interactive_lists_select_only_claude_and_permissions() {
+test_interactive_lists_select_only_claude_without_permissions() {
   new_home
   run_interactive_install "$TEST_ROOT/install" 0 \
     --no-path --no-wizard --events \
     "space to toggle="$'\e[B \e[B \e[B \n' \
     "Proceed?="$'\n' || fail "interactive list selections did not complete"
-  grep -Fq 'Allow Macroscope and mktemp command auto-approval for claude' "$TEST_ROOT/install" || fail "confirmation plan did not explain auto-approval"
-  ! grep -Fq 'Allow coding agents to auto-approve Macroscope commands?' "$TEST_ROOT/install" || fail "install showed a separate permission prompt"
+  ! grep -Fq 'command auto-approval' "$TEST_ROOT/install" || fail "confirmation plan mentioned removed permission automation"
   python3 - "$TEST_HOME/.local/state/macroscope/install.json" <<'PY' || fail "interactive choices were not persisted"
 import json, sys
 with open(sys.argv[1], encoding="utf-8") as f: data = json.load(f)
 assert data["tools"] == ["claude"]
-assert data["hostPermissions"] == "grant"
+assert "hostPermissions" not in data
+assert "permissionOwnership" not in data
 PY
   [ -d "$TEST_HOME/.claude/plugins/cache/macroscope-local" ] || fail "selected Claude integration was not installed"
-  grep -Fq 'Bash(macroscope *)' "$TEST_HOME/.claude/settings.json" || fail "selected permission grant was not installed"
-  [ -x "$TEST_HOME/.claude/hooks/macroscope-bash-autoallow.sh" ] || fail "selected Claude permission hook was not installed"
+  ! grep -Fq 'Bash(macroscope *)' "$TEST_HOME/.claude/settings.json" || fail "selected Claude integration added a permission rule"
+  [ ! -e "$TEST_HOME/.claude/hooks/macroscope-bash-autoallow.sh" ] || fail "selected Claude integration added a permission hook"
   [ ! -e "$TEST_HOME/plugins/macroscope" ] || fail "deselected Codex integration was installed"
   [ ! -e "$TEST_HOME/.cursor/plugins/local/macroscope" ] || fail "deselected Cursor integration was installed"
   [ ! -e "$TEST_HOME/.config/opencode/plugins/macroscope.js" ] || fail "deselected OpenCode integration was installed"
-  pass "interactive lists select only Claude and grant host permissions with arrow keys"
+  pass "interactive lists select only Claude without adding host permissions"
 }
 
-test_confirmation_can_install_without_auto_approval() {
+test_confirmation_has_no_permission_branch() {
   new_home
   run_interactive_install "$TEST_ROOT/install" 0 \
     --tools claude --no-path --no-wizard --events \
-    "Proceed?="$'\e[B\e[B\n' || fail "confirmation could not disable auto-approval"
-  grep -Fq 'Installing without command auto-approval.' "$TEST_ROOT/install" || fail "confirmation did not report the auto-approval choice"
-  [ "$(grep -Fc 'Proceed?' "$TEST_ROOT/install")" -eq 1 ] || fail "auto-approval choice triggered a duplicate confirmation"
-  ! grep -Fq 'Bash(macroscope *)' "$TEST_HOME/.claude/settings.json" || fail "disabled auto-approval still added a Claude allow-rule"
-  [ ! -e "$TEST_HOME/.claude/hooks/macroscope-bash-autoallow.sh" ] || fail "disabled auto-approval still installed the Claude hook"
-  python3 - "$TEST_HOME/.local/state/macroscope/install.json" <<'PY' || fail "disabled auto-approval was not persisted"
-import json, sys
-with open(sys.argv[1], encoding="utf-8") as f: data = json.load(f)
-assert data["hostPermissions"] == "skip"
-PY
-  pass "final confirmation can install without command auto-approval"
+    "Proceed?="$'\n' || fail "confirmation did not complete"
+  [ "$(grep -Fc 'Proceed?' "$TEST_ROOT/install")" -eq 1 ] || fail "install showed more than one confirmation"
+  grep -Fq 'Show exact changes' "$TEST_ROOT/install" || fail "install confirmation omitted exact changes"
+  ! grep -Fq 'Install without command auto-approval' "$TEST_ROOT/install" || fail "install confirmation retained the permission bypass choice"
+  ! grep -Fq 'command auto-approval' "$TEST_ROOT/install" || fail "confirmation retained a permission branch"
+  ! grep -Fq 'Bash(macroscope *)' "$TEST_HOME/.claude/settings.json" || fail "install added a Claude allow-rule"
+  [ ! -e "$TEST_HOME/.claude/hooks/macroscope-bash-autoallow.sh" ] || fail "install added the Claude hook"
+  pass "install confirmation offers exact changes without a permission branch"
+}
+
+test_confirmation_can_show_exact_changes() {
+  new_home
+  run_interactive_install "$TEST_ROOT/install" 0 \
+    --tools claude,codex --no-path --no-wizard --events \
+    "Proceed?="$'\e[B\n' \
+    "Exact changes"=$'\n' || fail "exact-change inspection did not return to confirmation"
+  grep -Fq 'Exact changes' "$TEST_ROOT/install" || fail "exact-change details were not rendered"
+  grep -Fq "$TEST_HOME/.local/bin/macroscope" "$TEST_ROOT/install" || fail "exact changes omitted the CLI destination"
+  grep -Fq "$TEST_HOME/.claude/plugins/cache/macroscope-local/" "$TEST_ROOT/install" || fail "exact changes omitted Claude plugin files"
+  grep -Fq "$TEST_HOME/plugins/macroscope" "$TEST_ROOT/install" || fail "exact changes omitted Codex plugin files"
+  ! grep -Fq 'command auto-approval' "$TEST_ROOT/install" || fail "exact changes included removed permission automation"
+  pass "exact-change inspection returns to the install confirmation"
+}
+
+test_update_confirmation_has_no_permission_branch() {
+  new_home
+  run_install --yes --tools all --no-path --no-wizard >"$TEST_ROOT/initial"
+  run_interactive_install "$TEST_ROOT/update" 0 \
+    --mode update --tools all --no-path --no-wizard --events \
+    "Update and continue?="$'\n' || fail "explicit update confirmation did not complete"
+  grep -Fq 'Show exact changes' "$TEST_ROOT/update" || fail "update confirmation omitted exact changes"
+  ! grep -Fq 'Allow Macroscope and mktemp command auto-approval' "$TEST_ROOT/update" || fail "update plan retained the auto-approval action"
+  ! grep -Fq 'Install without command auto-approval' "$TEST_ROOT/update" || fail "update confirmation retained the permission bypass choice"
+  ! grep -Fq 'macroscope-bash-autoallow.sh' "$TEST_ROOT/update" || fail "update confirmation retained the approval hook path"
+  pass "explicit update confirmation has exact changes and no permission branch"
 }
 
 test_interactive_confirmation_list_can_cancel() {
   new_home
   run_interactive_install "$TEST_ROOT/cancel" 3 \
-    --tools none --host-permissions skip --no-path --no-wizard --events \
-    "Proceed?="$'\e[B\n' || fail "interactive confirmation did not cancel"
+    --tools none --no-path --no-wizard --events \
+    "Proceed?="$'\e[B\e[B\n' || fail "interactive confirmation did not cancel"
   grep -Fq 'Up/down or j/k to move; enter to choose.' "$TEST_ROOT/cancel" || fail "confirmation list instructions were not shown"
   grep -Fq 'Cancelled before making changes.' "$TEST_ROOT/cancel" || fail "confirmation cancellation was not reported"
   [ ! -e "$TEST_HOME/.local/bin/macroscope" ] || fail "cancelled confirmation changed the install"
-  pass "interactive confirmation uses a cancellable yes/no list"
+  pass "interactive confirmation uses a cancellable exact-change menu"
 }
 
 test_interactive_interrupt_restores_terminal() {
@@ -1177,7 +1201,7 @@ test_interactive_interrupt_restores_terminal() {
 test_interactive_confirmation_interrupt_restores_terminal() {
   new_home
   run_interactive_install "$TEST_ROOT/confirm-interrupt" interrupt \
-    --tools none --host-permissions skip --no-path --no-wizard --events \
+    --tools none --no-path --no-wizard --events \
     "Proceed?"=$'\003' || fail "confirmation interrupt did not restore the terminal"
   grep -Fq $'\033[?25h' "$TEST_ROOT/confirm-interrupt" || fail "confirmation interrupt did not restore the cursor"
   [ ! -e "$TEST_HOME/.local/bin/macroscope" ] || fail "confirmation interrupt changed the install"
@@ -1200,12 +1224,12 @@ test_update_plan_omits_negative_actions() {
   cp "$TEST_BINARY_DEFAULT" "$TEST_HOME/.local/bin/macroscope"
   printf 'api_url: test\n' > "$TEST_HOME/.macroscope/config.yaml"
   TEST_PATH="$TEST_HOME/.local/bin:/usr/bin:/bin"
-  run_install --mode update --dry-run --tools none --host-permissions skip --no-wizard >"$TEST_ROOT/out"
+  run_install --mode update --dry-run --tools none --no-wizard >"$TEST_ROOT/out"
   grep -Fq "1. Replace $TEST_HOME/.local/bin/macroscope" "$TEST_ROOT/out" || fail "update plan replacement is not first"
   grep -Fq "2. Keep PATH unchanged ($TEST_HOME/.local/bin is already active)" "$TEST_ROOT/out" || fail "update plan PATH action is not second"
-  grep -Fq '3. Clean legacy Macroscope MCP artifacts after the update is staged' "$TEST_ROOT/out" || fail "update plan cleanup is not third"
+  grep -Fq '3. Clean legacy Macroscope MCP artifacts after the update is staged' "$TEST_ROOT/out" || fail "MCP cleanup is not third"
+  ! grep -Fq 'command approval rules and hooks' "$TEST_ROOT/out" || fail "update plan still claims permission cleanup"
   [ "$(grep -Ec '^[0-9]+\.' "$TEST_ROOT/out")" -eq 3 ] || fail "update plan did not collapse to three actions"
-  ! grep -Fq 'Do not add host shell permission rules or hooks' "$TEST_ROOT/out" || fail "update plan still lists skipped permission automation"
   ! grep -Fq 'Do not launch the setup wizard' "$TEST_ROOT/out" || fail "update plan still lists skipped wizard launch"
   unset TEST_PATH
   pass "update plan lists only the three actions it performs"
@@ -1213,7 +1237,7 @@ test_update_plan_omits_negative_actions() {
 
 test_plan_groups_selected_integration_installs() {
   new_home
-  run_install --mode initial --dry-run --tools all --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/out"
+  run_install --mode initial --dry-run --tools all --no-path --no-wizard >"$TEST_ROOT/out"
   grep -Fq '3. Install or update the following plugins for claude, codex, cursor and opencode' "$TEST_ROOT/out" || fail "integration installs were not grouped into one numbered action"
   grep -Fq "   ($TEST_HOME/.claude/plugins/cache/macroscope-local/ and $TEST_HOME/.claude/settings.json)" "$TEST_ROOT/out" || fail "grouped Claude paths are incorrect"
   grep -Fq "   ($TEST_HOME/plugins/macroscope, $TEST_HOME/.codex/plugins/cache/, and $TEST_HOME/.codex/config.toml)" "$TEST_ROOT/out" || fail "grouped Codex paths are incorrect"
@@ -1224,36 +1248,33 @@ test_plan_groups_selected_integration_installs() {
   pass "plan groups selected integration installs into one action"
 }
 
-test_plan_groups_auto_approval_changes() {
+test_plan_omits_permission_changes_for_legacy_flag() {
   new_home
   run_install --mode initial --dry-run --tools all --host-permissions grant --no-path --no-wizard >"$TEST_ROOT/out"
-  grep -Fq '4. Allow Macroscope and mktemp command auto-approval for claude, cursor and opencode' "$TEST_ROOT/out" || fail "auto-approval changes were not grouped into one numbered action"
-  grep -Fq "   ($TEST_HOME/.claude/settings.json and $TEST_HOME/.claude/hooks/macroscope-bash-autoallow.sh)" "$TEST_ROOT/out" || fail "grouped Claude permission paths are incorrect"
-  grep -Fq "   ($TEST_HOME/.cursor/cli-config.json)" "$TEST_ROOT/out" || fail "grouped Cursor permission path is incorrect"
-  grep -Fq "   ($TEST_HOME/.config/opencode/opencode.json)" "$TEST_ROOT/out" || fail "grouped OpenCode permission path is incorrect"
-  [ "$(grep -Ec '^[0-9]+\. Allow .* command auto-approval' "$TEST_ROOT/out")" -eq 1 ] || fail "auto-approval changes occupy multiple numbered actions"
-  ! grep -Fq '⚠ Standing command auto-approval' "$TEST_ROOT/out" || fail "auto-approval plan retained the warning highlight"
-  ! grep -Fq 'Tip: at the prompt' "$TEST_ROOT/out" || fail "auto-approval plan retained the redundant tip"
-  pass "plan groups auto-approval changes without warning or tip copy"
+  ! grep -Fq 'command auto-approval' "$TEST_ROOT/out" || fail "legacy flag restored auto-approval plan changes"
+  ! grep -Fq 'macroscope-bash-autoallow.sh' "$TEST_ROOT/out" || fail "legacy flag restored the Claude hook path"
+  ! grep -Fq '.cursor/cli-config.json' "$TEST_ROOT/out" || fail "legacy flag restored the Cursor permission path"
+  ! grep -Fq 'opencode.json' "$TEST_ROOT/out" || fail "legacy flag restored the OpenCode permission path"
+  pass "legacy permission flag is accepted without restoring permission changes"
 }
 
 test_plan_uses_natural_lifecycle_labels() {
   new_home
-  run_install --mode initial --dry-run --tools none --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/initial"
+  run_install --mode initial --dry-run --tools none --no-path --no-wizard >"$TEST_ROOT/initial"
   grep -Fq 'Macroscope installation will:' "$TEST_ROOT/initial" || fail "initial plan uses an unnatural lifecycle label"
   ! grep -Fq 'Macroscope initial will:' "$TEST_ROOT/initial" || fail "initial plan still prints the old lifecycle label"
-  run_install --mode update --dry-run --tools none --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/update"
+  run_install --mode update --dry-run --tools none --no-path --no-wizard >"$TEST_ROOT/update"
   grep -Fq 'Macroscope update will:' "$TEST_ROOT/update" || fail "update plan lifecycle label changed"
   pass "plan uses natural lifecycle labels"
 }
 
 test_wizard_lifecycle_plan() {
   new_home
-  run_install --dry-run --tools none --host-permissions skip >"$TEST_ROOT/initial"
+  run_install --dry-run --tools none >"$TEST_ROOT/initial"
   grep -q 'Launch the setup wizard' "$TEST_ROOT/initial" || fail "initial plan does not launch wizard"
   mkdir -p "$TEST_HOME/.local/bin"
   cp /bin/echo "$TEST_HOME/.local/bin/macroscope"
-  run_install --mode update --dry-run --tools none --host-permissions skip >"$TEST_ROOT/update"
+  run_install --mode update --dry-run --tools none >"$TEST_ROOT/update"
   ! grep -q 'Launch the setup wizard' "$TEST_ROOT/update" || fail "update plan launches wizard"
   pass "wizard defaults to initial-only"
 }
@@ -1271,7 +1292,7 @@ printf 'test-version\n'
 SH
   chmod +x "$wizard_binary"
   TEST_BINARY="$wizard_binary" run_interactive_install "$TEST_ROOT/out" 0 \
-    --yes --tools none --host-permissions skip --no-path --wizard --events || fail "successful wizard install did not complete"
+    --yes --tools none --no-path --wizard --events || fail "successful wizard install did not complete"
   local wizard_line="" completion_line=""
   wizard_line="$(grep -n 'WIZARD_FINISHED' "$TEST_ROOT/out" | head -1 | cut -d: -f1)"
   completion_line="$(grep -n 'Installation Complete!' "$TEST_ROOT/out" | head -1 | cut -d: -f1)"
@@ -1291,7 +1312,7 @@ printf 'test-version\n'
 SH
   chmod +x "$wizard_binary"
   TEST_BINARY="$wizard_binary" run_interactive_install "$TEST_ROOT/out" 42 \
-    --yes --tools none --host-permissions skip --no-path --wizard --events || fail "wizard failure status was not propagated"
+    --yes --tools none --no-path --wizard --events || fail "wizard failure status was not propagated"
   grep -Fq "Setup did not complete. The CLI is installed; rerun setup with: macroscope setup" "$TEST_ROOT/out" || fail "wizard failure recovery was not explained"
   ! grep -Fq 'Installation Complete!' "$TEST_ROOT/out" || fail "failed wizard was reported as a completed installation"
   [ -x "$TEST_HOME/.local/bin/macroscope" ] || fail "wizard failure removed the usable CLI"
@@ -1300,7 +1321,7 @@ SH
 
 test_completion_keeps_setup_and_verification_in_quick_start() {
   new_home
-  run_install --yes --tools none --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/out"
+  run_install --yes --tools none --no-path --no-wizard >"$TEST_ROOT/out"
   ! grep -Fq 'Setup wizard not requested.' "$TEST_ROOT/out" || fail "completion still prints the skipped-wizard notice"
   ! grep -Fq 'Verify installation:' "$TEST_ROOT/out" || fail "completion still has a separate verification section"
   grep -Fq 'macroscope setup               # Sign in and select a workspace' "$TEST_ROOT/out" || fail "Quick start is missing the setup command"
@@ -1324,7 +1345,7 @@ test_invalid_state_falls_back_to_detected_tools
 test_repair_cleans_claude_local_settings
 test_repair_fails_closed_on_invalid_permission_ownership
 test_legacy_cleanup_does_not_kill_regex_near_process
-test_opencode_scalar_permissions_are_preserved
+test_opencode_permissions_are_untouched
 test_noninteractive_requires_consent
 test_no_controlling_tty_requires_consent
 test_zsh_touches_one_profile_and_selected_tool_only
@@ -1335,10 +1356,10 @@ test_no_path_policy_survives_update
 test_shell_config_override_is_exact
 test_recorded_shell_target_preserves_its_syntax
 test_legacy_path_policy_preserves_behavior
-test_permissions_are_opt_in_and_owned
-test_permission_updates_preserve_managed_symlinks
+test_installer_never_adds_command_permissions
+test_update_preserves_recorded_permissions_in_managed_symlink
 test_update_preserves_footprint_and_removes_deselected
-test_legacy_update_preserves_unowned_permissions
+test_update_preserves_existing_permission_rules_and_hook
 test_legacy_explicit_skip_preserves_unowned_rules
 test_empty_recorded_footprint_does_not_expand_from_stale_files
 test_failure_rolls_back_binary
@@ -1353,15 +1374,17 @@ test_resumed_update_reuses_saved_choices_without_prompts
 test_resumed_update_does_not_expand_saved_config
 test_resumed_update_prompts_for_incomplete_state
 test_resumed_update_prompts_without_saved_path_policy
-test_interactive_lists_select_only_claude_and_permissions
-test_confirmation_can_install_without_auto_approval
+test_interactive_lists_select_only_claude_without_permissions
+test_confirmation_has_no_permission_branch
+test_confirmation_can_show_exact_changes
+test_update_confirmation_has_no_permission_branch
 test_interactive_confirmation_list_can_cancel
 test_interactive_interrupt_restores_terminal
 test_interactive_confirmation_interrupt_restores_terminal
 test_interactive_escape_does_not_block
 test_update_plan_omits_negative_actions
 test_plan_groups_selected_integration_installs
-test_plan_groups_auto_approval_changes
+test_plan_omits_permission_changes_for_legacy_flag
 test_plan_uses_natural_lifecycle_labels
 test_wizard_lifecycle_plan
 test_completion_prints_after_successful_wizard
