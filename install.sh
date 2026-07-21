@@ -734,27 +734,48 @@ print_plan() {
 print_change_details() {
   local claude_config="$(get_claude_config_dir)"
   local opencode_config="$(get_opencode_config_dir)"
+  # _ccd_file: bold cyan header for a config path being edited.
+  _ccd_file() { printf '\n  %s%s%s%s\n' "$BOLD" "$CYAN" "$1" "$RESET"; }
+  # _ccd_key: the JSON key the additions land under.
+  _ccd_key() { printf '    %s:\n' "$1"; }
+  # _ccd_add: a diff-style "+" line for a single added entry.
+  _ccd_add() { printf '      %s+ %s%s\n' "$GREEN" "$1" "$RESET"; }
+  # _ccd_note: dim explanatory text.
+  _ccd_note() { printf '      %s%s%s\n' "$DIM" "$1" "$RESET"; }
   {
     printf '\n%sExact changes to be merged%s\n' "$BOLD" "$RESET"
-    printf '  %sExisting settings are preserved; only these entries are added.%s\n' "$DIM" "$RESET"
+    printf '  %sYour existing settings are preserved — only the + lines below are added.%s\n' "$DIM" "$RESET"
     if tool_selected claude; then
-      printf '\n  %s/settings.json  → "permissions.allow" gains:\n' "$claude_config"
-      printf '      "Bash(macroscope *)", "Bash(macroscope:*)", "Bash(mktemp *)", "Bash(mktemp:*)"\n'
-      printf '    and a PreToolUse (Bash) hook is registered:\n'
-      printf '      %s/hooks/macroscope-bash-autoallow.sh\n' "$claude_config"
-      printf '      %sauto-approves a bare `macroscope` or `mktemp` command only; refuses anything\n' "$DIM"
-      printf '      with pipes, redirects, command substitution, or chaining.%s\n' "$RESET"
+      _ccd_file "$claude_config/settings.json"
+      _ccd_key 'permissions.allow'
+      _ccd_add 'Bash(macroscope *)'
+      _ccd_add 'Bash(macroscope:*)'
+      _ccd_add 'Bash(mktemp *)'
+      _ccd_add 'Bash(mktemp:*)'
+      _ccd_key 'hooks.PreToolUse  (matcher: Bash)'
+      _ccd_add "$claude_config/hooks/macroscope-bash-autoallow.sh"
+      _ccd_note 'approves only a bare `macroscope` or `mktemp` command;'
+      _ccd_note 'refuses pipes, redirects, substitution, or chaining.'
     fi
     if tool_selected cursor; then
-      printf '\n  %s/.cursor/cli-config.json  → "permissions.allow" gains:\n' "$HOME"
-      printf '      "Shell(macroscope)", "Shell(macroscope *)", "Shell(mktemp)", "Shell(mktemp *)"\n'
+      _ccd_file "$HOME/.cursor/cli-config.json"
+      _ccd_key 'permissions.allow'
+      _ccd_add 'Shell(macroscope)'
+      _ccd_add 'Shell(macroscope *)'
+      _ccd_add 'Shell(mktemp)'
+      _ccd_add 'Shell(mktemp *)'
     fi
     if tool_selected opencode; then
-      printf '\n  %s/opencode.json  → "permission.bash" gains:\n' "$opencode_config"
-      printf '      "macroscope *": "allow", "macroscope": "allow", "mktemp *": "allow", "mktemp": "allow"\n'
+      _ccd_file "$opencode_config/opencode.json"
+      _ccd_key 'permission.bash'
+      _ccd_add '"macroscope *": "allow"'
+      _ccd_add '"macroscope": "allow"'
+      _ccd_add '"mktemp *": "allow"'
+      _ccd_add '"mktemp": "allow"'
     fi
     printf '\n  %sNothing else is auto-approved.%s\n' "$DIM" "$RESET"
   } > /dev/tty
+  unset -f _ccd_file _ccd_key _ccd_add _ccd_note
 }
 
 confirm_plan() {
