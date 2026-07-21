@@ -652,6 +652,15 @@ resolve_lifecycle() {
   fi
 }
 
+# host_permission_grant_applies is true only when the permission grant will
+# actually modify a selected tool's config. Codex has no host-permission step,
+# so `--tools codex --host-permissions grant` must not show the auto-approval
+# warning or the "Show exact changes" prompt.
+host_permission_grant_applies() {
+  [ "$HOST_PERMISSIONS" = "grant" ] || return 1
+  tool_selected claude || tool_selected cursor || tool_selected opencode
+}
+
 print_plan() {
   local index=1
   local verb="Install"
@@ -695,7 +704,9 @@ print_plan() {
     fi
   done
   if [ "$HOST_PERMISSIONS" = "grant" ]; then
-    printf '   %s⚠ Grants standing command auto-approval — lets these agents run Macroscope without asking each time:%s\n' "$YELLOW" "$RESET"
+    if host_permission_grant_applies; then
+      printf '   %s⚠ Grants standing command auto-approval — lets these agents run Macroscope without asking each time:%s\n' "$YELLOW" "$RESET"
+    fi
     if tool_selected claude; then
       printf '%d. Modify %s/settings.json: add Bash allow-rules and register the Macroscope PreToolUse hook\n' "$index" "$(get_claude_config_dir)"
       index=$((index + 1))
@@ -722,7 +733,7 @@ print_plan() {
   if [ "$WIZARD_MODE" = "yes" ]; then
     printf '%d. Launch the setup wizard\n' "$index"
   fi
-  if [ "$HOST_PERMISSIONS" = "grant" ] && [ "$ASSUME_YES" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
+  if host_permission_grant_applies && [ "$ASSUME_YES" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
     printf '\n%sTip:%s choose "Show exact changes" to inspect the config snippets first, or add %s--host-permissions skip%s to install without command auto-approval.\n' "$DIM" "$RESET" "$BOLD" "$RESET"
   fi
 }
@@ -794,7 +805,7 @@ confirm_plan() {
 
   # When the plan modifies security-relevant host permission config, offer an
   # inline option to inspect the exact snippets before consenting.
-  if [ "$HOST_PERMISSIONS" = "grant" ] && [ -n "$SELECTED_TOOLS" ]; then
+  if host_permission_grant_applies; then
     while true; do
       if ! prompt_menu "$prompt" "Yes" "Show exact changes" "No"; then
         info "Cancelled before making changes."
