@@ -20,13 +20,42 @@ This mode applies fixes directly to the working tree. It does not interact with 
 ## 2. Determine the local review scope
 
 ```bash
-git symbolic-ref --quiet refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@'
+base_branch="$(git symbolic-ref --quiet refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@')"
+if [ -z "$base_branch" ] && ! git remote get-url origin >/dev/null 2>&1; then
+  # No origin remote: fall back to a local default branch. When origin exists but
+  # its default branch cannot be determined, leave base_branch empty and fail
+  # closed below rather than guessing a local branch.
+  for candidate in "$(git config --get init.defaultBranch)" main master; do
+    [ -n "$candidate" ] && git rev-parse --verify --quiet "refs/heads/${candidate}^{commit}" >/dev/null && { base_branch="$candidate"; break; }
+  done
+fi
 ```
 
-- Use the repo default branch from `origin/HEAD` as `base_branch`.
-- If you cannot determine `base_branch`, stop and explain why.
+- Use the resulting `base_branch` as the comparison branch.
+- If `base_branch` is empty (for example `origin` is configured but has no resolvable default branch), stop and explain why — never guess a local branch when `origin` exists.
+- Resolve the comparison as `base_ref`. `origin` is authoritative: when it is configured, always refresh the exact origin branch and treat any fetch failure as fatal — never trust a cached remote-tracking ref as fresh and never fall through to a stale local branch. Use a local branch only when there is no `origin` remote:
+
+```bash
+# origin is authoritative. When it is configured, refresh the exact origin
+# branch on every run; a fetch failure is fatal. Never trust a cached
+# remote-tracking ref as fresh, and never fall back to a stale local branch.
+# A local branch is used only when there is no origin remote.
+if git remote get-url origin >/dev/null 2>&1; then
+  if ! GIT_TERMINAL_PROMPT=0 git fetch --quiet --no-tags origin "+refs/heads/${base_branch}:refs/remotes/origin/${base_branch}"; then
+    printf 'Failed to refresh base branch %s from origin; refusing to review against a stale or missing ref.\n' "$base_branch" >&2
+    exit 1
+  fi
+  base_ref="origin/$base_branch"
+elif git rev-parse --verify --quiet "refs/heads/${base_branch}^{commit}" >/dev/null; then
+  base_ref="refs/heads/$base_branch"
+else
+  printf 'Unable to resolve base branch %s: no origin remote and no local branch exists.\n' "$base_branch" >&2
+  exit 1
+fi
+```
+
 - If `git rev-parse --abbrev-ref HEAD` exactly equals `base_branch`, skip `--base` and review local changes only.
-- Otherwise use `--base "$base_branch"`.
+- Otherwise use `--base "$base_ref"`.
 
 ## 3. Run the local CLI review (Codex-adapted)
 
@@ -39,20 +68,24 @@ review_log="$(mktemp "${TMPDIR:-/tmp}/macroscope-review.XXXXXX")"
 pid_file="$(mktemp "${TMPDIR:-/tmp}/macroscope-pid.XXXXXX")"
 ```
 
-- Start the review in the background, capturing its PID:
+- Start the review in the background. Capture the child PID, then wait for it in the same shell so the process stays attached while later tool calls poll the log:
 
 With `--base`:
 
 ```bash
-macroscope codereview --raw --base "$base_branch" > "$review_log" 2>&1 & echo $! > "$pid_file"
-# Note: uses redirection (> file 2>&1) rather than | tee so the command
-# remains a single token that matches the Bash(macroscope *) allow rule.
+macroscope codereview --raw --base "$base_ref" > "$review_log" 2>&1 &
+child_pid=$!
+printf '%s\n' "$child_pid" > "$pid_file"
+wait "$child_pid"
 ```
 
 Without `--base`:
 
 ```bash
-macroscope codereview > "$review_log" 2>&1 & echo $! > "$pid_file"
+macroscope codereview > "$review_log" 2>&1 &
+child_pid=$!
+printf '%s\n' "$child_pid" > "$pid_file"
+wait "$child_pid"
 ```
 
 - Wait briefly (5-10 seconds), then check the log for `review_id`:
@@ -89,7 +122,9 @@ tail -n +"$last_line" "$review_log" | grep 'issue_event=\|issue_status='
 When the review finishes, clean up the background process:
 
 ```bash
-kill "$(cat "$pid_file")" 2>/dev/null; rm -f "$pid_file" "$review_log"
+kill "$(cat "$pid_file")" 2>/dev/null || true
+unlink "$pid_file" 2>/dev/null || true
+unlink "$review_log" 2>/dev/null || true
 ```
 
 ## 4. Handle streamed issues one at a time

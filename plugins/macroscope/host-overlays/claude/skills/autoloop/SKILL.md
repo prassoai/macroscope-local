@@ -20,24 +20,53 @@ This mode applies fixes directly to the working tree. It does not interact with 
 ## 2. Determine the local review scope
 
 ```bash
-git symbolic-ref --quiet refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@'
+base_branch="$(git symbolic-ref --quiet refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@')"
+if [ -z "$base_branch" ] && ! git remote get-url origin >/dev/null 2>&1; then
+  # No origin remote: fall back to a local default branch. When origin exists but
+  # its default branch cannot be determined, leave base_branch empty and fail
+  # closed below rather than guessing a local branch.
+  for candidate in "$(git config --get init.defaultBranch)" main master; do
+    [ -n "$candidate" ] && git rev-parse --verify --quiet "refs/heads/${candidate}^{commit}" >/dev/null && { base_branch="$candidate"; break; }
+  done
+fi
 ```
 
-- Use the repo default branch from `origin/HEAD` as `base_branch`.
-- If you cannot determine `base_branch`, stop and explain why.
+- Use the resulting `base_branch` as the comparison branch.
+- If `base_branch` is empty (for example `origin` is configured but has no resolvable default branch), stop and explain why — never guess a local branch when `origin` exists.
+- Resolve the comparison as `base_ref`. `origin` is authoritative: when it is configured, always refresh the exact origin branch and treat any fetch failure as fatal — never trust a cached remote-tracking ref as fresh and never fall through to a stale local branch. Use a local branch only when there is no `origin` remote:
+
+```bash
+# origin is authoritative. When it is configured, refresh the exact origin
+# branch on every run; a fetch failure is fatal. Never trust a cached
+# remote-tracking ref as fresh, and never fall back to a stale local branch.
+# A local branch is used only when there is no origin remote.
+if git remote get-url origin >/dev/null 2>&1; then
+  if ! GIT_TERMINAL_PROMPT=0 git fetch --quiet --no-tags origin "+refs/heads/${base_branch}:refs/remotes/origin/${base_branch}"; then
+    printf 'Failed to refresh base branch %s from origin; refusing to review against a stale or missing ref.\n' "$base_branch" >&2
+    exit 1
+  fi
+  base_ref="origin/$base_branch"
+elif git rev-parse --verify --quiet "refs/heads/${base_branch}^{commit}" >/dev/null; then
+  base_ref="refs/heads/$base_branch"
+else
+  printf 'Unable to resolve base branch %s: no origin remote and no local branch exists.\n' "$base_branch" >&2
+  exit 1
+fi
+```
+
 - If `git rev-parse --abbrev-ref HEAD` exactly equals `base_branch`, skip `--base` and review local changes only.
-- Otherwise use `--base "$base_branch"`.
+- Otherwise use `--base "$base_ref"`.
 
 ## 3. Run the local CLI review
 
-**Invoke `macroscope codereview` as a bare command, without shell operators.** Claude Code's allow-list tokenizes on shell operators, so piped or redirected invocations will stall on per-call approval prompts.
+**Invoke `macroscope codereview` as a standalone command through Claude Code's background-command support.** This keeps the review process attached and its streamed output readable.
 
 - `codereview` is blocking. Run it via the Bash tool with `run_in_background: true`. Do not add `| tee`, `>`, `2>&1`, `&`, `nohup`, or any shell operator to the command.
 
 - Start the review:
 
 ```bash
-macroscope codereview --raw --base "$base_branch"
+macroscope codereview --raw --base "$base_ref"
 ```
 
 - If you omitted `--base`, run:

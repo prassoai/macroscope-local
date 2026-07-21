@@ -11,18 +11,46 @@ Run a local Macroscope review using the installed CLI.
 ## 1. Determine the local review scope
 
 ```bash
-gh pr view --json baseRefName -q .baseRefName 2>/dev/null
+# Prefer the PR base, then the origin default branch. Only when there is no
+# origin remote at all, fall back to a local default branch. When origin exists
+# but neither the PR base nor origin/HEAD resolves, leave base_branch empty and
+# fail closed below rather than guessing a local branch.
+base_branch="$(gh pr view --json baseRefName -q .baseRefName 2>/dev/null)"
+if [ -z "$base_branch" ]; then
+  base_branch="$(git symbolic-ref --quiet refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@')"
+fi
+if [ -z "$base_branch" ] && ! git remote get-url origin >/dev/null 2>&1; then
+  for candidate in "$(git config --get init.defaultBranch)" main master; do
+    [ -n "$candidate" ] && git rev-parse --verify --quiet "refs/heads/${candidate}^{commit}" >/dev/null && { base_branch="$candidate"; break; }
+  done
+fi
 ```
+
+- The result is `base_branch` (PR base first, then `origin/HEAD`; a local default branch only when there is no `origin` remote).
+- If `base_branch` is empty (for example `origin` is configured but has no resolvable default branch and no PR/explicit base), stop and explain why — never guess a local branch when `origin` exists.
+- Resolve the comparison as `base_ref`. `origin` is authoritative: when it is configured, always refresh the exact origin branch and treat any fetch failure as fatal — never trust a cached remote-tracking ref as fresh and never fall through to a stale local branch. Use a local branch only when there is no `origin` remote:
 
 ```bash
-git symbolic-ref --quiet refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@'
+# origin is authoritative. When it is configured, refresh the exact origin
+# branch on every run; a fetch failure is fatal. Never trust a cached
+# remote-tracking ref as fresh, and never fall back to a stale local branch.
+# A local branch is used only when there is no origin remote.
+if git remote get-url origin >/dev/null 2>&1; then
+  if ! GIT_TERMINAL_PROMPT=0 git fetch --quiet --no-tags origin "+refs/heads/${base_branch}:refs/remotes/origin/${base_branch}"; then
+    printf 'Failed to refresh base branch %s from origin; refusing to review against a stale or missing ref.\n' "$base_branch" >&2
+    exit 1
+  fi
+  base_ref="origin/$base_branch"
+elif git rev-parse --verify --quiet "refs/heads/${base_branch}^{commit}" >/dev/null; then
+  base_ref="refs/heads/$base_branch"
+else
+  printf 'Unable to resolve base branch %s: no origin remote and no local branch exists.\n' "$base_branch" >&2
+  exit 1
+fi
 ```
 
-- Try the PR base first. If that fails, use the repo default branch from `origin/HEAD`.
-- Call the result `base_branch`.
-- If you cannot determine `base_branch`, stop and explain why.
 - If `git rev-parse --abbrev-ref HEAD` exactly equals `base_branch`, skip `--base` and review local changes only.
-- Otherwise use `--base "$base_branch"`.
+- Otherwise use `--base "$base_ref"`.
 
 ## 2. Set up an isolated review worktree
 
@@ -70,7 +98,7 @@ Skip the apply+commit if the patch was empty.
 
 5. Determine the `--base` argument for the review CLI. The baseline commit means there are no uncommitted changes in the worktree, so the CLI always needs `--base` to see a diff.
 
-   - If step 1 set `base_branch` (branch differs from base) → use `--base "$base_branch"`.
+   - If step 1 set `base_ref` (branch differs from base) → use `--base "$base_ref"`.
    - If step 1 skipped `--base` (branch equals base, local changes only) → use `--base HEAD~1` in the worktree. The baseline commit is `HEAD`, so `HEAD~1` is the pre-change state.
    - If no baseline commit was created (patch was empty) and step 1 skipped `--base` → run without `--base` (no changes to review; the CLI will exit cleanly).
 
@@ -92,7 +120,7 @@ pid_file="$(mktemp "${TMPDIR:-/tmp}/macroscope-pid.XXXXXX")"
 With `--base` (feature branch or local-only with baseline):
 
 ```bash
-macroscope codereview --raw --base "$base_branch" > "$review_log" 2>&1 &
+macroscope codereview --raw --base "$base_ref" > "$review_log" 2>&1 &
 child_pid=$!
 printf '%s\n' "$child_pid" > "$pid_file"
 wait "$child_pid"
@@ -152,7 +180,9 @@ tail -n +"$last_line" "$review_log" | grep 'issue_event=\|issue_status='
 When the review finishes, clean up the background process:
 
 ```bash
-kill "$(cat "$pid_file")" 2>/dev/null; rm -f "$pid_file" "$review_log"
+kill "$(cat "$pid_file")" 2>/dev/null || true
+unlink "$pid_file" 2>/dev/null || true
+unlink "$review_log" 2>/dev/null || true
 ```
 
 ## 4. Handle streamed issues one at a time
