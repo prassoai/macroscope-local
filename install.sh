@@ -234,10 +234,10 @@ PY
 
 detect_installed_tools() {
   local detected=""
-  [ -d "$HOME/.claude/plugins/cache/macroscope-local" ] && detected="claude"
+  [ -d "$(get_claude_config_dir)/plugins/cache/macroscope-local" ] && detected="claude"
   [ -d "$(get_codex_home)/plugins/cache/local-user-plugins/macroscope" ] || [ -d "$HOME/plugins/macroscope" ] && detected="${detected:+$detected,}codex"
   [ -d "$HOME/.cursor/plugins/local/macroscope" ] && detected="${detected:+$detected,}cursor"
-  if [ -f "$HOME/.config/opencode/plugins/macroscope.js" ]; then
+  if [ -f "$(get_opencode_config_dir)/plugins/macroscope.js" ]; then
     detected="${detected:+$detected,}opencode"
   fi
   printf '%s' "$detected"
@@ -268,28 +268,28 @@ tool_selected() {
 
 tool_plan_path() {
   case "$1" in
-    claude) printf '%s/.claude/plugins/cache/macroscope-local/ and plugin registration in %s/.claude/settings.json' "$HOME" "$HOME" ;;
+    claude) printf '%s/plugins/cache/macroscope-local/ and plugin registration in %s/settings.json' "$(get_claude_config_dir)" "$(get_claude_config_dir)" ;;
     codex) printf '%s/plugins/macroscope, %s/plugins/cache/, and %s/config.toml' "$HOME" "$(get_codex_home)" "$(get_codex_home)" ;;
     cursor) printf '%s/.cursor/plugins/local/macroscope/' "$HOME" ;;
-    opencode) printf '%s/.config/opencode/' "$HOME" ;;
+    opencode) printf '%s/' "$(get_opencode_config_dir)" ;;
   esac
 }
 
 tool_installed() {
   case "$1" in
-    claude) [ -d "$HOME/.claude/plugins/cache/macroscope-local" ] ;;
+    claude) [ -d "$(get_claude_config_dir)/plugins/cache/macroscope-local" ] ;;
     codex) [ -d "$HOME/plugins/macroscope" ] || find "$(get_codex_home)/plugins/cache" -type d -path '*/macroscope/local' -print -quit 2>/dev/null | grep -q . ;;
     cursor) [ -d "$HOME/.cursor/plugins/local/macroscope" ] ;;
-    opencode) [ -f "$HOME/.config/opencode/plugins/macroscope.js" ] ;;
+    opencode) [ -f "$(get_opencode_config_dir)/plugins/macroscope.js" ] ;;
     *) return 1 ;;
   esac
 }
 
 host_permission_automation_present() {
-  { [ -f "$HOME/.claude/settings.json" ] && grep -Fq 'Bash(macroscope' "$HOME/.claude/settings.json"; } ||
-    [ -e "$HOME/.claude/hooks/macroscope-bash-autoallow.sh" ] ||
+  { [ -f "$(get_claude_config_dir)/settings.json" ] && grep -Fq 'Bash(macroscope' "$(get_claude_config_dir)/settings.json"; } ||
+    [ -e "$(get_claude_config_dir)/hooks/macroscope-bash-autoallow.sh" ] ||
     { [ -f "$HOME/.cursor/cli-config.json" ] && grep -Fq 'Shell(macroscope' "$HOME/.cursor/cli-config.json"; } ||
-    { [ -f "$HOME/.config/opencode/opencode.json" ] && grep -Fq '"macroscope ' "$HOME/.config/opencode/opencode.json"; }
+    { [ -f "$(get_opencode_config_dir)/opencode.json" ] && grep -Fq '"macroscope ' "$(get_opencode_config_dir)/opencode.json"; }
 }
 
 has_interactive_tty() {
@@ -300,16 +300,154 @@ has_interactive_tty() {
   ( test -t 0 < /dev/tty ) 2>/dev/null
 }
 
-read_tty() {
-  local prompt="$1"
-  local answer=""
-  printf '%s' "$prompt" > /dev/tty
-  IFS= read -r answer < /dev/tty || true
-  printf '%s' "$answer"
+TUI_RESULT=""
+TUI_KEY=""
+
+tui_start() {
+  SAVED_TTY_STATE="$(stty -g < /dev/tty 2>/dev/null)" || return 1
+  stty -echo -icanon min 1 time 0 < /dev/tty
+  printf '\033[?25l' > /dev/tty
+}
+
+tui_stop() {
+  printf '\033[?25h' > /dev/tty
+  if [ -n "$SAVED_TTY_STATE" ]; then
+    stty "$SAVED_TTY_STATE" < /dev/tty 2>/dev/null || true
+    SAVED_TTY_STATE=""
+  fi
+}
+
+tui_read_key() {
+  local key=""
+  local prefix=""
+  local direction=""
+
+  TUI_KEY=""
+  IFS= read -r -n 1 key < /dev/tty || return 1
+  if [ "$key" = $'\033' ]; then
+    stty min 0 time 1 < /dev/tty
+    prefix="$(dd bs=1 count=1 < /dev/tty 2>/dev/null)"
+    case "$prefix" in
+      '['|'O')
+        direction="$(dd bs=1 count=1 < /dev/tty 2>/dev/null)"
+        case "$direction" in
+          A) TUI_KEY="up" ;;
+          B) TUI_KEY="down" ;;
+        esac
+        ;;
+    esac
+    stty min 1 time 0 < /dev/tty
+    return 0
+  fi
+
+  case "$key" in
+    '') TUI_KEY="enter" ;;
+    ' ') TUI_KEY="space" ;;
+    *) TUI_KEY="$key" ;;
+  esac
+}
+
+prompt_yes_no() {
+  local question="$1"
+  local default_answer="$2"
+  local selected=0
+  local first_render=1
+  local index=0
+  local labels=("Yes" "No")
+
+  [ "$default_answer" = "no" ] && selected=1
+  tui_start
+  printf '\n%s%s%s\n' "$BOLD" "$question" "$RESET" > /dev/tty
+  printf '  Up/down or j/k to move; enter to choose.\n' > /dev/tty
+
+  while true; do
+    if [ "$first_render" -eq 0 ]; then
+      printf '\033[2A' > /dev/tty
+    fi
+    first_render=0
+    for index in 0 1; do
+      printf '\r\033[2K' > /dev/tty
+      if [ "$index" -eq "$selected" ]; then
+        printf '%s%s>%s %s\n' "$CYAN" "$BOLD" "$RESET" "${labels[$index]}" > /dev/tty
+      else
+        printf '  %s\n' "${labels[$index]}" > /dev/tty
+      fi
+    done
+
+    if ! tui_read_key; then
+      tui_stop
+      return 1
+    fi
+    case "$TUI_KEY" in
+      up|k|K|down|j|J) selected=$((1 - selected)) ;;
+      y|Y) selected=0; break ;;
+      n|N) selected=1; break ;;
+      enter) break ;;
+    esac
+  done
+
+  tui_stop
+  if [ "$selected" -eq 0 ]; then TUI_RESULT="yes"; else TUI_RESULT="no"; fi
+}
+
+prompt_tools() {
+  local default_tools="$1"
+  local tools=(claude codex cursor opencode)
+  local labels=("Claude Code" "Codex" "Cursor" "OpenCode")
+  local checked=(0 0 0 0)
+  local selected=0
+  local first_render=1
+  local index=0
+  local result=""
+
+  for index in 0 1 2 3; do
+    case ",$default_tools," in
+      *",${tools[$index]},"*) checked[$index]=1 ;;
+    esac
+  done
+
+  tui_start
+  printf '\n%sIntegrations%s\n' "$BOLD" "$RESET" > /dev/tty
+  printf '  Up/down or j/k to move; space to toggle; enter to continue.\n' > /dev/tty
+
+  while true; do
+    if [ "$first_render" -eq 0 ]; then
+      printf '\033[4A' > /dev/tty
+    fi
+    first_render=0
+    for index in 0 1 2 3; do
+      printf '\r\033[2K' > /dev/tty
+      if [ "$index" -eq "$selected" ]; then
+        printf '%s%s>%s [%s] %s\n' "$CYAN" "$BOLD" "$RESET" "$([ "${checked[$index]}" -eq 1 ] && printf x || printf ' ')" "${labels[$index]}" > /dev/tty
+      else
+        printf '  [%s] %s\n' "$([ "${checked[$index]}" -eq 1 ] && printf x || printf ' ')" "${labels[$index]}" > /dev/tty
+      fi
+    done
+
+    if ! tui_read_key; then
+      tui_stop
+      return 1
+    fi
+    case "$TUI_KEY" in
+      up|k|K) selected=$(((selected + 3) % 4)) ;;
+      down|j|J) selected=$(((selected + 1) % 4)) ;;
+      space) checked[$selected]=$((1 - checked[$selected])) ;;
+      enter) break ;;
+    esac
+  done
+
+  tui_stop
+  for index in 0 1 2 3; do
+    if [ "${checked[$index]}" -eq 1 ]; then
+      result="${result:+$result,}${tools[$index]}"
+    fi
+  done
+  TUI_RESULT="${result:-none}"
 }
 
 select_tools() {
   local default_tools=""
+  local prompt_default=""
   local normalized=""
   if [ -n "$TOOLS_SPEC" ]; then
     normalized="$(normalize_tools "$TOOLS_SPEC")"
@@ -319,13 +457,24 @@ select_tools() {
     else
       default_tools="$(detect_installed_tools)"
     fi
-    normalized="$(normalize_tools "${default_tools:-none}")"
+    prompt_default="$default_tools"
+    if has_interactive_tty && [ "$ASSUME_YES" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
+      if [ -z "$prompt_default" ]; then
+        printf '\n%sNo Macroscope host integrations are currently selected.%s\n' "$YELLOW" "$RESET" > /dev/tty
+        printf 'Select integrations now so a CLI-only install is not preserved accidentally.\n' > /dev/tty
+        prompt_default="claude,codex,cursor,opencode"
+      else
+        printf '\n%sCurrent integrations are selected below.%s\n' "$BOLD" "$RESET" > /dev/tty
+      fi
+      prompt_tools "$prompt_default"
+      TOOLS_SPEC="$TUI_RESULT"
+    fi
+    normalized="$(normalize_tools "${TOOLS_SPEC:-${prompt_default:-none}}")"
   else
     default_tools="claude,codex,cursor,opencode"
     if has_interactive_tty && [ "$ASSUME_YES" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
-      printf '\n%sIntegrations (all selected by default):%s\n' "$BOLD" "$RESET" > /dev/tty
-      printf '  [x] Claude Code\n  [x] Codex\n  [x] Cursor\n  [x] OpenCode\n' > /dev/tty
-      TOOLS_SPEC="$(read_tty 'Install tools (comma-separated, all, or none) [all]: ')"
+      prompt_tools "$default_tools"
+      TOOLS_SPEC="$TUI_RESULT"
     fi
     normalized="$(normalize_tools "${TOOLS_SPEC:-$default_tools}")"
   fi
@@ -351,11 +500,10 @@ resolve_host_permissions() {
     HOST_PERMISSIONS="skip"
     return
   fi
-  local answer=""
   printf '\n%sOptional host permission automation%s\n' "$BOLD" "$RESET" > /dev/tty
   printf 'This adds Macroscope/mktemp shell allow-rules. Claude Code also receives a PreToolUse hook.\n' > /dev/tty
-  answer="$(read_tty 'Grant these permissions? [y/N]: ')"
-  case "$(printf '%s' "$answer" | tr '[:upper:]' '[:lower:]')" in y|yes) HOST_PERMISSIONS="grant" ;; *) HOST_PERMISSIONS="skip" ;; esac
+  prompt_yes_no "Grant these permissions?" "no"
+  if [ "$TUI_RESULT" = "yes" ]; then HOST_PERMISSIONS="grant"; else HOST_PERMISSIONS="skip"; fi
 }
 
 active_path_contains_install_dir() {
@@ -434,8 +582,10 @@ resolve_lifecycle() {
 print_plan() {
   local index=1
   local verb="Install"
+  local plan_label="installation"
   [ "$INSTALL_MODE" = "update" ] && verb="Replace"
-  printf '\n%sMacroscope %s will:%s\n' "$BOLD" "$INSTALL_MODE" "$RESET"
+  [ "$INSTALL_MODE" = "update" ] && plan_label="update"
+  printf '\n%sMacroscope %s will:%s\n' "$BOLD" "$plan_label" "$RESET"
   printf '%d. %s %s/.local/bin/macroscope\n' "$index" "$verb" "$HOME"; index=$((index + 1))
   if [ "$PATH_ACTION" = "modify" ]; then
     printf '%d. Add %s/.local/bin to PATH in %s\n' "$index" "$HOME" "$PATH_TARGET"
@@ -467,7 +617,7 @@ print_plan() {
   done
   if [ "$HOST_PERMISSIONS" = "grant" ]; then
     if tool_selected claude; then
-      printf '%d. Modify %s/.claude/settings.json: add Bash allow-rules and register the Macroscope PreToolUse hook\n' "$index" "$HOME"
+      printf '%d. Modify %s/settings.json: add Bash allow-rules and register the Macroscope PreToolUse hook\n' "$index" "$(get_claude_config_dir)"
       index=$((index + 1))
     fi
     if tool_selected cursor; then
@@ -475,16 +625,13 @@ print_plan() {
       index=$((index + 1))
     fi
     if tool_selected opencode; then
-      printf '%d. Modify %s/.config/opencode/opencode.json: add Macroscope and mktemp shell allow-rules\n' "$index" "$HOME"
+      printf '%d. Modify %s/opencode.json: add Macroscope and mktemp shell allow-rules\n' "$index" "$(get_opencode_config_dir)"
       index=$((index + 1))
     fi
   elif [ "$HOST_PERMISSIONS" = "preserve" ]; then
     printf '%d. Preserve existing legacy host permission rules and hooks without adding new ones\n' "$index"; index=$((index + 1))
-  else
-    printf '%d. Do not add host shell permission rules or hooks\n' "$index"; index=$((index + 1))
-    if [ "$INSTALL_MODE" = "update" ] && host_permission_automation_present; then
-      printf '%d. Remove Macroscope-owned host permission rules and hooks while preserving pre-existing rules\n' "$index"; index=$((index + 1))
-    fi
+  elif [ "$INSTALL_MODE" = "update" ] && host_permission_automation_present; then
+    printf '%d. Remove Macroscope-owned host permission rules and hooks while preserving pre-existing rules\n' "$index"; index=$((index + 1))
   fi
   if [ "$INSTALL_MODE" = "update" ]; then
     printf '%d. Clean legacy Macroscope MCP artifacts after the update is staged\n' "$index"; index=$((index + 1))
@@ -494,8 +641,6 @@ print_plan() {
   fi
   if [ "$WIZARD_MODE" = "yes" ]; then
     printf '%d. Launch the setup wizard\n' "$index"
-  else
-    printf '%d. Do not launch the setup wizard\n' "$index"
   fi
 }
 
@@ -506,11 +651,15 @@ confirm_plan() {
     error "A terminal is required for confirmation. Re-run with --yes after reviewing --dry-run."
     return 3
   fi
-  local prompt='Proceed? [Y/n]: '
-  [ "$INSTALL_MODE" = "update" ] && prompt='Update and continue? [Y/n]: '
-  [ "$RESUME_COMMAND" -eq 1 ] && prompt='Update and run the review? [Y/n]: '
-  local answer="$(read_tty "$prompt")"
-  case "$(printf '%s' "$answer" | tr '[:upper:]' '[:lower:]')" in n|no) info "Cancelled before making changes."; return 3 ;; *) return 0 ;; esac
+  local prompt='Proceed?'
+  [ "$INSTALL_MODE" = "update" ] && prompt='Update and continue?'
+  [ "$RESUME_COMMAND" -eq 1 ] && prompt='Update and run the review?'
+  prompt_yes_no "$prompt" "yes"
+  if [ "$TUI_RESULT" = "no" ]; then
+    info "Cancelled before making changes."
+    return 3
+  fi
+  return 0
 }
 
 repair_only_requested() {
@@ -519,6 +668,28 @@ repair_only_requested() {
 
 get_codex_home() {
   printf '%s' "${CODEX_HOME:-$HOME/.codex}"
+}
+
+get_claude_config_dir() {
+  printf '%s' "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+}
+
+get_claude_state_file() {
+  if [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
+    printf '%s/.claude.json' "$CLAUDE_CONFIG_DIR"
+  else
+    printf '%s/.claude.json' "$HOME"
+  fi
+}
+
+get_opencode_config_dir() {
+  if [ -n "${OPENCODE_CONFIG_DIR:-}" ]; then
+    printf '%s' "$OPENCODE_CONFIG_DIR"
+  elif [ -n "${XDG_CONFIG_HOME:-}" ]; then
+    printf '%s/opencode' "$XDG_CONFIG_HOME"
+  else
+    printf '%s/.config/opencode' "$HOME"
+  fi
 }
 
 get_codex_marketplace_name() {
@@ -654,6 +825,8 @@ cleanup_binaries() {
 remove_plugin_directories() {
   local removed=0
   local codex_home=""
+  local claude_config=""
+  local opencode_config=""
   local codex_plugin_cache_root=""
   local codex_marketplace_json=""
   local dir=""
@@ -661,6 +834,8 @@ remove_plugin_directories() {
   local marketplace_name=""
 
   codex_home="$(get_codex_home)"
+  claude_config="$(get_claude_config_dir)"
+  opencode_config="$(get_opencode_config_dir)"
   codex_plugin_cache_root="$codex_home/plugins/cache"
   codex_marketplace_json="$HOME/.agents/plugins/marketplace.json"
 
@@ -669,21 +844,21 @@ remove_plugin_directories() {
     "$HOME/plugins/macroscope-codereview" \
     "$codex_home/plugins/macroscope" \
     "$codex_home/plugins/macroscope-codereview" \
-    "$HOME/.claude/plugins/marketplaces/macroscope-local" \
-    "$HOME/.claude/plugins/cache/macroscope-local" \
+    "$claude_config/plugins/marketplaces/macroscope-local" \
+    "$claude_config/plugins/cache/macroscope-local" \
     "$HOME/.cursor/plugins/local/macroscope" \
     "$HOME/.cursor/plugins/local/macroscope-codereview" \
-    "$HOME/.config/opencode/skills/macroscope" \
-    "$HOME/.config/opencode/skills/codereview" \
-    "$HOME/.config/opencode/skills/autoloop" \
-    "$HOME/.config/opencode/skills/macroscope-local-review" \
-    "$HOME/.config/opencode/skills/macroscope-triage-pr-comments" \
-    "$HOME/.config/opencode/skills/macroscope-respond-to-pr-comments" \
-    "$HOME/.config/opencode/skills/macroscope-review-pr" \
-    "$HOME/.config/opencode/skills/local-review" \
-    "$HOME/.config/opencode/skills/triage-pr-comments" \
-    "$HOME/.config/opencode/skills/respond-to-pr-comments" \
-    "$HOME/.config/opencode/skills/review-pr"
+    "$opencode_config/skills/macroscope" \
+    "$opencode_config/skills/codereview" \
+    "$opencode_config/skills/autoloop" \
+    "$opencode_config/skills/macroscope-local-review" \
+    "$opencode_config/skills/macroscope-triage-pr-comments" \
+    "$opencode_config/skills/macroscope-respond-to-pr-comments" \
+    "$opencode_config/skills/macroscope-review-pr" \
+    "$opencode_config/skills/local-review" \
+    "$opencode_config/skills/triage-pr-comments" \
+    "$opencode_config/skills/respond-to-pr-comments" \
+    "$opencode_config/skills/review-pr"
   do
     if remove_dir_if_present "$dir"; then
       removed=1
@@ -744,19 +919,19 @@ PY
   fi
 
   for file in \
-    "$HOME/.config/opencode/plugins/macroscope.js" \
-    "$HOME/.config/opencode/commands/macroscope.md" \
-    "$HOME/.config/opencode/commands/macroscope-codereview.md" \
-    "$HOME/.config/opencode/commands/macroscope-autoloop.md" \
-    "$HOME/.config/opencode/commands/macroscope-local-review.md" \
-    "$HOME/.config/opencode/commands/macroscope-triage-pr-comments.md" \
-    "$HOME/.config/opencode/commands/macroscope-respond-to-pr-comments.md" \
-    "$HOME/.config/opencode/commands/macroscope-review-pr.md" \
-    "$HOME/.config/opencode/commands/local-review.md" \
-    "$HOME/.config/opencode/commands/triage-pr-comments.md" \
-    "$HOME/.config/opencode/commands/respond-to-pr-comments.md" \
-    "$HOME/.config/opencode/commands/review-pr.md" \
-    "$HOME/.claude/hooks/macroscope-bash-autoallow.sh"
+    "$opencode_config/plugins/macroscope.js" \
+    "$opencode_config/commands/macroscope.md" \
+    "$opencode_config/commands/macroscope-codereview.md" \
+    "$opencode_config/commands/macroscope-autoloop.md" \
+    "$opencode_config/commands/macroscope-local-review.md" \
+    "$opencode_config/commands/macroscope-triage-pr-comments.md" \
+    "$opencode_config/commands/macroscope-respond-to-pr-comments.md" \
+    "$opencode_config/commands/macroscope-review-pr.md" \
+    "$opencode_config/commands/local-review.md" \
+    "$opencode_config/commands/triage-pr-comments.md" \
+    "$opencode_config/commands/respond-to-pr-comments.md" \
+    "$opencode_config/commands/review-pr.md" \
+    "$claude_config/hooks/macroscope-bash-autoallow.sh"
   do
     if remove_file_if_present "$file"; then
       removed=1
@@ -770,19 +945,24 @@ PY
 
 clean_json_and_toml_state() {
   local codex_home=""
+  local claude_config=""
+  local opencode_config=""
 
   codex_home="$(get_codex_home)"
+  claude_config="$(get_claude_config_dir)"
+  opencode_config="$(get_opencode_config_dir)/opencode.json"
 
   python3 - \
     "$HOME/.agents/plugins/marketplace.json" \
     "$codex_home/config.toml" \
-    "$HOME/.claude.json" \
-    "$HOME/.claude/plugins/known_marketplaces.json" \
-    "$HOME/.claude/plugins/installed_plugins.json" \
-    "$HOME/.claude/settings.json" \
-    "$HOME/.claude/settings.local.json" \
+    "$(get_claude_state_file)" \
+    "$claude_config/plugins/known_marketplaces.json" \
+    "$claude_config/plugins/installed_plugins.json" \
+    "$claude_config/settings.json" \
+    "$claude_config/settings.local.json" \
     "$HOME/.cursor/mcp.json" \
-    "$STATE_FILE" <<'PY'
+    "$STATE_FILE" \
+    "$opencode_config" <<'PY'
 import json
 import os
 import re
@@ -798,7 +978,8 @@ import sys
     claude_settings_local,
     cursor_mcp_json,
     install_state,
-) = sys.argv[1:10]
+    opencode_config,
+) = sys.argv[1:11]
 
 
 OWNED_RELATIVE_PLUGIN_PATHS = {
@@ -1072,7 +1253,6 @@ if isinstance(cursor_cli_data, dict):
         write_json(cursor_cli_config, cursor_cli_data, cursor_cli_mode)
 
 
-opencode_config = os.path.expanduser("~/.config/opencode/opencode.json")
 opencode_data, opencode_mode = load_json(opencode_config)
 if isinstance(opencode_data, dict):
     changed = False
@@ -1676,16 +1856,17 @@ install_claude_plugin() {
 
   local plugin_src="$CHECKOUT_DIR/plugins/macroscope"
   local marketplace_src="$CHECKOUT_DIR/.claude-plugin"
-  local marketplace_root="$HOME/.claude/plugins/marketplaces/macroscope-local"
-  local cache_dst="$HOME/.claude/plugins/cache/macroscope-local/macroscope/$PLUGIN_VERSION"
-  local known_marketplaces="$HOME/.claude/plugins/known_marketplaces.json"
-  local installed_plugins="$HOME/.claude/plugins/installed_plugins.json"
-  local claude_settings="$HOME/.claude/settings.json"
+  local claude_config="$(get_claude_config_dir)"
+  local marketplace_root="$claude_config/plugins/marketplaces/macroscope-local"
+  local cache_dst="$claude_config/plugins/cache/macroscope-local/macroscope/$PLUGIN_VERSION"
+  local known_marketplaces="$claude_config/plugins/known_marketplaces.json"
+  local installed_plugins="$claude_config/plugins/installed_plugins.json"
+  local claude_settings="$claude_config/settings.json"
   local now=""
 
-  mkdir -p "$HOME/.claude/plugins/marketplaces" "$HOME/.claude/plugins/cache/macroscope-local"
-  rm -rf "$HOME/.claude/plugins/cache/macroscope-local/macroscope"
-  mkdir -p "$HOME/.claude/plugins/cache/macroscope-local/macroscope"
+  mkdir -p "$claude_config/plugins/marketplaces" "$claude_config/plugins/cache/macroscope-local"
+  rm -rf "$claude_config/plugins/cache/macroscope-local/macroscope"
+  mkdir -p "$claude_config/plugins/cache/macroscope-local/macroscope"
 
   rm -rf "$marketplace_root"
   mkdir -p "$marketplace_root"
@@ -1789,7 +1970,7 @@ PY
 }
 
 # register_claude_bash_autoallow_hook installs the PreToolUse hook script
-# and registers it in ~/.claude/settings.json. This closes a gap in the
+# and registers it in Claude Code's settings.json. This closes a gap in the
 # plain allow-list patterns: Claude Code's Bash matcher tokenizes on
 # shell operators, so `Bash(macroscope *)` stops matching as soon as the
 # command contains a background operator. The hook inspects the raw command
@@ -1802,8 +1983,9 @@ register_claude_bash_autoallow_hook() {
   # When installed via `curl | bash`, the installer has no $0 path to
   # resolve a sibling script from — in that case we embed the script
   # via a HEREDOC below instead of copying from disk.
-  local hook_dst="$HOME/.claude/hooks/macroscope-bash-autoallow.sh"
-  mkdir -p "$HOME/.claude/hooks"
+  local claude_config="$(get_claude_config_dir)"
+  local hook_dst="$claude_config/hooks/macroscope-bash-autoallow.sh"
+  mkdir -p "$claude_config/hooks"
 
   if [ -f "$script_src" ]; then
     cp "$script_src" "$hook_dst"
@@ -1858,7 +2040,7 @@ EMBED
   fi
   chmod +x "$hook_dst"
 
-  python3 - "$HOME/.claude/settings.json" "$hook_dst" <<'PY'
+  python3 - "$claude_config/settings.json" "$hook_dst" <<'PY'
 import json, os, sys
 
 settings_path, hook_path = sys.argv[1:3]
@@ -1906,7 +2088,7 @@ apply_host_permissions() {
   [ "$HOST_PERMISSIONS" = "grant" ] || return 0
   step "Granting announced host shell permissions..."
 
-  tool_selected claude && python3 - "$HOME/.claude/settings.json" <<'PY'
+  tool_selected claude && python3 - "$(get_claude_config_dir)/settings.json" <<'PY'
 import json, os, sys, tempfile
 path = sys.argv[1]
 if os.path.islink(path): path = os.path.realpath(path)
@@ -1951,7 +2133,7 @@ if mode is not None: os.chmod(tmp, mode)
 os.replace(tmp, path)
 PY
 
-  tool_selected opencode && python3 - "$HOME/.config/opencode/opencode.json" <<'PY'
+  tool_selected opencode && python3 - "$(get_opencode_config_dir)/opencode.json" <<'PY'
 import json, os, sys, tempfile
 path = sys.argv[1]
 if os.path.islink(path): path = os.path.realpath(path)
@@ -2001,9 +2183,11 @@ clean_tool_state() {
   local remove_plugin="$2"
   local remove_permissions="$3"
   local codex_home="$(get_codex_home)"
-  python3 - "$tool" "$remove_plugin" "$remove_permissions" "$STATE_FILE" "$HOME" "$codex_home" <<'PY'
+  local claude_config="$(get_claude_config_dir)"
+  local opencode_config="$(get_opencode_config_dir)"
+  python3 - "$tool" "$remove_plugin" "$remove_permissions" "$STATE_FILE" "$HOME" "$codex_home" "$claude_config" "$opencode_config" <<'PY'
 import json, os, re, sys, tempfile
-tool, remove_plugin, remove_permissions, state_path, home, codex_home = sys.argv[1:7]
+tool, remove_plugin, remove_permissions, state_path, home, codex_home, claude_config, opencode_config = sys.argv[1:9]
 remove_plugin = remove_plugin == "1"
 remove_permissions = remove_permissions == "1"
 
@@ -2028,15 +2212,15 @@ legacy = not isinstance(state, dict)
 if tool == "claude":
     if remove_plugin:
         for path, key in [
-            (os.path.join(home, ".claude/plugins/known_marketplaces.json"), "macroscope-local"),
+            (os.path.join(claude_config, "plugins/known_marketplaces.json"), "macroscope-local"),
         ]:
             data, mode = load(path)
             if isinstance(data, dict) and key in data: del data[key]; save(path, data, mode)
-        path = os.path.join(home, ".claude/plugins/installed_plugins.json")
+        path = os.path.join(claude_config, "plugins/installed_plugins.json")
         data, mode = load(path)
         if isinstance(data, dict) and isinstance(data.get("plugins"), dict):
             if data["plugins"].pop("macroscope@macroscope-local", None) is not None: save(path, data, mode)
-    path = os.path.join(home, ".claude/settings.json")
+    path = os.path.join(claude_config, "settings.json")
     data, mode = load(path)
     if isinstance(data, dict):
         changed = False
@@ -2103,7 +2287,7 @@ elif tool == "cursor" and remove_permissions:
             if permissions["allow"] != old: save(path, data, mode)
 
 elif tool == "opencode" and remove_permissions:
-    path = os.path.join(home, ".config/opencode/opencode.json")
+    path = os.path.join(opencode_config, "opencode.json")
     data, mode = load(path)
     if isinstance(data, dict):
         known = {"macroscope", "macroscope *", "mktemp", "mktemp *"}
@@ -2138,7 +2322,7 @@ PY
   fi
   rm -f "$legacy_mcp"
   local codex_home="$(get_codex_home)"
-  python3 - "$HOME/.claude.json" "$HOME/.cursor/mcp.json" "$codex_home/config.toml" <<'PY'
+  python3 - "$(get_claude_state_file)" "$HOME/.cursor/mcp.json" "$codex_home/config.toml" <<'PY'
 import json, os, re, sys, tempfile
 for path in sys.argv[1:3]:
     if not os.path.exists(path): continue
@@ -2177,8 +2361,8 @@ remove_tool_integration() {
   step "Removing deselected $tool integration..."
   case "$tool" in
     claude)
-      rm -rf "$HOME/.claude/plugins/marketplaces/macroscope-local" "$HOME/.claude/plugins/cache/macroscope-local"
-      rm -f "$HOME/.claude/hooks/macroscope-bash-autoallow.sh"
+      rm -rf "$(get_claude_config_dir)/plugins/marketplaces/macroscope-local" "$(get_claude_config_dir)/plugins/cache/macroscope-local"
+      rm -f "$(get_claude_config_dir)/hooks/macroscope-bash-autoallow.sh"
       ;;
     codex)
       rm -rf "$HOME/plugins/macroscope"
@@ -2187,8 +2371,8 @@ remove_tool_integration() {
       ;;
     cursor) rm -rf "$HOME/.cursor/plugins/local/macroscope" ;;
     opencode)
-      rm -f "$HOME/.config/opencode/plugins/macroscope.js" "$HOME/.config/opencode/commands/macroscope-codereview.md" "$HOME/.config/opencode/commands/macroscope-autoloop.md"
-      rm -rf "$HOME/.config/opencode/skills/codereview" "$HOME/.config/opencode/skills/autoloop"
+      rm -f "$(get_opencode_config_dir)/plugins/macroscope.js" "$(get_opencode_config_dir)/commands/macroscope-codereview.md" "$(get_opencode_config_dir)/commands/macroscope-autoloop.md"
+      rm -rf "$(get_opencode_config_dir)/skills/codereview" "$(get_opencode_config_dir)/skills/autoloop"
       ;;
   esac
   clean_tool_state "$tool" 1 1
@@ -2196,17 +2380,17 @@ remove_tool_integration() {
 }
 
 snapshot_permission_state() {
-  python3 - "$STATE_FILE" "$TMP_DIR/permission-before.json" "$HOME" <<'PY'
+  python3 - "$STATE_FILE" "$TMP_DIR/permission-before.json" "$HOME" "$(get_claude_config_dir)" "$(get_opencode_config_dir)" <<'PY'
 import json, os, sys
-state_path, output, home = sys.argv[1:4]
+state_path, output, home, claude_config, opencode_config = sys.argv[1:6]
 try:
     with open(state_path, encoding="utf-8") as f: state = json.load(f)
 except Exception: state = {}
 prior = state.get("permissionOwnership", {})
 rules = {
-  "claude": (os.path.join(home, ".claude/settings.json"), ("permissions", "allow"), ["Bash(macroscope *)", "Bash(macroscope:*)", "Bash(mktemp *)", "Bash(mktemp:*)"]),
+  "claude": (os.path.join(claude_config, "settings.json"), ("permissions", "allow"), ["Bash(macroscope *)", "Bash(macroscope:*)", "Bash(mktemp *)", "Bash(mktemp:*)"]),
   "cursor": (os.path.join(home, ".cursor/cli-config.json"), ("permissions", "allow"), ["Shell(macroscope)", "Shell(macroscope *)", "Shell(mktemp)", "Shell(mktemp *)"]),
-  "opencode": (os.path.join(home, ".config/opencode/opencode.json"), ("permission", "bash"), ["macroscope *", "macroscope", "mktemp *", "mktemp"]),
+  "opencode": (os.path.join(opencode_config, "opencode.json"), ("permission", "bash"), ["macroscope *", "macroscope", "mktemp *", "mktemp"]),
 }
 result = {}
 for tool, (path, keys, known) in rules.items():
@@ -2229,16 +2413,16 @@ PY
 write_install_state() {
   local path_file="$STATE_PATH_FILE"
   [ "$PATH_ACTION" = "modify" ] && path_file="$PATH_TARGET"
-  python3 - "$STATE_FILE" "$TMP_DIR/permission-before.json" "$SELECTED_TOOLS" "$HOST_PERMISSIONS" "$path_file" "$PATH_POLICY" "$INSTALLED_VERSION" "$HOME" <<'PY'
+  python3 - "$STATE_FILE" "$TMP_DIR/permission-before.json" "$SELECTED_TOOLS" "$HOST_PERMISSIONS" "$path_file" "$PATH_POLICY" "$INSTALLED_VERSION" "$HOME" "$(get_claude_config_dir)" "$(get_opencode_config_dir)" <<'PY'
 import json, os, sys, tempfile
-path, before_path, tools_csv, host_permissions, path_file, path_policy, version, home = sys.argv[1:9]
+path, before_path, tools_csv, host_permissions, path_file, path_policy, version, home, claude_config, opencode_config = sys.argv[1:11]
 try:
     with open(before_path, encoding="utf-8") as f: before = json.load(f)
 except Exception: before = {}
 rules_by_tool = {
- "claude": (os.path.join(home, ".claude/settings.json"), ("permissions", "allow"), ["Bash(macroscope *)", "Bash(macroscope:*)", "Bash(mktemp *)", "Bash(mktemp:*)"]),
+ "claude": (os.path.join(claude_config, "settings.json"), ("permissions", "allow"), ["Bash(macroscope *)", "Bash(macroscope:*)", "Bash(mktemp *)", "Bash(mktemp:*)"]),
  "cursor": (os.path.join(home, ".cursor/cli-config.json"), ("permissions", "allow"), ["Shell(macroscope)", "Shell(macroscope *)", "Shell(mktemp)", "Shell(mktemp *)"]),
- "opencode": (os.path.join(home, ".config/opencode/opencode.json"), ("permission", "bash"), ["macroscope *", "macroscope", "mktemp *", "mktemp"]),
+ "opencode": (os.path.join(opencode_config, "opencode.json"), ("permission", "bash"), ["macroscope *", "macroscope", "mktemp *", "mktemp"]),
 }
 selected = [x for x in tools_csv.split(",") if x]
 ownership = {}
@@ -2270,6 +2454,9 @@ PY
 rollback_targets() {
   local codex_home="$(get_codex_home)"
   local codex_marketplace="$(get_codex_marketplace_name)"
+  local claude_config="$(get_claude_config_dir)"
+  local claude_state="$(get_claude_state_file)"
+  local opencode_config="$(get_opencode_config_dir)"
   printf '%s\0' \
     "$HOME/.local/bin/macroscope" \
     "$HOME/.local/bin/macroscope-mcp" \
@@ -2278,22 +2465,22 @@ rollback_targets() {
     "$HOME/.agents/plugins/marketplace.json" \
     "$codex_home/plugins/cache/$codex_marketplace/macroscope" \
     "$codex_home/config.toml" \
-    "$HOME/.claude/plugins/marketplaces/macroscope-local" \
-    "$HOME/.claude/plugins/cache/macroscope-local" \
-    "$HOME/.claude/plugins/known_marketplaces.json" \
-    "$HOME/.claude/plugins/installed_plugins.json" \
-    "$HOME/.claude.json" \
-    "$HOME/.claude/settings.json" \
-    "$HOME/.claude/hooks/macroscope-bash-autoallow.sh" \
+    "$claude_config/plugins/marketplaces/macroscope-local" \
+    "$claude_config/plugins/cache/macroscope-local" \
+    "$claude_config/plugins/known_marketplaces.json" \
+    "$claude_config/plugins/installed_plugins.json" \
+    "$claude_state" \
+    "$claude_config/settings.json" \
+    "$claude_config/hooks/macroscope-bash-autoallow.sh" \
     "$HOME/.cursor/plugins/local/macroscope" \
     "$HOME/.cursor/cli-config.json" \
     "$HOME/.cursor/mcp.json" \
-    "$HOME/.config/opencode/plugins/macroscope.js" \
-    "$HOME/.config/opencode/commands/macroscope-codereview.md" \
-    "$HOME/.config/opencode/commands/macroscope-autoloop.md" \
-    "$HOME/.config/opencode/skills/codereview" \
-    "$HOME/.config/opencode/skills/autoloop" \
-    "$HOME/.config/opencode/opencode.json" \
+    "$opencode_config/plugins/macroscope.js" \
+    "$opencode_config/commands/macroscope-codereview.md" \
+    "$opencode_config/commands/macroscope-autoloop.md" \
+    "$opencode_config/skills/codereview" \
+    "$opencode_config/skills/autoloop" \
+    "$opencode_config/opencode.json" \
     "$HOME/.macroscope/config.yaml" \
     "$STATE_FILE"
   [ -z "$PATH_TARGET" ] || printf '%s\0' "$PATH_TARGET"
@@ -2354,6 +2541,7 @@ rollback_install() {
 handle_exit() {
   local status="$1"
   if [ -n "$SAVED_TTY_STATE" ]; then
+    printf '\033[?25h' > /dev/tty 2>/dev/null || true
     stty "$SAVED_TTY_STATE" < /dev/tty 2>/dev/null || true
     SAVED_TTY_STATE=""
   fi
@@ -2388,7 +2576,7 @@ install_opencode_support() {
   local commands_src="$plugin_src/commands"
   local skills_src="$plugin_src/skills"
   local plugin_file="$plugin_src/opencode/macroscope.js"
-  local opencode_root="$HOME/.config/opencode"
+  local opencode_root="$(get_opencode_config_dir)"
   local opencode_commands="$opencode_root/commands"
   local opencode_skills="$opencode_root/skills"
   local opencode_plugins="$opencode_root/plugins"
@@ -2420,6 +2608,77 @@ install_opencode_support() {
   success "Installed OpenCode plugin to ${BOLD}${opencode_plugins}/macroscope.js${RESET}"
   success "Installed OpenCode commands to ${BOLD}${opencode_commands}${RESET}"
   success "Installed OpenCode skills to ${BOLD}${opencode_skills}${RESET}"
+}
+
+verify_claude_plugin_registration() {
+  local claude_cli=""
+  local status=""
+
+  claude_cli="$(command -v claude || true)"
+  if [ -z "$claude_cli" ]; then
+    info "Claude Code CLI is not available; verified its plugin files only"
+    return 0
+  fi
+
+  status="$(python3 - "$claude_cli" <<'PY'
+import json
+import subprocess
+import sys
+
+claude = sys.argv[1]
+plugin_id = "macroscope@macroscope-local"
+
+
+def run(args):
+    try:
+        return subprocess.run(
+            [claude, *args],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        print("timeout")
+        raise SystemExit(0)
+
+
+listed = run(["plugin", "list", "--json"])
+if listed.returncode != 0:
+    print("list-failed")
+    raise SystemExit(0)
+
+try:
+    data = json.loads(listed.stdout)
+except Exception:
+    print("list-invalid")
+    raise SystemExit(0)
+
+entries = data if isinstance(data, list) else data.get("plugins", []) if isinstance(data, dict) else []
+plugin = next((item for item in entries if isinstance(item, dict) and item.get("id") == plugin_id), None)
+if plugin is None:
+    print("missing")
+elif plugin.get("enabled") is not True:
+    print("disabled")
+elif plugin.get("errors"):
+    print("errors")
+else:
+    details = run(["plugin", "details", plugin_id])
+    print("ok" if details.returncode == 0 else "details-failed")
+PY
+)" || status="list-failed"
+
+  case "$status" in
+    ok) success "Claude Code CLI recognizes the enabled plugin and its components" ;;
+    missing) warn "Claude Code CLI did not discover macroscope@macroscope-local; run 'claude plugin list --json' to diagnose" ;;
+    disabled) warn "Claude Code CLI found macroscope@macroscope-local, but it is disabled" ;;
+    errors) warn "Claude Code CLI found macroscope@macroscope-local with load errors; run 'claude plugin details macroscope@macroscope-local'" ;;
+    details-failed) warn "Claude Code CLI found the enabled plugin, but could not inspect its components" ;;
+    timeout) warn "Claude Code CLI plugin verification timed out after 10 seconds" ;;
+    *) warn "Claude Code CLI could not return a valid plugin list; plugin files were installed" ;;
+  esac
 }
 
 verify_install() {
@@ -2478,12 +2737,16 @@ PY
     warn "Codex plugin cache install did not produce the expected cache entry"
   fi
 
-  if tool_selected claude && [ -f "$HOME/.claude/plugins/cache/macroscope-local/macroscope/$PLUGIN_VERSION/.claude-plugin/plugin.json" ] && \
-     [ -f "$HOME/.claude/plugins/cache/macroscope-local/macroscope/$PLUGIN_VERSION/skills/codereview/SKILL.md" ] && \
-     [ -f "$HOME/.claude/plugins/cache/macroscope-local/macroscope/$PLUGIN_VERSION/skills/autoloop/SKILL.md" ]; then
+  local claude_cache="$(get_claude_config_dir)/plugins/cache/macroscope-local/macroscope/$PLUGIN_VERSION"
+  if tool_selected claude && [ -f "$claude_cache/.claude-plugin/plugin.json" ] && \
+     [ -f "$claude_cache/skills/codereview/SKILL.md" ] && \
+     [ -f "$claude_cache/skills/autoloop/SKILL.md" ]; then
     success "Claude Code plugin installed with skills"
   elif tool_selected claude; then
     warn "Claude Code plugin install did not produce the expected cache entry"
+  fi
+  if tool_selected claude; then
+    verify_claude_plugin_registration
   fi
 
   if tool_selected cursor && [ -f "$HOME/.cursor/plugins/local/macroscope/.cursor-plugin/plugin.json" ]; then
@@ -2492,7 +2755,8 @@ PY
     warn "Cursor plugin install did not produce the expected local plugin entry"
   fi
 
-  if tool_selected opencode && [ -f "$HOME/.config/opencode/plugins/macroscope.js" ] && [ -f "$HOME/.config/opencode/commands/macroscope-codereview.md" ] && [ -f "$HOME/.config/opencode/skills/codereview/SKILL.md" ]; then
+  local opencode_root="$(get_opencode_config_dir)"
+  if tool_selected opencode && [ -f "$opencode_root/plugins/macroscope.js" ] && [ -f "$opencode_root/commands/macroscope-codereview.md" ] && [ -f "$opencode_root/skills/codereview/SKILL.md" ]; then
     success "OpenCode plugin, commands, and skills installed"
   elif tool_selected opencode; then
     warn "OpenCode install did not produce the expected plugin, command, and skill files"
@@ -2599,6 +2863,7 @@ launch_wizard() {
 }
 
 main() {
+  trap 'handle_exit $?' EXIT
   parse_options "$@"
   if [ "$OUTPUT_FORMAT" = "json" ]; then
     exec 3>&1
@@ -2662,7 +2927,7 @@ main() {
     if tool_selected "$tool"; then
       if [ "$HOST_PERMISSIONS" = "skip" ] && [ "$INSTALL_MODE" = "update" ]; then
         clean_tool_state "$tool" 0 1
-        [ "$tool" != "claude" ] || rm -f "$HOME/.claude/hooks/macroscope-bash-autoallow.sh"
+        [ "$tool" != "claude" ] || rm -f "$(get_claude_config_dir)/hooks/macroscope-bash-autoallow.sh"
       fi
       case "$tool" in
         claude) install_claude_plugin ;;

@@ -34,11 +34,117 @@ run_install() {
     HOME="$TEST_HOME" \
     SHELL="${TEST_SHELL:-/bin/zsh}" \
     PATH="${TEST_PATH:-/usr/bin:/bin}" \
+    CLAUDE_CONFIG_DIR="${TEST_CLAUDE_CONFIG_DIR:-}" \
+    OPENCODE_CONFIG_DIR="${TEST_OPENCODE_CONFIG_DIR:-}" \
+    XDG_CONFIG_HOME="${TEST_XDG_CONFIG_HOME:-}" \
+    TEST_CLAUDE_LOG="${TEST_CLAUDE_LOG:-}" \
     MACROSCOPE_LOCAL_BINARY_SOURCE="${TEST_BINARY:-$TEST_BINARY_DEFAULT}" \
     MACROSCOPE_PLUGIN_BUNDLE_SOURCE="${TEST_PLUGIN_BUNDLE:-$REPO_ROOT}" \
     MACROSCOPE_CODEX_BUNDLED_BINARY="${TEST_CODEX_BUNDLED_BINARY:-}" \
     MACROSCOPE_TEST_NONINTERACTIVE=1 \
     bash "$INSTALLER" "$@"
+}
+
+run_interactive_install() {
+  local output="$1"
+  local expected_status="$2"
+  shift 2
+  python3 - "$INSTALLER" "$TEST_HOME" "$TEST_BINARY_DEFAULT" "$REPO_ROOT" "$output" "$expected_status" "$@" <<'PY'
+import errno
+import os
+import pty
+import select
+import signal
+import sys
+import termios
+import time
+
+installer, home, binary, bundle, output, expected_status, *args = sys.argv[1:]
+try:
+    event_separator = args.index("--events")
+except ValueError:
+    raise SystemExit("missing --events separator")
+installer_args = args[:event_separator]
+events = []
+for event in args[event_separator + 1:]:
+    if "=" not in event:
+        raise SystemExit(f"invalid PTY event: {event!r}")
+    prompt, keys = event.split("=", 1)
+    events.append((prompt.encode(), keys.encode()))
+
+env = os.environ.copy()
+env.update({
+    "HOME": home,
+    "SHELL": "/bin/zsh",
+    "PATH": "/usr/bin:/bin",
+    "MACROSCOPE_LOCAL_BINARY_SOURCE": binary,
+    "MACROSCOPE_PLUGIN_BUNDLE_SOURCE": bundle,
+})
+for name in (
+    "MACROSCOPE_TEST_NONINTERACTIVE",
+    "CLAUDE_CONFIG_DIR",
+    "OPENCODE_CONFIG_DIR",
+    "XDG_CONFIG_HOME",
+):
+    env.pop(name, None)
+
+pid, fd = pty.fork()
+if pid == 0:
+    os.execve("/bin/bash", ["bash", installer, *installer_args], env)
+
+initial_tty = termios.tcgetattr(fd)
+captured = bytearray()
+next_event = 0
+deadline = time.monotonic() + 30
+status = None
+try:
+    while time.monotonic() < deadline:
+        ready, _, _ = select.select([fd], [], [], 0.2)
+        if ready:
+            try:
+                chunk = os.read(fd, 4096)
+            except OSError as exc:
+                if exc.errno != errno.EIO:
+                    raise
+                _, status = os.waitpid(pid, 0)
+                break
+            if not chunk:
+                _, status = os.waitpid(pid, 0)
+                break
+            captured.extend(chunk)
+            while next_event < len(events) and events[next_event][0] in captured:
+                os.write(fd, events[next_event][1])
+                next_event += 1
+        done, child_status = os.waitpid(pid, os.WNOHANG)
+        if done:
+            status = child_status
+            break
+    if status is None:
+        os.kill(pid, signal.SIGTERM)
+        _, status = os.waitpid(pid, 0)
+finally:
+    final_tty = termios.tcgetattr(fd)
+    os.close(fd)
+    with open(output, "wb") as f:
+        f.write(captured)
+
+actual_status = os.WEXITSTATUS(status) if os.WIFEXITED(status) else None
+interrupted = (
+    (os.WIFSIGNALED(status) and os.WTERMSIG(status) == signal.SIGINT)
+    or actual_status == 128 + signal.SIGINT
+)
+expected_exit = interrupted if expected_status == "interrupt" else actual_status == int(expected_status)
+tty_mask = termios.ECHO | termios.ICANON
+tty_restored = initial_tty[3] & tty_mask == final_tty[3] & tty_mask
+if next_event != len(events) or not expected_exit or not tty_restored:
+    sys.stderr.buffer.write(captured)
+    print(
+        f"PTY events {next_event}/{len(events)}, exit {actual_status}, "
+        f"expected {expected_status}, tty restored: {tty_restored}",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+PY
 }
 
 tree_digest() {
@@ -616,6 +722,197 @@ JSON
   pass "failure after legacy cleanup restores Claude MCP state"
 }
 
+test_claude_config_dir_is_honored() {
+  new_home
+  local claude_config="$TEST_HOME/team-claude"
+  TEST_CLAUDE_CONFIG_DIR="$claude_config"
+  run_install --yes --tools claude --host-permissions grant --no-path --no-wizard >"$TEST_ROOT/install"
+  find "$claude_config/plugins/cache/macroscope-local/macroscope" -type f -path '*/.claude-plugin/plugin.json' -print -quit | grep -q . || fail "custom Claude cache was not populated"
+  [ -f "$claude_config/settings.json" ] || fail "custom Claude settings were not populated"
+  [ -x "$claude_config/hooks/macroscope-bash-autoallow.sh" ] || fail "custom Claude hook was not populated"
+  [ ! -e "$TEST_HOME/.claude" ] || fail "default Claude config was modified"
+
+  cat > "$claude_config/.claude.json" <<'JSON'
+{"mcpServers":{"macroscope-codereview":{"command":"macroscope"},"keep":{"command":"keep"}}}
+JSON
+  run_install --mode update --yes --tools none --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/remove"
+  [ ! -e "$claude_config/plugins/cache/macroscope-local" ] || fail "custom Claude cache was not removed"
+  [ ! -e "$claude_config/hooks/macroscope-bash-autoallow.sh" ] || fail "custom Claude hook was not removed"
+  python3 - "$claude_config/.claude.json" <<'PY' || fail "custom Claude MCP state was not cleaned"
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as f: data = json.load(f)
+assert data["mcpServers"] == {"keep": {"command": "keep"}}
+PY
+  unset TEST_CLAUDE_CONFIG_DIR
+  pass "CLAUDE_CONFIG_DIR controls Claude install, cleanup, permissions, and hooks"
+}
+
+test_claude_cli_verifies_plugin_discovery() {
+  new_home
+  local claude_config="$TEST_HOME/team-claude"
+  local fake_bin="$TEST_ROOT/bin"
+  mkdir -p "$fake_bin"
+  cat > "$fake_bin/claude" <<'SH'
+#!/bin/sh
+printf '%s|%s\n' "${CLAUDE_CONFIG_DIR:-}" "$*" >> "$TEST_CLAUDE_LOG"
+if [ "${1:-} ${2:-} ${3:-}" = "plugin list --json" ]; then
+  printf '[{"id":"macroscope@macroscope-local","enabled":true,"errors":[]}]\n'
+  exit 0
+fi
+if [ "${1:-} ${2:-}" = "plugin details" ] && [ "${3:-}" = "macroscope@macroscope-local" ]; then
+  printf 'Skills (2)\n'
+  exit 0
+fi
+exit 2
+SH
+  chmod +x "$fake_bin/claude"
+  TEST_CLAUDE_CONFIG_DIR="$claude_config"
+  TEST_CLAUDE_LOG="$TEST_ROOT/claude.log"
+  TEST_PATH="$fake_bin:/usr/bin:/bin"
+  run_install --yes --tools claude --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/out"
+  grep -Fq 'Claude Code CLI recognizes the enabled plugin and its components' "$TEST_ROOT/out" || fail "Claude plugin discovery was not verified"
+  [ "$(grep -Fc "$claude_config|" "$TEST_CLAUDE_LOG")" -eq 2 ] || fail "Claude verification did not inherit CLAUDE_CONFIG_DIR"
+  grep -Fq '|plugin list --json' "$TEST_CLAUDE_LOG" || fail "Claude plugin list was not called"
+  grep -Fq '|plugin details macroscope@macroscope-local' "$TEST_CLAUDE_LOG" || fail "Claude plugin details was not called"
+  unset TEST_CLAUDE_CONFIG_DIR TEST_CLAUDE_LOG TEST_PATH
+  pass "Claude CLI verifies plugin discovery through the configured root"
+}
+
+test_opencode_config_dirs_are_honored() {
+  new_home
+  local opencode_config="$TEST_HOME/team-opencode"
+  TEST_OPENCODE_CONFIG_DIR="$opencode_config"
+  TEST_XDG_CONFIG_HOME="$TEST_HOME/ignored-xdg"
+  run_install --yes --tools opencode --host-permissions grant --no-path --no-wizard >"$TEST_ROOT/install"
+  [ -f "$opencode_config/plugins/macroscope.js" ] || fail "custom OpenCode plugin was not populated"
+  [ -f "$opencode_config/commands/macroscope-codereview.md" ] || fail "custom OpenCode commands were not populated"
+  grep -Fq '"macroscope *": "allow"' "$opencode_config/opencode.json" || fail "custom OpenCode permissions were not populated"
+  [ ! -e "$TEST_HOME/.config/opencode" ] || fail "default OpenCode config was modified"
+  [ ! -e "$TEST_HOME/ignored-xdg/opencode" ] || fail "XDG config overrode OPENCODE_CONFIG_DIR"
+  run_install --mode update --yes --tools none --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/remove"
+  [ ! -e "$opencode_config/plugins/macroscope.js" ] || fail "custom OpenCode plugin was not removed"
+  [ ! -e "$opencode_config/skills/codereview" ] || fail "custom OpenCode skills were not removed"
+  unset TEST_OPENCODE_CONFIG_DIR TEST_XDG_CONFIG_HOME
+
+  new_home
+  local xdg_config="$TEST_HOME/xdg"
+  TEST_XDG_CONFIG_HOME="$xdg_config"
+  run_install --yes --tools opencode --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/xdg-install"
+  [ -f "$xdg_config/opencode/plugins/macroscope.js" ] || fail "XDG OpenCode plugin was not populated"
+  [ ! -e "$TEST_HOME/.config/opencode" ] || fail "default OpenCode config was modified with XDG_CONFIG_HOME set"
+  unset TEST_XDG_CONFIG_HOME
+  pass "OpenCode honors OPENCODE_CONFIG_DIR and XDG_CONFIG_HOME"
+}
+
+test_interactive_update_repairs_empty_tool_selection() {
+  new_home
+  run_install --yes --tools none --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/initial"
+  run_interactive_install "$TEST_ROOT/update" 0 \
+    --no-path --no-wizard --events \
+    "space to toggle="$'\n' \
+    "Update and continue?="$'\n' || fail "interactive update did not complete"
+  grep -Fq 'No Macroscope host integrations are currently selected.' "$TEST_ROOT/update" || fail "empty-selection warning was not shown"
+  grep -Fq 'Up/down or j/k to move; space to toggle; enter to continue.' "$TEST_ROOT/update" || fail "integration multiselect instructions were not shown"
+  ! grep -Fq 'comma-separated' "$TEST_ROOT/update" || fail "interactive update still requested free-text integrations"
+  python3 - "$TEST_HOME/.local/state/macroscope/install.json" <<'PY' || fail "interactive update preserved an empty tool selection"
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as f: data = json.load(f)
+assert data["tools"] == ["claude", "codex", "cursor", "opencode"]
+PY
+  pass "interactive updates reselect integrations instead of preserving a CLI-only trap"
+}
+
+test_interactive_lists_select_only_claude_and_permissions() {
+  new_home
+  run_interactive_install "$TEST_ROOT/install" 0 \
+    --no-path --no-wizard --events \
+    "space to toggle="$'\e[B \e[B \e[B \n' \
+    "Grant these permissions?="$'\e[A\n' \
+    "Proceed?="$'\n' || fail "interactive list selections did not complete"
+  python3 - "$TEST_HOME/.local/state/macroscope/install.json" <<'PY' || fail "interactive choices were not persisted"
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as f: data = json.load(f)
+assert data["tools"] == ["claude"]
+assert data["hostPermissions"] == "grant"
+PY
+  [ -d "$TEST_HOME/.claude/plugins/cache/macroscope-local" ] || fail "selected Claude integration was not installed"
+  grep -Fq 'Bash(macroscope *)' "$TEST_HOME/.claude/settings.json" || fail "selected permission grant was not installed"
+  [ -x "$TEST_HOME/.claude/hooks/macroscope-bash-autoallow.sh" ] || fail "selected Claude permission hook was not installed"
+  [ ! -e "$TEST_HOME/plugins/macroscope" ] || fail "deselected Codex integration was installed"
+  [ ! -e "$TEST_HOME/.cursor/plugins/local/macroscope" ] || fail "deselected Cursor integration was installed"
+  [ ! -e "$TEST_HOME/.config/opencode/plugins/macroscope.js" ] || fail "deselected OpenCode integration was installed"
+  pass "interactive lists select only Claude and grant host permissions with arrow keys"
+}
+
+test_interactive_confirmation_list_can_cancel() {
+  new_home
+  run_interactive_install "$TEST_ROOT/cancel" 3 \
+    --tools none --host-permissions skip --no-path --no-wizard --events \
+    "Proceed?="$'\e[B\n' || fail "interactive confirmation did not cancel"
+  grep -Fq 'Up/down or j/k to move; enter to choose.' "$TEST_ROOT/cancel" || fail "confirmation list instructions were not shown"
+  grep -Fq 'Cancelled before making changes.' "$TEST_ROOT/cancel" || fail "confirmation cancellation was not reported"
+  [ ! -e "$TEST_HOME/.local/bin/macroscope" ] || fail "cancelled confirmation changed the install"
+  pass "interactive confirmation uses a cancellable yes/no list"
+}
+
+test_interactive_interrupt_restores_terminal() {
+  new_home
+  run_interactive_install "$TEST_ROOT/interrupt" interrupt \
+    --no-path --no-wizard --events \
+    "space to toggle="$'\003' || fail "interactive interrupt did not exit cleanly"
+  grep -Fq $'\033[?25h' "$TEST_ROOT/interrupt" || fail "interactive interrupt did not restore the cursor"
+  [ ! -e "$TEST_HOME/.local/bin/macroscope" ] || fail "interrupted selection changed the install"
+  pass "interactive interrupt restores the terminal before exiting"
+}
+
+test_interactive_confirmation_interrupt_restores_terminal() {
+  new_home
+  run_interactive_install "$TEST_ROOT/confirm-interrupt" interrupt \
+    --tools none --host-permissions skip --no-path --no-wizard --events \
+    "Proceed?"=$'\003' || fail "confirmation interrupt did not restore the terminal"
+  grep -Fq $'\033[?25h' "$TEST_ROOT/confirm-interrupt" || fail "confirmation interrupt did not restore the cursor"
+  [ ! -e "$TEST_HOME/.local/bin/macroscope" ] || fail "confirmation interrupt changed the install"
+  pass "confirmation interrupt restores the terminal before exiting"
+}
+
+test_interactive_escape_does_not_block() {
+  new_home
+  run_interactive_install "$TEST_ROOT/escape" 0 \
+    --no-path --no-wizard --events \
+    "space to toggle="$'\e' \
+    $'\e[4A'=$'\n' \
+    "Grant these permissions?"=$'\n' \
+    "Proceed?"=$'\n' || fail "standalone escape blocked the integration list"
+  pass "standalone escape leaves the integration list responsive"
+}
+
+test_update_plan_omits_negative_actions() {
+  new_home
+  mkdir -p "$TEST_HOME/.local/bin" "$TEST_HOME/.macroscope"
+  cp "$TEST_BINARY_DEFAULT" "$TEST_HOME/.local/bin/macroscope"
+  printf 'api_url: test\n' > "$TEST_HOME/.macroscope/config.yaml"
+  TEST_PATH="$TEST_HOME/.local/bin:/usr/bin:/bin"
+  run_install --mode update --dry-run --tools none --host-permissions skip --no-wizard >"$TEST_ROOT/out"
+  grep -Fq "1. Replace $TEST_HOME/.local/bin/macroscope" "$TEST_ROOT/out" || fail "update plan replacement is not first"
+  grep -Fq "2. Keep PATH unchanged ($TEST_HOME/.local/bin is already active)" "$TEST_ROOT/out" || fail "update plan PATH action is not second"
+  grep -Fq '3. Clean legacy Macroscope MCP artifacts after the update is staged' "$TEST_ROOT/out" || fail "update plan cleanup is not third"
+  [ "$(grep -Ec '^[0-9]+\.' "$TEST_ROOT/out")" -eq 3 ] || fail "update plan did not collapse to three actions"
+  ! grep -Fq 'Do not add host shell permission rules or hooks' "$TEST_ROOT/out" || fail "update plan still lists skipped permission automation"
+  ! grep -Fq 'Do not launch the setup wizard' "$TEST_ROOT/out" || fail "update plan still lists skipped wizard launch"
+  unset TEST_PATH
+  pass "update plan lists only the three actions it performs"
+}
+
+test_plan_uses_natural_lifecycle_labels() {
+  new_home
+  run_install --mode initial --dry-run --tools none --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/initial"
+  grep -Fq 'Macroscope installation will:' "$TEST_ROOT/initial" || fail "initial plan uses an unnatural lifecycle label"
+  ! grep -Fq 'Macroscope initial will:' "$TEST_ROOT/initial" || fail "initial plan still prints the old lifecycle label"
+  run_install --mode update --dry-run --tools none --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/update"
+  grep -Fq 'Macroscope update will:' "$TEST_ROOT/update" || fail "update plan lifecycle label changed"
+  pass "plan uses natural lifecycle labels"
+}
+
 test_wizard_lifecycle_plan() {
   new_home
   run_install --dry-run --tools none --host-permissions skip >"$TEST_ROOT/initial"
@@ -623,7 +920,7 @@ test_wizard_lifecycle_plan() {
   mkdir -p "$TEST_HOME/.local/bin"
   cp /bin/echo "$TEST_HOME/.local/bin/macroscope"
   run_install --mode update --dry-run --tools none --host-permissions skip >"$TEST_ROOT/update"
-  grep -q 'Do not launch the setup wizard' "$TEST_ROOT/update" || fail "update plan launches wizard"
+  ! grep -q 'Launch the setup wizard' "$TEST_ROOT/update" || fail "update plan launches wizard"
   pass "wizard defaults to initial-only"
 }
 
@@ -658,6 +955,17 @@ test_failure_rolls_back_binary
 test_rollback_handles_tabbed_home_without_truncation
 test_plugin_failure_rolls_back_all_touched_state
 test_legacy_cleanup_failure_restores_claude_mcp_state
+test_claude_config_dir_is_honored
+test_claude_cli_verifies_plugin_discovery
+test_opencode_config_dirs_are_honored
+test_interactive_update_repairs_empty_tool_selection
+test_interactive_lists_select_only_claude_and_permissions
+test_interactive_confirmation_list_can_cancel
+test_interactive_interrupt_restores_terminal
+test_interactive_confirmation_interrupt_restores_terminal
+test_interactive_escape_does_not_block
+test_update_plan_omits_negative_actions
+test_plan_uses_natural_lifecycle_labels
 test_wizard_lifecycle_plan
 
 echo "All $PASS installer tests passed."
