@@ -1313,6 +1313,52 @@ test_completion_keeps_setup_and_verification_in_quick_start() {
   pass "completion keeps setup and verification commands in Quick start"
 }
 
+test_skills_use_remote_base_without_permission_rules() {
+  python3 - "$REPO_ROOT" <<'PY' || fail "shipped skill base resolution assertions failed"
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1])
+paths = [
+    root / "skills/codereview/SKILL.md",
+    root / "skills/autoloop/SKILL.md",
+    root / "plugins/macroscope/skills/codereview/SKILL.md",
+    root / "plugins/macroscope/skills/autoloop/SKILL.md",
+    root / "plugins/macroscope/host-overlays/claude/skills/codereview/SKILL.md",
+    root / "plugins/macroscope/host-overlays/claude/skills/autoloop/SKILL.md",
+    root / "plugins/macroscope/host-overlays/codex/skills/codereview/SKILL.md",
+    root / "plugins/macroscope/host-overlays/codex/skills/autoloop/SKILL.md",
+]
+
+for path in paths:
+    text = path.read_text(encoding="utf-8")
+    # origin is authoritative: when configured, always refresh the exact origin
+    # branch and treat any fetch failure as fatal.
+    assert 'if git remote get-url origin >/dev/null 2>&1; then' in text, path
+    assert 'git fetch --quiet --no-tags origin "+refs/heads/${base_branch}:refs/remotes/origin/${base_branch}"' in text, path
+    assert 'Failed to refresh base branch' in text, path
+    assert 'base_ref="origin/$base_branch"' in text, path
+    # local resolution only with no origin remote.
+    assert 'refs/heads/${base_branch}^{commit}' in text, path
+    assert 'base_ref="refs/heads/$base_branch"' in text, path
+    assert '--base "$base_ref"' in text, path
+    # never trust a cached remote-tracking ref, gate on a probe, prefer a bare
+    # local branch, hand the CLI a bare base, or describe removed permission rules.
+    assert 'git rev-parse --verify --quiet "refs/remotes/origin/' not in text, path
+    assert 'git ls-remote' not in text, path
+    assert 'base_ref="$base_branch"' not in text, path
+    assert 'macroscope codereview --raw --base "$base_branch"' not in text, path
+    assert "allow-list" not in text and "allow rule" not in text, path
+
+for path in paths[-2:]:
+    text = path.read_text(encoding="utf-8")
+    assert 'unlink "$pid_file" 2>/dev/null || true' in text, path
+    assert 'unlink "$review_log" 2>/dev/null || true' in text, path
+    assert 'rm -f "$pid_file"' not in text, path
+PY
+  pass "skills resolve a strictly origin-authoritative base"
+}
+
 test_dry_run_is_read_only
 test_empty_version_binary_is_rejected_before_apply
 test_selected_tool_assets_are_validated_before_apply
@@ -1374,5 +1420,6 @@ test_absent_digest_warns_and_installs_by_default
 test_absent_digest_fails_closed_under_strict
 test_metadata_fetch_error_fails_closed
 test_plugin_bundle_is_verified_before_extraction
+test_skills_use_remote_base_without_permission_rules
 
 echo "All $PASS installer tests passed."
