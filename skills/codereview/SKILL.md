@@ -27,16 +27,23 @@ Run a local Macroscope review using the installed CLI.
 ## 1. Determine the local review scope
 
 ```bash
-gh pr view --json baseRefName -q .baseRefName 2>/dev/null
+# Prefer the PR base, then the origin default branch. Only when there is no
+# origin remote at all, fall back to a local default branch. When origin exists
+# but neither the PR base nor origin/HEAD resolves, leave base_branch empty and
+# fail closed below rather than guessing a local branch.
+base_branch="$(gh pr view --json baseRefName -q .baseRefName 2>/dev/null)"
+if [ -z "$base_branch" ]; then
+  base_branch="$(git symbolic-ref --quiet refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@')"
+fi
+if [ -z "$base_branch" ] && ! git remote get-url origin >/dev/null 2>&1; then
+  for candidate in "$(git config --get init.defaultBranch)" main master; do
+    [ -n "$candidate" ] && git rev-parse --verify --quiet "refs/heads/${candidate}^{commit}" >/dev/null && { base_branch="$candidate"; break; }
+  done
+fi
 ```
 
-```bash
-git symbolic-ref --quiet refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@'
-```
-
-- Try the PR base first. If that fails, use the repo default branch from `origin/HEAD`, or a local default branch (`init.defaultBranch`, then `main`, then `master`) when there is no `origin` remote.
-- Call the result `base_branch`.
-- If you cannot determine `base_branch`, stop and explain why.
+- The result is `base_branch` (PR base first, then `origin/HEAD`; a local default branch only when there is no `origin` remote).
+- If `base_branch` is empty (for example `origin` is configured but has no resolvable default branch and no PR/explicit base), stop and explain why — never guess a local branch when `origin` exists.
 - Resolve the comparison as `base_ref`. `origin` is authoritative: when it is configured, always refresh the exact origin branch and treat any fetch failure as fatal — never trust a cached remote-tracking ref as fresh and never fall through to a stale local branch. Use a local branch only when there is no `origin` remote:
 
 ```bash

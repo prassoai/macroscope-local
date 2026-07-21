@@ -1342,6 +1342,10 @@ for path in paths:
     assert 'refs/heads/${base_branch}^{commit}' in text, path
     assert 'base_ref="refs/heads/$base_branch"' in text, path
     assert '--base "$base_ref"' in text, path
+    # local default-branch discovery is gated on the absence of an origin remote;
+    # it must never guess a local branch while origin exists.
+    assert '[ -z "$base_branch" ] && ! git remote get-url origin >/dev/null 2>&1' in text, path
+    assert 'for candidate in "$(git config --get init.defaultBranch)" main master' in text, path
     # never trust a cached remote-tracking ref, gate on a probe, prefer a bare
     # local branch, hand the CLI a bare base, or describe removed permission rules.
     assert 'git rev-parse --verify --quiet "refs/remotes/origin/' not in text, path

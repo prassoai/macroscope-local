@@ -37,8 +37,10 @@ This mode applies fixes directly to the working tree. It does not interact with 
 
 ```bash
 base_branch="$(git symbolic-ref --quiet refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@')"
-if [ -z "$base_branch" ]; then
-  # No origin/HEAD (e.g. a repo without an origin remote): fall back to a local default branch.
+if [ -z "$base_branch" ] && ! git remote get-url origin >/dev/null 2>&1; then
+  # No origin remote: fall back to a local default branch. When origin exists but
+  # its default branch cannot be determined, leave base_branch empty and fail
+  # closed below rather than guessing a local branch.
   for candidate in "$(git config --get init.defaultBranch)" main master; do
     [ -n "$candidate" ] && git rev-parse --verify --quiet "refs/heads/${candidate}^{commit}" >/dev/null && { base_branch="$candidate"; break; }
   done
@@ -46,7 +48,7 @@ fi
 ```
 
 - Use the resulting `base_branch` as the comparison branch.
-- If you cannot determine `base_branch`, stop and explain why.
+- If `base_branch` is empty (for example `origin` is configured but has no resolvable default branch), stop and explain why — never guess a local branch when `origin` exists.
 - Resolve the comparison as `base_ref`. `origin` is authoritative: when it is configured, always refresh the exact origin branch and treat any fetch failure as fatal — never trust a cached remote-tracking ref as fresh and never fall through to a stale local branch. Use a local branch only when there is no `origin` remote:
 
 ```bash
