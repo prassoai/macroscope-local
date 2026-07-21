@@ -2,6 +2,8 @@
 
 Local-first AI code review for your terminal and editor, with an optional autopilot loop. Integrates with Claude Code, Codex, Cursor, and OpenCode.
 
+Using the Macroscope CLI requires an active Macroscope account.
+
 ## Install
 
 ```bash
