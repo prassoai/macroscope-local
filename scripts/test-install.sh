@@ -222,10 +222,10 @@ test_invalid_state_falls_back_to_detected_tools() {
   mkdir -p "$TEST_HOME/.local/state/macroscope" "$TEST_HOME/.cursor/plugins/local/macroscope"
   printf '{' > "$TEST_HOME/.local/state/macroscope/install.json"
   run_install --mode update --dry-run --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/out"
-  grep -Fq 'Install or update the cursor plugin' "$TEST_ROOT/out" || fail "invalid state did not fall back to detected integrations"
+  grep -Fq 'Install or update the following plugin for cursor' "$TEST_ROOT/out" || fail "invalid state did not fall back to detected integrations"
   printf '{"tools":null}\n' > "$TEST_HOME/.local/state/macroscope/install.json"
   run_install --mode update --dry-run --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/out"
-  grep -Fq 'Install or update the cursor plugin' "$TEST_ROOT/out" || fail "invalid state schema did not fall back to detected integrations"
+  grep -Fq 'Install or update the following plugin for cursor' "$TEST_ROOT/out" || fail "invalid state schema did not fall back to detected integrations"
   pass "invalid state falls back to detected integrations"
 }
 
@@ -903,6 +903,19 @@ test_update_plan_omits_negative_actions() {
   pass "update plan lists only the three actions it performs"
 }
 
+test_plan_groups_selected_integration_installs() {
+  new_home
+  run_install --mode initial --dry-run --tools all --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/out"
+  grep -Fq '3. Install or update the following plugins for claude, codex, cursor and opencode' "$TEST_ROOT/out" || fail "integration installs were not grouped into one numbered action"
+  grep -Fq "   ($TEST_HOME/.claude/plugins/cache/macroscope-local/ and $TEST_HOME/.claude/settings.json)" "$TEST_ROOT/out" || fail "grouped Claude paths are incorrect"
+  grep -Fq "   ($TEST_HOME/plugins/macroscope, $TEST_HOME/.codex/plugins/cache/, and $TEST_HOME/.codex/config.toml)" "$TEST_ROOT/out" || fail "grouped Codex paths are incorrect"
+  grep -Fq "   ($TEST_HOME/.cursor/plugins/local/macroscope/)" "$TEST_ROOT/out" || fail "grouped Cursor path is incorrect"
+  grep -Fq "   ($TEST_HOME/.config/opencode/)" "$TEST_ROOT/out" || fail "grouped OpenCode path is incorrect"
+  grep -Fq "4. Seed local-build configuration at $TEST_HOME/.macroscope/config.yaml" "$TEST_ROOT/out" || fail "action after grouped integrations was not renumbered"
+  [ "$(grep -Ec '^[0-9]+\. Install or update the .* plugin' "$TEST_ROOT/out")" -eq 1 ] || fail "integration installs still occupy multiple numbered actions"
+  pass "plan groups selected integration installs into one action"
+}
+
 test_plan_uses_natural_lifecycle_labels() {
   new_home
   run_install --mode initial --dry-run --tools none --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/initial"
@@ -922,6 +935,16 @@ test_wizard_lifecycle_plan() {
   run_install --mode update --dry-run --tools none --host-permissions skip >"$TEST_ROOT/update"
   ! grep -q 'Launch the setup wizard' "$TEST_ROOT/update" || fail "update plan launches wizard"
   pass "wizard defaults to initial-only"
+}
+
+test_completion_keeps_setup_and_verification_in_quick_start() {
+  new_home
+  run_install --yes --tools none --host-permissions skip --no-path --no-wizard >"$TEST_ROOT/out"
+  ! grep -Fq 'Setup wizard not requested.' "$TEST_ROOT/out" || fail "completion still prints the skipped-wizard notice"
+  ! grep -Fq 'Verify installation:' "$TEST_ROOT/out" || fail "completion still has a separate verification section"
+  grep -Fq 'macroscope setup               # Run setup anytime' "$TEST_ROOT/out" || fail "Quick start is missing the setup command"
+  grep -Fq 'macroscope --help              # Verify installation' "$TEST_ROOT/out" || fail "Quick start is missing the verification command"
+  pass "completion keeps setup and verification commands in Quick start"
 }
 
 test_dry_run_is_read_only
@@ -965,7 +988,9 @@ test_interactive_interrupt_restores_terminal
 test_interactive_confirmation_interrupt_restores_terminal
 test_interactive_escape_does_not_block
 test_update_plan_omits_negative_actions
+test_plan_groups_selected_integration_installs
 test_plan_uses_natural_lifecycle_labels
 test_wizard_lifecycle_plan
+test_completion_keeps_setup_and_verification_in_quick_start
 
 echo "All $PASS installer tests passed."

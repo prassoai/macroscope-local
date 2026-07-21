@@ -275,6 +275,33 @@ tool_plan_path() {
   esac
 }
 
+tool_install_plan_path() {
+  case "$1" in
+    claude) printf '%s/plugins/cache/macroscope-local/ and %s/settings.json' "$(get_claude_config_dir)" "$(get_claude_config_dir)" ;;
+    *) tool_plan_path "$1" ;;
+  esac
+}
+
+selected_tools_plan_label() {
+  local tools=()
+  local tool=""
+  local index=0
+  local last=0
+  for tool in claude codex cursor opencode; do
+    tool_selected "$tool" && tools+=("$tool")
+  done
+  last=$((${#tools[@]} - 1))
+  for index in "${!tools[@]}"; do
+    if [ "$index" -eq 0 ]; then
+      printf '%s' "${tools[$index]}"
+    elif [ "$index" -eq "$last" ]; then
+      printf ' and %s' "${tools[$index]}"
+    else
+      printf ', %s' "${tools[$index]}"
+    fi
+  done
+}
+
 tool_installed() {
   case "$1" in
     claude) [ -d "$(get_claude_config_dir)/plugins/cache/macroscope-local" ] ;;
@@ -602,15 +629,21 @@ print_plan() {
   fi
   index=$((index + 1))
   local tool=""
-  for tool in claude codex cursor opencode; do
-    if tool_selected "$tool"; then
-      printf '%d. Install or update the %s plugin (%s)\n' "$index" "$tool" "$(tool_plan_path "$tool")"
+  if [ -n "$SELECTED_TOOLS" ]; then
+    local plugin_noun="plugins"
+    [ "${SELECTED_TOOLS#*,}" = "$SELECTED_TOOLS" ] && plugin_noun="plugin"
+    printf '%d. Install or update the following %s for %s\n' "$index" "$plugin_noun" "$(selected_tools_plan_label)"
+    for tool in claude codex cursor opencode; do
+      tool_selected "$tool" && printf '   (%s)\n' "$(tool_install_plan_path "$tool")"
+    done
+    index=$((index + 1))
+    if tool_selected codex && codex_shim_will_install; then
+      printf '%d. Install or update the managed Codex CLI wrapper at %s/.local/bin/codex\n' "$index" "$HOME"
       index=$((index + 1))
-      if [ "$tool" = "codex" ] && codex_shim_will_install; then
-        printf '%d. Install or update the managed Codex CLI wrapper at %s/.local/bin/codex\n' "$index" "$HOME"
-        index=$((index + 1))
-      fi
-    elif [ "$INSTALL_MODE" = "update" ] && tool_installed "$tool"; then
+    fi
+  fi
+  for tool in claude codex cursor opencode; do
+    if ! tool_selected "$tool" && [ "$INSTALL_MODE" = "update" ] && tool_installed "$tool"; then
       printf '%d. Remove Macroscope-owned %s integration state at %s (deselected)\n' "$index" "$tool" "$(tool_plan_path "$tool")"
       index=$((index + 1))
     fi
@@ -2778,11 +2811,10 @@ print_installation_completion() {
   printf "${GREEN}${BOLD}Installation Complete!${RESET}\n"
   printf "${GREEN}${BOLD}════════════════════════════════════════════════${RESET}\n"
   echo ""
-  printf "${BOLD}Verify installation:${RESET}\n"
-  printf "  ${CYAN}macroscope --help${RESET}\n"
-  echo ""
   printf "${BOLD}Quick start:${RESET}\n"
   printf "  ${CYAN}macroscope${RESET}                     ${DIM}# Launch the interactive wizard${RESET}\n"
+  printf "  ${CYAN}macroscope setup${RESET}               ${DIM}# Run setup anytime${RESET}\n"
+  printf "  ${CYAN}macroscope --help${RESET}              ${DIM}# Verify installation${RESET}\n"
   printf "  ${CYAN}macroscope codereview --base <base_branch>${RESET} ${DIM}# Run the CLI directly${RESET}\n"
   printf "  ${CYAN}/macroscope:codereview${RESET}           ${DIM}# Local review${RESET}\n"
   printf "  ${CYAN}/macroscope:autoloop${RESET}             ${DIM}# Autopilot review-fix-push cycle${RESET}\n"
@@ -2806,7 +2838,6 @@ print_installation_completion() {
 
 launch_wizard() {
   if [ "$WIZARD_MODE" != "yes" ] || [ "${MACROSCOPE_SKIP_WIZARD:-0}" = "1" ]; then
-    info "Setup wizard not requested. Run 'macroscope setup' anytime."
     return
   fi
 
