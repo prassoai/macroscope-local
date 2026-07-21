@@ -14,6 +14,8 @@ curl -sSL https://raw.githubusercontent.com/prassoai/macroscope-local/main/insta
 
 The installer previews every planned change — binaries, PATH edits, editor integrations, and permissions — and asks for confirmation before writing anything. It stages and validates the new binary and plugin bundle before replacing existing state, and preserves `~/.macroscope`, saved credentials, unrelated editor settings, and file modes.
 
+Interactive installs propose command auto-approval by default; choose **Install without command auto-approval** at the final confirmation to decline.
+
 Mandatory auto-updates reuse the integration and command-permission choices in the install manifest without showing the installer plan or asking for confirmation. If those saved choices are missing or incomplete, the installer falls back to the normal interactive selection and confirmation flow.
 
 ## Quick start
@@ -30,8 +32,8 @@ Run a review from your editor:
 | ----------- | ------------------------ | ------------------------ |
 | Claude Code | `/macroscope:codereview` | `/macroscope:autoloop`   |
 | Codex       | `/macroscope:codereview` | `/macroscope:autoloop`   |
-| Cursor      | `/macroscope:codereview` | `/macroscope:autoloop`   |
-| OpenCode    | `/macroscope`            | `/macroscope-autoloop`   |
+| Cursor      | `/codereview`            | `/autoloop`              |
+| OpenCode    | `/macroscope-codereview` | `/macroscope-autoloop`   |
 
 - **Review** runs the local CLI review and validates each issue before acting.
 - **Autopilot** runs the full review → fix → re-review cycle.
