@@ -1892,10 +1892,10 @@ install_codex_cli_shim() {
 
   if [ ! -x "$CODEX_BUNDLED_BINARY" ] || ! codex_supports_plugins "$CODEX_BUNDLED_BINARY"; then
     if [ -n "$current_codex" ]; then
-      CODEX_PLUGIN_HOST_WARNING="Codex CLI at ${current_codex} does not support local plugins. Install or update the Codex desktop app to use /macroscope:codereview from the CLI."
+      CODEX_PLUGIN_HOST_WARNING="Codex CLI at ${current_codex} does not support local plugins. Install or update the Codex desktop app to use \$macroscope:codereview from the CLI."
       warn "$CODEX_PLUGIN_HOST_WARNING"
     else
-      CODEX_PLUGIN_HOST_WARNING="Codex CLI is not installed. Install the Codex desktop app to use /macroscope:codereview from the CLI."
+      CODEX_PLUGIN_HOST_WARNING="Codex CLI is not installed. Install the Codex desktop app to use \$macroscope:codereview from the CLI."
       warn "$CODEX_PLUGIN_HOST_WARNING"
     fi
     return
@@ -2677,7 +2677,7 @@ print_installation_completion() {
   printf "${BOLD}Coding agent commands:${RESET}\n"
   printf "  ${DIM}Agent        Review                    Autopilot${RESET}\n"
   printf "  Claude Code  ${CYAN}/macroscope:codereview${RESET}   ${CYAN}/macroscope:autoloop${RESET}\n"
-  printf "  Codex        ${CYAN}/macroscope:codereview${RESET}   ${CYAN}/macroscope:autoloop${RESET}\n"
+  printf "  Codex        ${CYAN}\$macroscope:codereview${RESET}   ${CYAN}\$macroscope:autoloop${RESET}\n"
   printf "  Cursor       ${CYAN}/codereview${RESET}              ${CYAN}/autoloop${RESET}\n"
   printf "  OpenCode     ${CYAN}/macroscope-codereview${RESET}   ${CYAN}/macroscope-autoloop${RESET}\n"
   echo ""

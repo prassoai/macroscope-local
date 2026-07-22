@@ -22,7 +22,7 @@
   "interface": {
     "displayName": "Macroscope",
     "shortDescription": "Local-first Macroscope code review and autopilot loop",
-    "longDescription": "Two skills: /macroscope:codereview runs a streaming local CLI review, while /macroscope:autoloop fixes confirmed issues locally, verifies and commits them, and re-reviews until the branch is clean.",
+    "longDescription": "Two skills: $macroscope:codereview runs a streaming local CLI review, while $macroscope:autoloop fixes confirmed issues locally, verifies and commits them, and re-reviews until the branch is clean.",
     "developerName": "Prasso",
     "category": "Development",
     "capabilities": [
@@ -33,8 +33,8 @@
     "privacyPolicyURL": "https://app.macroscope.com/privacy",
     "termsOfServiceURL": "https://app.macroscope.com/terms",
     "defaultPrompt": [
-      "/macroscope:codereview",
-      "/macroscope:autoloop"
+      "$macroscope:codereview",
+      "$macroscope:autoloop"
     ],
     "brandColor": "#0F766E",
     "composerIcon": "./assets/macroscope-small.svg",

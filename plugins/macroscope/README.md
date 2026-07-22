@@ -8,12 +8,12 @@ The public entrypoints are two separate skills:
 
 ```text
 Claude Code: /macroscope:codereview   /macroscope:autoloop
-Codex:       /macroscope:codereview   /macroscope:autoloop
+Codex:       $macroscope:codereview   $macroscope:autoloop
 Cursor:      /codereview              /autoloop
 OpenCode:    /macroscope-codereview   /macroscope-autoloop
 ```
 
-`/macroscope:codereview` (or the host equivalent) runs a one-shot local review:
+The `codereview` skill runs a one-shot local review:
 
 - It runs a streaming local `macroscope codereview`.
 - On hosts with background-command support, it runs the blocking review asynchronously while streaming issues back to the active session.
@@ -21,7 +21,7 @@ OpenCode:    /macroscope-codereview   /macroscope-autoloop
 - It rejects false positives, fixes confirmed issues one at a time, and reports only the issues it addressed, grouped by severity (critical / high / medium / low).
 - It keeps polling sleeps capped at 60 seconds.
 
-`/macroscope:autoloop` is the autopilot path:
+The `autoloop` skill is the autopilot path:
 
 - Run the local review.
 - Fix valid findings directly in the working tree.

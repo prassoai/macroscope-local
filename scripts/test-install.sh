@@ -1328,10 +1328,32 @@ test_completion_keeps_setup_and_verification_in_quick_start() {
   grep -Fq 'macroscope --help              # Show all supported commands' "$TEST_ROOT/out" || fail "Quick start is missing the verification command"
   grep -Fq 'Agent        Review                    Autopilot' "$TEST_ROOT/out" || fail "coding-agent command headers are missing"
   grep -Fq 'Claude Code  /macroscope:codereview   /macroscope:autoloop' "$TEST_ROOT/out" || fail "Claude Code commands do not match the docs"
-  grep -Fq 'Codex        /macroscope:codereview   /macroscope:autoloop' "$TEST_ROOT/out" || fail "Codex commands do not match the docs"
+  grep -Fq 'Codex        $macroscope:codereview   $macroscope:autoloop' "$TEST_ROOT/out" || fail "Codex commands do not match the docs"
   grep -Fq 'Cursor       /codereview              /autoloop' "$TEST_ROOT/out" || fail "Cursor commands do not match the docs"
   grep -Fq 'OpenCode     /macroscope-codereview   /macroscope-autoloop' "$TEST_ROOT/out" || fail "OpenCode commands do not match the docs"
   pass "completion keeps setup and verification commands in Quick start"
+}
+
+test_codex_plugin_uses_dollar_prefixed_commands() {
+  python3 - "$REPO_ROOT" <<'PY' || fail "Codex plugin command assertions failed"
+import json
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1])
+manifest = json.loads(
+    (root / "plugins/macroscope/.codex-plugin/plugin.json").read_text(encoding="utf-8")
+)
+commands = ["$macroscope:codereview", "$macroscope:autoloop"]
+assert manifest["interface"]["defaultPrompt"] == commands
+for command in commands:
+    assert command in manifest["interface"]["longDescription"]
+
+readme = (root / "plugins/macroscope/README.md").read_text(encoding="utf-8")
+assert "Codex:       $macroscope:codereview   $macroscope:autoloop" in readme
+assert "Codex:       /macroscope:codereview" not in readme
+PY
+  pass "Codex plugin uses dollar-prefixed commands"
 }
 
 test_skills_use_remote_base_without_permission_rules() {
@@ -1440,6 +1462,7 @@ test_wizard_lifecycle_plan
 test_completion_prints_after_successful_wizard
 test_failed_wizard_is_not_reported_as_success
 test_completion_keeps_setup_and_verification_in_quick_start
+test_codex_plugin_uses_dollar_prefixed_commands
 test_asset_digest_is_parsed_from_release_metadata
 test_download_verifies_against_github_digest
 test_download_fails_closed_on_checksum_mismatch

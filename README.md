@@ -31,7 +31,7 @@ Run a review from your editor:
 | Editor      | Review                   | Autopilot                |
 | ----------- | ------------------------ | ------------------------ |
 | Claude Code | `/macroscope:codereview` | `/macroscope:autoloop`   |
-| Codex       | `/macroscope:codereview` | `/macroscope:autoloop`   |
+| Codex       | `$macroscope:codereview` | `$macroscope:autoloop`   |
 | Cursor      | `/codereview`            | `/autoloop`              |
 | OpenCode    | `/macroscope-codereview` | `/macroscope-autoloop`   |
 
