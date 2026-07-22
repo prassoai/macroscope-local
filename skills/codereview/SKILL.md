@@ -136,18 +136,19 @@ Skip the baseline commit when `baseline_created` remains false.
 
 **Invoke `macroscope codereview` as a standalone command through the host's background-command support.** This keeps the review process attached and its streamed output readable.
 
+- Always pass `--auto-update`. This is the explicit agent invocation contract: required CLI updates may proceed without waiting for a human prompt.
 - `codereview` is blocking. Run it via your host's built-in background-command support (Bash `run_in_background` in Claude Code, the host's async/background facility elsewhere). Do not add `| tee`, `>`, `2>&1`, `&`, `nohup`, or any shell operator to the command.
 
 - Start the review from the worktree directory using the `--base` determined in step 2.5:
 
 ```bash
-macroscope codereview --raw --base "$base_ref"
+macroscope codereview --raw --base "$base_ref" --auto-update
 ```
 
 or, if reviewing local-only changes with a baseline commit:
 
 ```bash
-macroscope codereview --raw --base HEAD~1
+macroscope codereview --raw --base HEAD~1 --auto-update
 ```
 
 - Read streamed output via your host's background-output facility (e.g. `BashOutput` in Claude Code) and look for a line containing `review_id=`. Capture that value.

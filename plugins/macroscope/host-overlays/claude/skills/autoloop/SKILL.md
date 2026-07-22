@@ -61,18 +61,19 @@ fi
 
 **Invoke `macroscope codereview` as a standalone command through Claude Code's background-command support.** This keeps the review process attached and its streamed output readable.
 
+- Always pass `--auto-update`. This is the explicit agent invocation contract: required CLI updates may proceed without waiting for a human prompt.
 - `codereview` is blocking. Run it via the Bash tool with `run_in_background: true`. Do not add `| tee`, `>`, `2>&1`, `&`, `nohup`, or any shell operator to the command.
 
 - Start the review:
 
 ```bash
-macroscope codereview --raw --base "$base_ref"
+macroscope codereview --raw --base "$base_ref" --auto-update
 ```
 
 - If you omitted `--base`, run:
 
 ```bash
-macroscope codereview --raw
+macroscope codereview --raw --auto-update
 ```
 
 - Read streamed output via `BashOutput` with the background bash_id and look for a line containing `review_id=`. Capture that value.
