@@ -64,18 +64,20 @@ branch="$(git rev-parse --abbrev-ref HEAD)"
 short_sha="$(git rev-parse --short HEAD)"
 ```
 
-2. Capture all uncommitted changes (staged, unstaged, and untracked) as a combined patch. Skip this if the tree is clean:
+2. Capture all uncommitted changes (staged, unstaged, and untracked) as a combined patch. Exclude Macroscope-named review worktrees so prior review artifacts are not mistaken for user changes. Preserve other files under `.worktrees/`. Skip this if the tree is clean:
 
 ```bash
 cp "$(git rev-parse --git-dir)/index" "/tmp/macroscope-saved-index-${short_sha}"
 trap 'mv "/tmp/macroscope-saved-index-${short_sha}" "$(git rev-parse --git-dir)/index" 2>/dev/null || true' EXIT
-git add -N .
-git diff --binary HEAD > "/tmp/macroscope-review-wip-${short_sha}.patch"
+while IFS= read -r -d '' untracked_file; do
+  git add -N -- "$untracked_file" || exit $?
+done < <(git ls-files --others --exclude-standard -z -- . ':(exclude,glob).worktrees/macroscope-review-*/**')
+git diff --binary HEAD -- . ':(exclude,glob).worktrees/macroscope-review-*/**' > "/tmp/macroscope-review-wip-${short_sha}.patch"
 mv "/tmp/macroscope-saved-index-${short_sha}" "$(git rev-parse --git-dir)/index"
 trap - EXIT
 ```
 
-The `git add -N .` marks untracked files as intent-to-add so `git diff HEAD` includes them. Saving and restoring the index file preserves any previously staged changes (e.g. from `git add -p`). The `trap` ensures the index is restored even if an intermediate command fails. Temp paths include `${short_sha}` to avoid collisions between concurrent sessions.
+The loop marks only non-ignored untracked files as intent-to-add so `git diff HEAD` includes them. Enumerating the files first avoids a repository-wide intent-to-add failing when `.worktrees/` is ignored. The exclusion is limited to Macroscope's `macroscope-review-*` children so user-managed files elsewhere under `.worktrees/` remain reviewable. Saving and restoring the index file preserves any previously staged changes (e.g. from `git add -p`). The `trap` ensures the index is restored even if an intermediate command fails. Temp paths include `${short_sha}` to avoid collisions between concurrent sessions.
 
 3. Clean up any prior review worktree at the same path, then create a fresh one:
 
@@ -85,22 +87,32 @@ git branch -D "macroscope/review-${branch}-${short_sha}" 2>/dev/null
 git worktree add "${repo_root}/.worktrees/macroscope-review-${short_sha}" -b "macroscope/review-${branch}-${short_sha}" HEAD
 ```
 
-4. Apply the uncommitted changes in the worktree and commit them as a baseline so that `git diff` in the worktree later shows only the review fixes:
+4. Apply stageable uncommitted changes in the worktree and commit them as a baseline so that `git diff` later shows only the review fixes. A non-empty patch can still produce no staged diff (for example, a dirty gitlink); treat that as no baseline instead of attempting an empty commit:
 
 ```bash
 cd "${repo_root}/.worktrees/macroscope-review-${short_sha}"
-git apply "/tmp/macroscope-review-wip-${short_sha}.patch"
-git add -A
-git commit -m "baseline: working state at review start"
+baseline_created=false
+if [ -s "/tmp/macroscope-review-wip-${short_sha}.patch" ]; then
+  git apply "/tmp/macroscope-review-wip-${short_sha}.patch"
+  git add -A
+  if git diff --cached --quiet; then
+    :
+  else
+    staged_status=$?
+    [ "$staged_status" -eq 1 ] || exit "$staged_status"
+    git commit -m "baseline: working state at review start"
+    baseline_created=true
+  fi
+fi
 ```
 
-Skip the apply+commit if the patch was empty.
+Skip the baseline commit when `baseline_created` remains false.
 
 5. Determine the `--base` argument for the review CLI. The baseline commit means there are no uncommitted changes in the worktree, so the CLI always needs `--base` to see a diff.
 
    - If step 1 set `base_ref` (branch differs from base) → use `--base "$base_ref"`.
    - If step 1 skipped `--base` (branch equals base, local changes only) → use `--base HEAD~1` in the worktree. The baseline commit is `HEAD`, so `HEAD~1` is the pre-change state.
-   - If no baseline commit was created (patch was empty) and step 1 skipped `--base` → run without `--base` (no changes to review; the CLI will exit cleanly).
+   - If `baseline_created=false` and step 1 skipped `--base` → run without `--base` (no changes to review; the CLI will exit cleanly).
 
 6. All subsequent steps run from the review worktree directory. Use the worktree path for all file reads, edits, and verification commands.
 
