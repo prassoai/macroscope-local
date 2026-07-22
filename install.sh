@@ -603,6 +603,21 @@ resolve_saved_auto_update() {
   SAVED_AUTO_UPDATE=1
 }
 
+shell_config_line() {
+  local install_bin="$HOME/.local/bin"
+  local target_shell=""
+  case "$PATH_TARGET" in
+    */config.fish) target_shell="fish" ;;
+    *.zshrc|*.zprofile|*.bashrc|*.bash_profile|*/.profile) target_shell="posix" ;;
+    *) target_shell="$(login_shell_name)" ;;
+  esac
+  if [ "$target_shell" = "fish" ]; then
+    printf 'set -Ux fish_user_paths %s $fish_user_paths' "$install_bin"
+  else
+    printf 'export PATH="%s:$PATH"' "$install_bin"
+  fi
+}
+
 print_plan() {
   local index=1
   local verb="Install"
@@ -659,54 +674,177 @@ print_plan() {
 print_change_details() {
   local binary_action="Install"
   local tool=""
+  local claude_config=""
+  local codex_home=""
+  local codex_marketplace=""
+  local codex_plugin_key=""
+  local opencode_config=""
+  local quoted_codex_binary=""
+  local default_env="${MACROSCOPE_DEFAULT_ENV:-prod}"
   [ "$INSTALL_MODE" = "update" ] && binary_action="Replace"
+  claude_config="$(get_claude_config_dir)"
+  codex_home="$(get_codex_home)"
+  codex_marketplace="$(get_codex_marketplace_name)"
+  codex_plugin_key="macroscope@$codex_marketplace"
+  opencode_config="$(get_opencode_config_dir)"
+  case "$default_env" in prod|nonprod|local) ;; *) default_env="prod" ;; esac
+
+  if tool_selected codex && codex_shim_will_install; then
+    quoted_codex_binary="$(python3 - "$CODEX_BUNDLED_BINARY" <<'PY'
+import shlex, sys
+print(shlex.quote(sys.argv[1]))
+PY
+)"
+  fi
+
+  _ccd_file() { printf '\n  %s%s%s%s\n' "$BOLD" "$CYAN" "$1" "$RESET"; }
+  _ccd_key() { printf '    %s:\n' "$1"; }
+  _ccd_add() { printf '      %s+ %s%s\n' "$GREEN" "$1" "$RESET"; }
+  _ccd_remove() { printf '      %s- %s%s\n' "$RED" "$1" "$RESET"; }
 
   {
     printf '\n%sExact changes%s\n' "$BOLD" "$RESET"
-    printf '\n  %s%s/.local/bin/macroscope%s\n' "$CYAN" "$HOME" "$RESET"
+    printf '  %sExisting settings are preserved; the snippets below are merged, refreshed, or removed.%s\n' "$DIM" "$RESET"
+
+    _ccd_file "$HOME/.local/bin/macroscope"
     if [ -n "${MACROSCOPE_LOCAL_BACK_REPO:-}" ]; then
-      printf '    %s+%s %s with a binary built from %s\n' "$GREEN" "$RESET" "$binary_action" "$MACROSCOPE_LOCAL_BACK_REPO"
+      _ccd_add "$binary_action with a binary built from $MACROSCOPE_LOCAL_BACK_REPO"
     elif [ -n "${MACROSCOPE_LOCAL_BINARY_SOURCE:-}" ]; then
-      printf '    %s+%s %s from %s\n' "$GREEN" "$RESET" "$binary_action" "$MACROSCOPE_LOCAL_BINARY_SOURCE"
+      _ccd_add "$binary_action from $MACROSCOPE_LOCAL_BINARY_SOURCE"
     else
-      printf '    %s+%s %s the %s release for %s-%s\n' "$GREEN" "$RESET" "$binary_action" "$INSTALL_VERSION" "$OS" "$ARCH"
+      _ccd_add "$binary_action the $INSTALL_VERSION release for $OS-$ARCH"
     fi
 
     if [ "$PATH_ACTION" = "modify" ]; then
-      printf '\n  %s%s%s\n' "$CYAN" "$PATH_TARGET" "$RESET"
-      printf '    %s+%s Add %s/.local/bin to PATH\n' "$GREEN" "$RESET" "$HOME"
+      _ccd_file "$PATH_TARGET"
+      _ccd_add '# Added by Macroscope installer'
+      _ccd_add "$(shell_config_line)"
     fi
 
     for tool in claude codex cursor opencode; do
       if tool_selected "$tool"; then
-        printf '\n  %s%s%s\n' "$CYAN" "$tool" "$RESET"
-        printf '    %s+%s Install or refresh %s\n' "$GREEN" "$RESET" "$(tool_install_plan_path "$tool")"
+        case "$tool" in
+          claude)
+            _ccd_file "$claude_config/settings.json"
+            _ccd_key 'extraKnownMarketplaces.macroscope-local'
+            _ccd_add '{'
+            _ccd_add '  "source": {'
+            _ccd_add '    "source": "directory",'
+            _ccd_add "    \"path\": \"$claude_config/plugins/marketplaces/macroscope-local\""
+            _ccd_add '  }'
+            _ccd_add '}'
+            _ccd_key 'enabledPlugins'
+            _ccd_add '"macroscope@macroscope-local": true'
+            _ccd_file "$claude_config/plugins/marketplaces/macroscope-local/"
+            _ccd_add 'Macroscope marketplace and plugin bundle'
+            _ccd_file "$claude_config/plugins/cache/macroscope-local/"
+            _ccd_add 'Macroscope plugin cache'
+            ;;
+          codex)
+            _ccd_file "$HOME/.agents/plugins/marketplace.json"
+            _ccd_key 'plugins[]'
+            _ccd_add '{'
+            _ccd_add '  "name": "macroscope",'
+            _ccd_add '  "source": {"source": "local", "path": "./plugins/macroscope"},'
+            _ccd_add '  "policy": {'
+            _ccd_add '    "installation": "INSTALLED_BY_DEFAULT",'
+            _ccd_add '    "authentication": "ON_USE"'
+            _ccd_add '  },'
+            _ccd_add '  "category": "Development"'
+            _ccd_add '}'
+            _ccd_file "$codex_home/config.toml"
+            _ccd_add '[features]'
+            _ccd_add 'plugins = true'
+            _ccd_add "[plugins.\"$codex_plugin_key\"]"
+            _ccd_add 'enabled = true'
+            _ccd_file "$HOME/plugins/macroscope/"
+            _ccd_add 'Macroscope plugin source'
+            _ccd_file "$codex_home/plugins/cache/$codex_marketplace/macroscope/$CODEX_LOCAL_PLUGIN_VERSION/"
+            _ccd_add 'Macroscope plugin cache'
+            if [ -n "$quoted_codex_binary" ]; then
+              _ccd_file "$HOME/.local/bin/codex"
+              _ccd_add '#!/bin/bash'
+              _ccd_add 'set -euo pipefail'
+              _ccd_add '# Macroscope-managed Codex shim'
+              _ccd_add "exec $quoted_codex_binary \"\$@\""
+            fi
+            ;;
+          cursor)
+            _ccd_file "$HOME/.cursor/plugins/local/macroscope/"
+            _ccd_add 'Macroscope plugin bundle'
+            ;;
+          opencode)
+            _ccd_file "$opencode_config"
+            _ccd_add 'plugins/macroscope.js'
+            _ccd_add 'commands/macroscope-codereview.md'
+            _ccd_add 'commands/macroscope-autoloop.md'
+            _ccd_add 'skills/codereview/'
+            _ccd_add 'skills/autoloop/'
+            ;;
+        esac
       elif [ "$INSTALL_MODE" = "update" ] && tool_installed "$tool"; then
-        printf '\n  %s%s%s\n' "$CYAN" "$tool" "$RESET"
-        printf '    %s-%s Remove Macroscope plugin integration at %s\n' "$RED" "$RESET" "$(tool_plan_path "$tool")"
+        case "$tool" in
+          claude)
+            _ccd_file "$claude_config/settings.json"
+            _ccd_key 'extraKnownMarketplaces'
+            _ccd_remove '"macroscope-local"'
+            _ccd_key 'enabledPlugins'
+            _ccd_remove '"macroscope@macroscope-local"'
+            _ccd_file "$claude_config/plugins/"
+            _ccd_remove 'marketplaces/macroscope-local/'
+            _ccd_remove 'cache/macroscope-local/'
+            ;;
+          codex)
+            _ccd_file "$HOME/.agents/plugins/marketplace.json"
+            _ccd_key 'plugins[]'
+            _ccd_remove 'entry with "name": "macroscope"'
+            _ccd_file "$codex_home/config.toml"
+            _ccd_remove "[plugins.\"$codex_plugin_key\"]"
+            _ccd_file "$HOME/plugins/"
+            _ccd_remove 'macroscope/'
+            _ccd_file "$codex_home/plugins/cache/"
+            _ccd_remove "$codex_marketplace/macroscope/$CODEX_LOCAL_PLUGIN_VERSION/"
+            ;;
+          cursor)
+            _ccd_file "$HOME/.cursor/plugins/local/"
+            _ccd_remove 'macroscope/'
+            ;;
+          opencode)
+            _ccd_file "$opencode_config"
+            _ccd_remove 'plugins/macroscope.js'
+            _ccd_remove 'commands/macroscope-codereview.md'
+            _ccd_remove 'commands/macroscope-autoloop.md'
+            _ccd_remove 'skills/codereview/'
+            _ccd_remove 'skills/autoloop/'
+            ;;
+        esac
       fi
     done
 
-    if tool_selected codex && codex_shim_will_install; then
-      printf '\n  %s%s/.local/bin/codex%s\n' "$CYAN" "$HOME" "$RESET"
-      printf '    %s+%s Install or refresh the managed Codex CLI wrapper\n' "$GREEN" "$RESET"
-    fi
-
     if [ "$INSTALL_MODE" = "update" ]; then
-      printf '\n  %sLegacy MCP integration%s\n' "$CYAN" "$RESET"
-      printf '    %s-%s Remove stale macroscope-codereview registrations and binary artifacts if present\n' "$RED" "$RESET"
+      _ccd_file 'Legacy MCP integration (when present)'
+      _ccd_remove "$HOME/.local/bin/macroscope-mcp"
+      _ccd_key "$(get_claude_state_file): mcpServers / projects.*.mcpServers"
+      _ccd_remove '"macroscope-codereview"'
+      _ccd_key "$HOME/.cursor/mcp.json: mcpServers"
+      _ccd_remove '"macroscope-codereview"'
+      _ccd_key "$codex_home/config.toml"
+      _ccd_remove '[mcp_servers.macroscope-codereview]'
     fi
 
     if { [ -n "${MACROSCOPE_LOCAL_BACK_REPO:-}" ] || [ -n "${MACROSCOPE_LOCAL_BINARY_SOURCE:-}" ]; } && [ ! -f "$HOME/.macroscope/config.yaml" ]; then
-      printf '\n  %s%s/.macroscope/config.yaml%s\n' "$CYAN" "$HOME" "$RESET"
-      printf '    %s+%s Seed local-build configuration\n' "$GREEN" "$RESET"
+      _ccd_file "$HOME/.macroscope/config.yaml"
+      _ccd_add "env: $default_env"
+      _ccd_add 'envs: {}'
     fi
 
     if [ "$WIZARD_MODE" = "yes" ]; then
-      printf '\n  %sSetup%s\n' "$CYAN" "$RESET"
-      printf '    %s+%s Launch the setup wizard after verification\n' "$GREEN" "$RESET"
+      _ccd_file 'After installation'
+      _ccd_add 'Launch the setup wizard after verification'
     fi
   } > /dev/tty
+
+  unset -f _ccd_file _ccd_key _ccd_add _ccd_remove
 }
 
 confirm_plan() {
@@ -1850,17 +1988,9 @@ update_shell_config() {
   }
   step "Updating shell configuration..."
 
-  local install_bin="$HOME/.local/bin"
   local marker="# Added by Macroscope installer"
-  local export_line="export PATH=\"$install_bin:\$PATH\""
-  local line="$export_line"
-  local target_shell=""
-  case "$PATH_TARGET" in
-    */config.fish) target_shell="fish" ;;
-    *.zshrc|*.zprofile|*.bashrc|*.bash_profile|*/.profile) target_shell="posix" ;;
-    *) target_shell="$(login_shell_name)" ;;
-  esac
-  [ "$target_shell" = "fish" ] && line="set -Ux fish_user_paths $install_bin \$fish_user_paths"
+  local line=""
+  line="$(shell_config_line)"
   mkdir -p "$(dirname "$PATH_TARGET")"
   touch "$PATH_TARGET"
   if ! grep -Fq "$line" "$PATH_TARGET" 2>/dev/null; then

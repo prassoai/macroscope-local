@@ -1152,15 +1152,29 @@ test_confirmation_has_no_permission_branch() {
 
 test_confirmation_can_show_exact_changes() {
   new_home
-  run_interactive_install "$TEST_ROOT/install" 0 \
-    --tools claude,codex --no-path --no-wizard --events \
+  local bundled_codex="$TEST_ROOT/codex-app"
+  printf '#!/bin/sh\n[ "${1:-}" != "--help" ] || printf "app-server\\n"\n' > "$bundled_codex"
+  chmod +x "$bundled_codex"
+  TEST_CODEX_BUNDLED_BINARY="$bundled_codex" run_interactive_install "$TEST_ROOT/install" 0 \
+    --tools all --shell-config "$TEST_HOME/.zprofile" --no-wizard --events \
     "Proceed?="$'\e[B\n' \
     "Exact changes"=$'\n' || fail "exact-change inspection did not return to confirmation"
   grep -Fq 'Exact changes' "$TEST_ROOT/install" || fail "exact-change details were not rendered"
   grep -Fq "$TEST_HOME/.local/bin/macroscope" "$TEST_ROOT/install" || fail "exact changes omitted the CLI destination"
-  grep -Fq "$TEST_HOME/.claude/plugins/cache/macroscope-local/" "$TEST_ROOT/install" || fail "exact changes omitted Claude plugin files"
-  grep -Fq "$TEST_HOME/plugins/macroscope" "$TEST_ROOT/install" || fail "exact changes omitted Codex plugin files"
+  grep -Fq '# Added by Macroscope installer' "$TEST_ROOT/install" || fail "exact changes omitted the PATH marker"
+  grep -Fq "export PATH=\"$TEST_HOME/.local/bin:\$PATH\"" "$TEST_ROOT/install" || fail "exact changes omitted the literal PATH snippet"
+  grep -Fq 'extraKnownMarketplaces.macroscope-local' "$TEST_ROOT/install" || fail "exact changes omitted the Claude marketplace key"
+  grep -Fq '"macroscope@macroscope-local": true' "$TEST_ROOT/install" || fail "exact changes omitted the Claude enablement snippet"
+  grep -Fq '"source": {"source": "local", "path": "./plugins/macroscope"}' "$TEST_ROOT/install" || fail "exact changes omitted the Codex marketplace snippet"
+  grep -Fq '[features]' "$TEST_ROOT/install" || fail "exact changes omitted the Codex feature section"
+  grep -Fq '[plugins."macroscope@local-user-plugins"]' "$TEST_ROOT/install" || fail "exact changes omitted the Codex plugin section"
+  grep -Fq '# Macroscope-managed Codex shim' "$TEST_ROOT/install" || fail "exact changes omitted the managed Codex wrapper snippet"
+  grep -Fq 'plugins/macroscope.js' "$TEST_ROOT/install" || fail "exact changes omitted the OpenCode plugin path"
+  grep -Fq "$TEST_HOME/.cursor/plugins/local/macroscope/" "$TEST_ROOT/install" || fail "exact changes omitted the Cursor plugin path"
   ! grep -Fq 'command auto-approval' "$TEST_ROOT/install" || fail "exact changes included removed permission automation"
+  ! grep -Fq 'Bash(macroscope' "$TEST_ROOT/install" || fail "exact changes restored Claude permission rules"
+  ! grep -Fq 'mktemp' "$TEST_ROOT/install" || fail "exact changes restored mktemp permission copy"
+  ! grep -Fq 'macroscope-bash-autoallow.sh' "$TEST_ROOT/install" || fail "exact changes restored the permission hook"
   pass "exact-change inspection returns to the install confirmation"
 }
 
@@ -1169,8 +1183,12 @@ test_update_confirmation_has_no_permission_branch() {
   run_install --yes --tools all --no-path --no-wizard >"$TEST_ROOT/initial"
   run_interactive_install "$TEST_ROOT/update" 0 \
     --mode update --tools all --no-path --no-wizard --events \
-    "Update and continue?="$'\n' || fail "explicit update confirmation did not complete"
+    "Update and continue?="$'\e[B\n' \
+    "Exact changes"=$'\n' || fail "explicit update confirmation did not complete"
   grep -Fq 'Show exact changes' "$TEST_ROOT/update" || fail "update confirmation omitted exact changes"
+  grep -Fq 'extraKnownMarketplaces.macroscope-local' "$TEST_ROOT/update" || fail "update details omitted the Claude config snippet"
+  grep -Fq '[plugins."macroscope@local-user-plugins"]' "$TEST_ROOT/update" || fail "update details omitted the Codex config snippet"
+  grep -Fq 'commands/macroscope-codereview.md' "$TEST_ROOT/update" || fail "update details omitted the OpenCode file snippet"
   ! grep -Fq 'Allow Macroscope and mktemp command auto-approval' "$TEST_ROOT/update" || fail "update plan retained the auto-approval action"
   ! grep -Fq 'Install without command auto-approval' "$TEST_ROOT/update" || fail "update confirmation retained the permission bypass choice"
   ! grep -Fq 'macroscope-bash-autoallow.sh' "$TEST_ROOT/update" || fail "update confirmation retained the approval hook path"
