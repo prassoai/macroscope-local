@@ -588,13 +588,15 @@ resolve_lifecycle() {
   fi
 }
 
-# Mandatory updates that resume the original command reuse an explicit saved
-# integration and PATH configuration. Manual updates, dry runs, overrides, and
-# incomplete legacy state keep the normal plan and confirmation flow.
+# Explicitly approved unattended updates that resume the original command reuse
+# saved integration and PATH configuration without rendering the update TUI.
+# Human invocations, dry runs, overrides, and incomplete legacy state keep the
+# existing plan and confirmation flow.
 resolve_saved_auto_update() {
   SAVED_AUTO_UPDATE=0
   [ "$INSTALL_MODE" = "update" ] || return 0
   [ "$RESUME_COMMAND" -eq 1 ] || return 0
+  [ "$ASSUME_YES" -eq 1 ] || return 0
   [ "$STATE_CONFIGURED" -eq 1 ] || return 0
   [ -z "$TOOLS_SPEC" ] || return 0
   [ "$SKIP_PATH" -eq 0 ] || return 0

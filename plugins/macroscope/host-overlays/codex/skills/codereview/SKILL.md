@@ -120,6 +120,7 @@ Skip the baseline commit when `baseline_created` remains false.
 
 Codex has a tool-call timeout that is shorter than the `codereview` blocking duration. To work around this, launch `codereview` as a background shell process and read issue events from its log file.
 
+- Always pass `--auto-update`. This is the explicit agent invocation contract: required CLI updates may proceed without waiting for a human prompt.
 - Before launch, allocate a unique log file and PID file:
 
 ```bash
@@ -132,7 +133,7 @@ pid_file="$(mktemp "${TMPDIR:-/tmp}/macroscope-pid.XXXXXX")"
 With `--base` (feature branch or local-only with baseline):
 
 ```bash
-macroscope codereview --raw --base "$base_ref" > "$review_log" 2>&1 &
+macroscope codereview --raw --base "$base_ref" --auto-update > "$review_log" 2>&1 &
 child_pid=$!
 printf '%s\n' "$child_pid" > "$pid_file"
 wait "$child_pid"
@@ -141,7 +142,7 @@ wait "$child_pid"
 or for local-only changes with baseline commit:
 
 ```bash
-macroscope codereview --raw --base HEAD~1 > "$review_log" 2>&1 &
+macroscope codereview --raw --base HEAD~1 --auto-update > "$review_log" 2>&1 &
 child_pid=$!
 printf '%s\n' "$child_pid" > "$pid_file"
 wait "$child_pid"
@@ -150,7 +151,7 @@ wait "$child_pid"
 Without `--base` (empty patch, no baseline commit):
 
 ```bash
-macroscope codereview > "$review_log" 2>&1 &
+macroscope codereview --auto-update > "$review_log" 2>&1 &
 child_pid=$!
 printf '%s\n' "$child_pid" > "$pid_file"
 wait "$child_pid"
