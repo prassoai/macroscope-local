@@ -362,6 +362,44 @@ test_plugin_bundle_is_verified_before_extraction() {
   pass "plugin bundle uses real progress and is verified before extraction"
 }
 
+test_download_progress_tracks_curl_percentages() {
+  new_home
+  printf '\r##### 25.0%%\r############# 65.0%%\r#################### 100.0%%\n' | (
+    export MACROSCOPE_SOURCE_ONLY=1
+    # shellcheck disable=SC1090
+    . "$INSTALLER"
+    CYAN='<cyan>'
+    DIM='<dim>'
+    BOLD='<bold>'
+    RESET='<reset>'
+    render_download_progress "Macroscope CLI"
+  ) >"$TEST_ROOT/out" 2>&1
+
+  grep -Fq '<cyan>█████<reset><dim>' "$TEST_ROOT/out" || fail "styled progress did not render curl's 25% frame"
+  grep -Fq ' 25%<reset>  Macroscope CLI' "$TEST_ROOT/out" || fail "styled progress did not report curl's 25% value"
+  grep -Fq ' 65%<reset>  Macroscope CLI' "$TEST_ROOT/out" || fail "styled progress did not report curl's 65% value"
+  grep -Fq '100%<reset>  Macroscope CLI' "$TEST_ROOT/out" || fail "styled progress did not report curl's completion"
+  ! grep -Fq ' 35%' "$TEST_ROOT/out" || fail "styled progress invented an unreported percentage"
+  pass "styled download progress follows curl's reported percentages"
+}
+
+test_download_progress_preserves_errors_and_no_color() {
+  new_home
+  printf '\r######## 40.0%%\rcurl: (22) The requested URL returned error: 404\n' | (
+    export MACROSCOPE_SOURCE_ONLY=1
+    export NO_COLOR=1
+    # shellcheck disable=SC1090
+    . "$INSTALLER"
+    render_download_progress "Plugin bundle"
+  ) >"$TEST_ROOT/out" 2>&1
+
+  grep -Fq ' 40%  Plugin bundle' "$TEST_ROOT/out" || fail "NO_COLOR progress omitted curl's reported percentage"
+  grep -Fq 'curl: (22) The requested URL returned error: 404' "$TEST_ROOT/out" || fail "styled progress swallowed curl's error"
+  ! grep -Fq $'\033[0;36m' "$TEST_ROOT/out" || fail "NO_COLOR progress contained cyan styling"
+  ! grep -Fq $'\033[2m' "$TEST_ROOT/out" || fail "NO_COLOR progress contained dim styling"
+  pass "download progress preserves curl errors and respects NO_COLOR"
+}
+
 test_dry_run_is_read_only() {
   new_home
   local before after
@@ -1176,6 +1214,7 @@ PY
   grep -Fq $'\033[0;36m\033[1m── [1/2] Integrations' "$TEST_ROOT/install" || fail "install section did not use Murmur's cyan bold treatment"
   grep -Fq $'\033[0;32m\033[1m[x] Claude Code' "$TEST_ROOT/install" || fail "selected integration did not use a green emphasized state"
   ! grep -Eq '5%  Preparing|35%  Downloads ready|80%  Integrations updated|100%  Complete' "$TEST_ROOT/install" || fail "install flow rendered synthetic progress"
+  ! grep -Eq '[0-9]+%  (Macroscope CLI|Plugin bundle)' "$TEST_ROOT/install" || fail "local-source install rendered download progress"
   pass "fresh install defaults every integration selected"
 }
 
@@ -1587,6 +1626,8 @@ test_absent_digest_warns_and_installs_by_default
 test_absent_digest_fails_closed_under_strict
 test_metadata_fetch_error_fails_closed
 test_plugin_bundle_is_verified_before_extraction
+test_download_progress_tracks_curl_percentages
+test_download_progress_preserves_errors_and_no_color
 test_skills_use_remote_base_without_permission_rules
 
 echo "All $PASS installer tests passed."

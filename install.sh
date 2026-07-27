@@ -62,6 +62,108 @@ flow_section() {
   printf "${DIM}   %s.${RESET}\n" "$description"
 }
 
+render_download_progress_frame() {
+  local percent="$1"
+  local label="$2"
+  local width=20
+  local filled_count=0
+  local empty_count=0
+  local filled=""
+  local empty=""
+  local index=0
+
+  [ "$percent" -ge 0 ] || percent=0
+  [ "$percent" -le 100 ] || percent=100
+  filled_count=$((percent * width / 100))
+  empty_count=$((width - filled_count))
+
+  while [ "$index" -lt "$filled_count" ]; do
+    filled="${filled}█"
+    index=$((index + 1))
+  done
+  index=0
+  while [ "$index" -lt "$empty_count" ]; do
+    empty="${empty}░"
+    index=$((index + 1))
+  done
+
+  printf "\r\033[2K    ${CYAN}%s${RESET}${DIM}%s${RESET} ${BOLD}%3d%%${RESET}  %s" \
+    "$filled" "$empty" "$percent" "$label" >&2
+}
+
+# render_download_progress LABEL
+# Translates curl's live --progress-bar percentages into the installer's compact
+# visual language. Curl remains the source of truth: this renderer never
+# advances or completes the bar without receiving a percentage from curl.
+render_download_progress() {
+  local label="$1"
+  local frame=""
+  local before_percent=""
+  local percent_token=""
+  local percent=""
+  local progress_visible=1
+
+  render_download_progress_frame 0 "$label"
+  while IFS= read -r -d $'\r' frame || [ -n "$frame" ]; do
+    frame="${frame//$'\n'/}"
+    case "$frame" in
+      *curl:\ *)
+        printf "\r\033[2Kcurl: %s\n" "${frame#*curl: }" >&2
+        progress_visible=0
+        ;;
+      *%*)
+        before_percent="${frame%\%*}"
+        percent_token="${before_percent##* }"
+        percent="${percent_token%%.*}"
+        case "$percent" in
+          ""|*[!0-9]*) continue ;;
+        esac
+        render_download_progress_frame "$percent" "$label"
+        progress_visible=1
+        ;;
+    esac
+    frame=""
+  done
+  if [ "$progress_visible" -eq 1 ]; then
+    printf "\n" >&2
+  fi
+}
+
+# download_with_progress URL DESTINATION LABEL
+# Uses curl's native meter outside a terminal. In a terminal, a FIFO lets the
+# renderer consume curl's real-time percentages without hiding curl failures or
+# changing curl's exit status.
+download_with_progress() {
+  local url="$1"
+  local destination="$2"
+  local label="$3"
+  local progress_fifo=""
+  local renderer_pid=""
+  local curl_status=0
+
+  if [ ! -t 2 ]; then
+    curl -fL --proto '=https' --proto-redir '=https' --progress-bar "$url" -o "$destination"
+    return
+  fi
+
+  progress_fifo="${TMP_DIR}/curl-progress-$$"
+  if ! mkfifo "$progress_fifo"; then
+    curl -fL --proto '=https' --proto-redir '=https' --progress-bar "$url" -o "$destination"
+    return
+  fi
+
+  render_download_progress "$label" < "$progress_fifo" &
+  renderer_pid=$!
+  if curl -fL --proto '=https' --proto-redir '=https' --progress-bar "$url" -o "$destination" 2> "$progress_fifo"; then
+    curl_status=0
+  else
+    curl_status=$?
+  fi
+  wait "$renderer_pid" || true
+  rm -f "$progress_fifo"
+  return "$curl_status"
+}
+
 INSTALLED_BINARY=""
 INSTALL_VERSION=""
 INSTALLED_VERSION=""
@@ -1807,7 +1909,7 @@ stage_binary() {
 
   info "Downloading from: ${DIM}${url}${RESET}"
 
-  if ! curl -fL --proto '=https' --proto-redir '=https' --progress-bar "$url" -o "$TMP_DIR/macroscope"; then
+  if ! download_with_progress "$url" "$TMP_DIR/macroscope" "Macroscope CLI"; then
     error "Failed to download macroscope"
     echo ""
     echo "Possible reasons:"
@@ -1914,7 +2016,7 @@ fetch_plugin_bundle() {
     info "Downloading plugin bundle from: ${DIM}${bundle_url}${RESET}"
 
     mkdir -p "$CHECKOUT_DIR"
-    if curl -fL --proto '=https' --proto-redir '=https' --progress-bar "$bundle_url" -o "$bundle_archive"; then
+    if download_with_progress "$bundle_url" "$bundle_archive" "Plugin bundle"; then
       verify_downloaded_artifact "$bundle_archive" "$bundle_asset" "Macroscope plugin bundle" || exit 1
       tar -xzf "$bundle_archive" -C "$CHECKOUT_DIR"
       success "Fetched plugin bundle from ${BOLD}${INSTALL_VERSION}${RESET}"
