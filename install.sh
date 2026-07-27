@@ -16,19 +16,6 @@ else
   BOLD='' DIM='' CYAN='' GREEN='' YELLOW='' RED='' BLUE='' MAGENTA='' RESET=''
 fi
 
-print_banner() {
-  cat << "EOF"
-
-  ███╗   ███╗ █████╗  ██████╗██████╗  ██████╗ ███████╗ ██████╗ ██████╗ ██████╗ ███████╗
-  ████╗ ████║██╔══██╗██╔════╝██╔══██╗██╔═══██╗██╔════╝██╔════╝██╔═══██╗██╔══██╗██╔════╝
-  ██╔████╔██║███████║██║     ██████╔╝██║   ██║███████╗██║     ██║   ██║██████╔╝█████╗
-  ██║╚██╔╝██║██╔══██║██║     ██╔══██╗██║   ██║╚════██║██║     ██║   ██║██╔═══╝ ██╔══╝
-  ██║ ╚═╝ ██║██║  ██║╚██████╗██║  ██║╚██████╔╝███████║╚██████╗╚██████╔╝██║     ███████╗
-  ╚═╝     ╚═╝╚═╝  ╚═╝ ╚═════╝╚═╝  ╚═╝ ╚═════╝ ╚══════╝ ╚═════╝ ╚═════╝ ╚═╝     ╚══════╝
-
-EOF
-}
-
 info() {
   printf "${CYAN}ℹ${RESET} %s\n" "$1"
 }
@@ -46,7 +33,48 @@ warn() {
 }
 
 step() {
-  printf "\n${BOLD}${MAGENTA}→${RESET} ${BOLD}%s${RESET}\n" "$1"
+  printf "   ${CYAN}•${RESET} %s\n" "$1"
+}
+
+print_flow_title() {
+  local command="macroscope install"
+  if [ "$INSTALL_MODE" = "update" ]; then
+    command="macroscope update"
+  fi
+
+  printf "\n${BOLD}%s${RESET}\n" "$command"
+}
+
+flow_section() {
+  local index="$1"
+  local title="$2"
+  local description="$3"
+  local label="[${index}/2] ${title}"
+  local fill=$((58 - ${#label}))
+  local rule=""
+
+  [ "$fill" -ge 2 ] || fill=2
+  while [ "${#rule}" -lt "$fill" ]; do
+    rule="${rule}─"
+  done
+
+  printf "\n${DIM}──${RESET} ${BOLD}%s${RESET} ${DIM}%s${RESET}\n" "$label" "$rule"
+  printf "${DIM}   %s.${RESET}\n" "$description"
+}
+
+progress_bar() {
+  local percent="$1"
+  local label="$2"
+  local width=20
+  local filled=$((percent * width / 100))
+  local empty=$((width - filled))
+  local filled_bar=""
+  local empty_bar=""
+
+  while [ "${#filled_bar}" -lt "$filled" ]; do filled_bar="${filled_bar}█"; done
+  while [ "${#empty_bar}" -lt "$empty" ]; do empty_bar="${empty_bar}░"; done
+
+  printf "   ${CYAN}%s${RESET}${DIM}%s${RESET} %3d%%  %s\n" "$filled_bar" "$empty_bar" "$percent" "$label"
 }
 
 INSTALLED_BINARY=""
@@ -440,7 +468,7 @@ prompt_tools() {
   done
 
   tui_start
-  printf '\n%sIntegrations%s\n' "$BOLD" "$RESET" > /dev/tty
+  printf '\n%sCoding agents%s\n' "$BOLD" "$RESET" > /dev/tty
   printf '  Up/down or j/k to move; space to toggle; enter to continue.\n' > /dev/tty
 
   while true; do
@@ -485,10 +513,15 @@ select_tools() {
   if [ -n "$TOOLS_SPEC" ]; then
     normalized="$(normalize_tools "$TOOLS_SPEC")"
   elif [ "$INSTALL_MODE" = "update" ]; then
+    local detected_tools=""
+    detected_tools="$(detect_installed_tools)"
     if [ "$STATE_LOADED" -eq 1 ]; then
       default_tools="$STATE_TOOLS"
+      if [ -n "$default_tools" ] && [ -n "$detected_tools" ]; then
+        default_tools="$(normalize_tools "${default_tools}${default_tools:+,}${detected_tools}")"
+      fi
     else
-      default_tools="$(detect_installed_tools)"
+      default_tools="$detected_tools"
     fi
     prompt_default="$default_tools"
     if has_interactive_tty && [ "$ASSUME_YES" -eq 0 ] && [ "$DRY_RUN" -eq 0 ] && [ "$SAVED_AUTO_UPDATE" -eq 0 ]; then
@@ -1598,12 +1631,10 @@ detect_platform() {
     exit 1
   fi
 
-  success "Detected platform: ${BOLD}${OS}-${ARCH}${RESET}"
 }
 
 determine_install_dir() {
   INSTALL_DIR="${HOME}/.local/bin"
-  info "Installation directory: ${BOLD}${INSTALL_DIR}${RESET}"
 }
 
 prepare_tmp_dir() {
@@ -1614,7 +1645,9 @@ prepare_tmp_dir() {
 
 resolve_version() {
   INSTALL_VERSION="${MACROSCOPE_VERSION:-${INSTALL_VERSION:-latest}}"
-  info "Requested version: ${BOLD}${INSTALL_VERSION}${RESET}"
+  if [ "$INSTALL_VERSION" != "latest" ]; then
+    info "Requested version: ${BOLD}${INSTALL_VERSION}${RESET}"
+  fi
 }
 
 # release_asset_url ASSET_NAME -> download URL for the resolved release.
@@ -2795,10 +2828,12 @@ PY
 }
 
 print_installation_completion() {
-  echo ""
-  printf "${GREEN}${BOLD}════════════════════════════════════════════════${RESET}\n"
-  printf "${GREEN}${BOLD}Installation Complete!${RESET}\n"
-  printf "${GREEN}${BOLD}════════════════════════════════════════════════${RESET}\n"
+  local completion="Macroscope installation is complete."
+  [ "$INSTALL_MODE" = "update" ] && completion="Macroscope update is complete."
+
+  printf "\n${GREEN}${BOLD}✓ %s${RESET}\n" "$completion"
+  [ -z "$INSTALLED_VERSION" ] || printf "  Version: %s\n" "$INSTALLED_VERSION"
+  [ -z "$INSTALLED_BINARY" ] || printf "  Binary:  %s\n" "$INSTALLED_BINARY"
   echo ""
   printf "${BOLD}Quick start:${RESET}\n"
   printf "  ${CYAN}macroscope setup${RESET}               ${DIM}# Sign in and select a workspace${RESET}\n"
@@ -2901,17 +2936,10 @@ main() {
     exec 1>&2
   fi
 
-  if ! repair_only_requested && [ -t 1 ]; then
-    printf '\033[H\033[2J'
-  fi
-  if ! repair_only_requested; then
-    print_banner
-  fi
-
-  step "Checking system requirements..."
   check_dependencies
 
   if repair_only_requested; then
+    step "Checking system requirements..."
     STATE_FILE="$(state_file_path)"
     repair_existing_install
     rm -f "$STATE_FILE"
@@ -2919,15 +2947,33 @@ main() {
     return
   fi
 
-  detect_platform
-  resolve_codex_bundled_binary
   load_install_state
   resolve_lifecycle
   resolve_saved_auto_update
-  select_tools
+
+  if [ "$SAVED_AUTO_UPDATE" -eq 0 ]; then
+    if [ -t 1 ]; then
+      printf '\033[H\033[2J'
+    fi
+  fi
+
+  detect_platform
+  determine_install_dir
+  resolve_codex_bundled_binary
   resolve_path_action
   resolve_version
+
   if [ "$SAVED_AUTO_UPDATE" -eq 0 ]; then
+    print_flow_title
+    flow_section 1 "Integrations" "Choose which coding agents to connect"
+  fi
+  select_tools
+  if [ "$SAVED_AUTO_UPDATE" -eq 0 ]; then
+    if [ "$INSTALL_MODE" = "update" ]; then
+      flow_section 2 "Update" "Review and apply the update"
+    else
+      flow_section 2 "Install" "Review and apply the installation"
+    fi
     print_plan
   fi
 
@@ -2941,11 +2987,20 @@ main() {
 
   confirm_plan || return $?
 
-  determine_install_dir
+  if [ "$SAVED_AUTO_UPDATE" -eq 0 ]; then
+    if [ "$INSTALL_MODE" = "update" ]; then
+      progress_bar 5 "Preparing update"
+    else
+      progress_bar 5 "Preparing installation"
+    fi
+  fi
   prepare_tmp_dir
   stage_binary
   if [ -n "$SELECTED_TOOLS" ]; then fetch_plugin_bundle; fi
   validate_staged_artifacts
+  if [ "$SAVED_AUTO_UPDATE" -eq 0 ]; then
+    progress_bar 35 "Downloads ready"
+  fi
   snapshot_for_rollback
   APPLY_STARTED=1
 
@@ -2976,7 +3031,13 @@ main() {
   seed_local_build_config_if_needed
   write_install_state
   APPLY_COMPLETE=1
+  if [ "$SAVED_AUTO_UPDATE" -eq 0 ]; then
+    progress_bar 80 "Integrations updated"
+  fi
   verify_install
+  if [ "$SAVED_AUTO_UPDATE" -eq 0 ]; then
+    progress_bar 100 "Complete"
+  fi
   launch_wizard
   print_installation_completion
   if [ "$OUTPUT_FORMAT" = "json" ]; then

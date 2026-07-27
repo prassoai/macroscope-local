@@ -1149,6 +1149,69 @@ PY
   pass "interactive lists select only Claude without adding host permissions"
 }
 
+test_interactive_install_defaults_all_integrations_selected() {
+  new_home
+  run_interactive_install "$TEST_ROOT/install" 0 \
+    --no-path --no-wizard --events \
+    "space to toggle"=$'\n' \
+    "Proceed?"=$'\n' || fail "default integration selection did not complete"
+  python3 - "$TEST_HOME/.local/state/macroscope/install.json" <<'PY' || fail "fresh install did not keep every default integration"
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as f: data = json.load(f)
+assert data["tools"] == ["claude", "codex", "cursor", "opencode"]
+PY
+  for integration in "Claude Code" "Codex" "Cursor" "OpenCode"; do
+    grep -Fq "[x] $integration" "$TEST_ROOT/install" || fail "$integration was not checked by default"
+  done
+  grep -Fq 'macroscope install' "$TEST_ROOT/install" || fail "install flow is missing its compact title"
+  grep -Fq '── [1/2] Integrations' "$TEST_ROOT/install" || fail "install flow is missing its integration section"
+  grep -Fq '── [2/2] Install' "$TEST_ROOT/install" || fail "install flow is missing its install section"
+  grep -Fq '100%  Complete' "$TEST_ROOT/install" || fail "install flow is missing progress feedback"
+  pass "fresh install defaults every integration selected"
+}
+
+test_interactive_update_defaults_detected_integrations_selected() {
+  new_home
+  mkdir -p "$TEST_HOME/.local/bin" "$TEST_HOME/.cursor/plugins/local/macroscope"
+  cp "$TEST_BINARY_DEFAULT" "$TEST_HOME/.local/bin/macroscope"
+  run_interactive_install "$TEST_ROOT/update" 0 \
+    --mode update --no-path --no-wizard --events \
+    "space to toggle"=$'\n' \
+    "Update and continue?"=$'\n' || fail "detected integration selection did not complete"
+  grep -Fq "[x] Cursor" "$TEST_ROOT/update" || fail "detected Cursor integration was not checked"
+  for integration in "Claude Code" "Codex" "OpenCode"; do
+    ! grep -Fq "[x] $integration" "$TEST_ROOT/update" || fail "undetected $integration integration was checked"
+  done
+  grep -Fq 'macroscope update' "$TEST_ROOT/update" || fail "update flow is missing its compact title"
+  grep -Fq '── [1/2] Integrations' "$TEST_ROOT/update" || fail "update flow is missing its integration section"
+  grep -Fq '── [2/2] Update' "$TEST_ROOT/update" || fail "update flow is missing its update section"
+  grep -Fq '100%  Complete' "$TEST_ROOT/update" || fail "update flow is missing progress feedback"
+  python3 - "$TEST_HOME/.local/state/macroscope/install.json" <<'PY' || fail "detected integration selection was not persisted"
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as f: data = json.load(f)
+assert data["tools"] == ["cursor"]
+PY
+  pass "updates default detected integrations selected"
+}
+
+test_interactive_update_merges_saved_and_detected_integrations() {
+  new_home
+  run_install --yes --tools claude --no-path --no-wizard >"$TEST_ROOT/initial"
+  mkdir -p "$TEST_HOME/.codex/plugins/cache/local-user-plugins/macroscope"
+  run_interactive_install "$TEST_ROOT/update" 0 \
+    --mode update --no-path --no-wizard --events \
+    "space to toggle"=$'\n' \
+    "Update and continue?"=$'\n' || fail "merged integration selection did not complete"
+  grep -Fq "[x] Claude Code" "$TEST_ROOT/update" || fail "saved Claude integration was not checked"
+  grep -Fq "[x] Codex" "$TEST_ROOT/update" || fail "detected Codex integration was not checked"
+  python3 - "$TEST_HOME/.local/state/macroscope/install.json" <<'PY' || fail "merged integration selection was not persisted"
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as f: data = json.load(f)
+assert data["tools"] == ["claude", "codex"]
+PY
+  pass "updates merge saved and detected integration defaults"
+}
+
 test_confirmation_has_no_permission_branch() {
   new_home
   run_interactive_install "$TEST_ROOT/install" 0 \
@@ -1260,7 +1323,7 @@ test_update_plan_omits_negative_actions() {
   grep -Fq "2. Keep PATH unchanged ($TEST_HOME/.local/bin is already active)" "$TEST_ROOT/out" || fail "update plan PATH action is not second"
   grep -Fq '3. Clean legacy Macroscope MCP artifacts after the update is staged' "$TEST_ROOT/out" || fail "MCP cleanup is not third"
   ! grep -Fq 'command approval rules and hooks' "$TEST_ROOT/out" || fail "update plan still claims permission cleanup"
-  [ "$(grep -Ec '^[0-9]+\.' "$TEST_ROOT/out")" -eq 3 ] || fail "update plan did not collapse to three actions"
+  [ "$(awk '/Macroscope update will:/{in_plan=1; next} in_plan && /^[0-9][0-9]*[.]/{count++} END{print count+0}' "$TEST_ROOT/out")" -eq 3 ] || fail "update plan did not collapse to three actions"
   ! grep -Fq 'Do not launch the setup wizard' "$TEST_ROOT/out" || fail "update plan still lists skipped wizard launch"
   unset TEST_PATH
   pass "update plan lists only the three actions it performs"
@@ -1292,11 +1355,18 @@ test_plan_omits_permission_changes_for_legacy_flag() {
 test_plan_uses_natural_lifecycle_labels() {
   new_home
   run_install --mode initial --dry-run --tools none --no-path --no-wizard >"$TEST_ROOT/initial"
+  grep -Fxq 'macroscope install' "$TEST_ROOT/initial" || fail "initial flow is missing its compact title"
+  grep -Fq '── [1/2] Integrations' "$TEST_ROOT/initial" || fail "initial flow is missing its integrations divider"
+  grep -Fq '── [2/2] Install' "$TEST_ROOT/initial" || fail "initial flow is missing its install divider"
   grep -Fq 'Macroscope installation will:' "$TEST_ROOT/initial" || fail "initial plan uses an unnatural lifecycle label"
   ! grep -Fq 'Macroscope initial will:' "$TEST_ROOT/initial" || fail "initial plan still prints the old lifecycle label"
+  ! grep -Fq '███' "$TEST_ROOT/initial" || fail "initial flow still renders the old banner"
   run_install --mode update --dry-run --tools none --no-path --no-wizard >"$TEST_ROOT/update"
+  grep -Fxq 'macroscope update' "$TEST_ROOT/update" || fail "update flow is missing its compact title"
+  grep -Fq '── [2/2] Update' "$TEST_ROOT/update" || fail "update flow is missing its update divider"
   grep -Fq 'Macroscope update will:' "$TEST_ROOT/update" || fail "update plan lifecycle label changed"
-  pass "plan uses natural lifecycle labels"
+  ! grep -Fq 'Optional host permission automation' "$TEST_ROOT/update" || fail "update flow mentions removed host permission automation"
+  pass "install and update use compact two-section chrome"
 }
 
 test_wizard_lifecycle_plan() {
@@ -1326,7 +1396,7 @@ SH
     --yes --tools none --no-path --wizard --events || fail "successful wizard install did not complete"
   local wizard_line="" completion_line=""
   wizard_line="$(grep -n 'WIZARD_FINISHED' "$TEST_ROOT/out" | head -1 | cut -d: -f1)"
-  completion_line="$(grep -n 'Installation Complete!' "$TEST_ROOT/out" | head -1 | cut -d: -f1)"
+  completion_line="$(grep -n 'Macroscope installation is complete.' "$TEST_ROOT/out" | head -1 | cut -d: -f1)"
   [ -n "$wizard_line" ] && [ -n "$completion_line" ] && [ "$wizard_line" -lt "$completion_line" ] || fail "completion printed before the wizard succeeded"
   pass "completion prints only after the setup wizard succeeds"
 }
@@ -1345,7 +1415,7 @@ SH
   TEST_BINARY="$wizard_binary" run_interactive_install "$TEST_ROOT/out" 42 \
     --yes --tools none --no-path --wizard --events || fail "wizard failure status was not propagated"
   grep -Fq "Setup did not complete. The CLI is installed; rerun setup with: macroscope setup" "$TEST_ROOT/out" || fail "wizard failure recovery was not explained"
-  ! grep -Fq 'Installation Complete!' "$TEST_ROOT/out" || fail "failed wizard was reported as a completed installation"
+  ! grep -Fq 'Macroscope installation is complete.' "$TEST_ROOT/out" || fail "failed wizard was reported as a completed installation"
   [ -x "$TEST_HOME/.local/bin/macroscope" ] || fail "wizard failure removed the usable CLI"
   pass "failed setup is recoverable and is not reported as installation success"
 }
@@ -1482,6 +1552,9 @@ test_resumed_update_does_not_expand_saved_config
 test_resumed_update_prompts_for_incomplete_state
 test_resumed_update_prompts_without_saved_path_policy
 test_interactive_lists_select_only_claude_without_permissions
+test_interactive_install_defaults_all_integrations_selected
+test_interactive_update_defaults_detected_integrations_selected
+test_interactive_update_merges_saved_and_detected_integrations
 test_confirmation_has_no_permission_branch
 test_confirmation_can_show_exact_changes
 test_update_confirmation_has_no_permission_branch
