@@ -16,19 +16,6 @@ else
   BOLD='' DIM='' CYAN='' GREEN='' YELLOW='' RED='' BLUE='' MAGENTA='' RESET=''
 fi
 
-print_banner() {
-  cat << "EOF"
-
-  ███╗   ███╗ █████╗  ██████╗██████╗  ██████╗ ███████╗ ██████╗ ██████╗ ██████╗ ███████╗
-  ████╗ ████║██╔══██╗██╔════╝██╔══██╗██╔═══██╗██╔════╝██╔════╝██╔═══██╗██╔══██╗██╔════╝
-  ██╔████╔██║███████║██║     ██████╔╝██║   ██║███████╗██║     ██║   ██║██████╔╝█████╗
-  ██║╚██╔╝██║██╔══██║██║     ██╔══██╗██║   ██║╚════██║██║     ██║   ██║██╔═══╝ ██╔══╝
-  ██║ ╚═╝ ██║██║  ██║╚██████╗██║  ██║╚██████╔╝███████║╚██████╗╚██████╔╝██║     ███████╗
-  ╚═╝     ╚═╝╚═╝  ╚═╝ ╚═════╝╚═╝  ╚═╝ ╚═════╝ ╚══════╝ ╚═════╝ ╚═════╝ ╚═╝     ╚══════╝
-
-EOF
-}
-
 info() {
   printf "${CYAN}ℹ${RESET} %s\n" "$1"
 }
@@ -42,11 +29,139 @@ error() {
 }
 
 warn() {
-  printf "${YELLOW}⚠${RESET} %s\n" "$1"
+  printf "${YELLOW}!${RESET} %s\n" "$1"
 }
 
 step() {
-  printf "\n${BOLD}${MAGENTA}→${RESET} ${BOLD}%s${RESET}\n" "$1"
+  printf "  ${CYAN}•${RESET} %s\n" "$1"
+}
+
+print_flow_title() {
+  local command="macroscope install"
+  if [ "$INSTALL_MODE" = "update" ]; then
+    command="macroscope update"
+  fi
+
+  printf "\n${BOLD}%s${RESET}\n" "$command"
+}
+
+flow_section() {
+  local index="$1"
+  local title="$2"
+  local description="$3"
+  local header="── [${index}/2] ${title} "
+  local fill=$((60 - ${#header}))
+  local rule=""
+
+  [ "$fill" -ge 2 ] || fill=2
+  while [ "${#rule}" -lt "$fill" ]; do
+    rule="${rule}─"
+  done
+
+  printf "\n${CYAN}${BOLD}%s%s${RESET}\n" "$header" "$rule"
+  printf "${DIM}   %s.${RESET}\n" "$description"
+}
+
+render_download_progress_frame() {
+  local percent="$1"
+  local label="$2"
+  local width=20
+  local filled_count=0
+  local empty_count=0
+  local filled=""
+  local empty=""
+  local index=0
+
+  [ "$percent" -ge 0 ] || percent=0
+  [ "$percent" -le 100 ] || percent=100
+  filled_count=$((percent * width / 100))
+  empty_count=$((width - filled_count))
+
+  while [ "$index" -lt "$filled_count" ]; do
+    filled="${filled}█"
+    index=$((index + 1))
+  done
+  index=0
+  while [ "$index" -lt "$empty_count" ]; do
+    empty="${empty}░"
+    index=$((index + 1))
+  done
+
+  printf "\r\033[2K    ${CYAN}%s${RESET}${DIM}%s${RESET} ${BOLD}%3d%%${RESET}  %s" \
+    "$filled" "$empty" "$percent" "$label" >&2
+}
+
+# render_download_progress LABEL
+# Translates curl's live --progress-bar percentages into the installer's compact
+# visual language. Curl remains the source of truth: this renderer never
+# advances or completes the bar without receiving a percentage from curl.
+render_download_progress() {
+  local label="$1"
+  local frame=""
+  local before_percent=""
+  local percent_token=""
+  local percent=""
+  local progress_visible=1
+
+  render_download_progress_frame 0 "$label"
+  while IFS= read -r -d $'\r' frame || [ -n "$frame" ]; do
+    frame="${frame//$'\n'/}"
+    case "$frame" in
+      *curl:\ *)
+        printf "\r\033[2Kcurl: %s\n" "${frame#*curl: }" >&2
+        progress_visible=0
+        ;;
+      *%*)
+        before_percent="${frame%\%*}"
+        percent_token="${before_percent##* }"
+        percent="${percent_token%%.*}"
+        case "$percent" in
+          ""|*[!0-9]*) continue ;;
+        esac
+        render_download_progress_frame "$percent" "$label"
+        progress_visible=1
+        ;;
+    esac
+    frame=""
+  done
+  if [ "$progress_visible" -eq 1 ]; then
+    printf "\n" >&2
+  fi
+}
+
+# download_with_progress URL DESTINATION LABEL
+# Uses curl's native meter outside a terminal. In a terminal, a FIFO lets the
+# renderer consume curl's real-time percentages without hiding curl failures or
+# changing curl's exit status.
+download_with_progress() {
+  local url="$1"
+  local destination="$2"
+  local label="$3"
+  local progress_fifo=""
+  local renderer_pid=""
+  local curl_status=0
+
+  if [ ! -t 2 ]; then
+    curl -fL --proto '=https' --proto-redir '=https' --progress-bar "$url" -o "$destination"
+    return
+  fi
+
+  progress_fifo="${TMP_DIR}/curl-progress-$$"
+  if ! mkfifo "$progress_fifo"; then
+    curl -fL --proto '=https' --proto-redir '=https' --progress-bar "$url" -o "$destination"
+    return
+  fi
+
+  render_download_progress "$label" < "$progress_fifo" &
+  renderer_pid=$!
+  if curl -fL --proto '=https' --proto-redir '=https' --progress-bar "$url" -o "$destination" 2> "$progress_fifo"; then
+    curl_status=0
+  else
+    curl_status=$?
+  fi
+  wait "$renderer_pid" || true
+  rm -f "$progress_fifo"
+  return "$curl_status"
 }
 
 INSTALLED_BINARY=""
@@ -387,10 +502,11 @@ prompt_menu() {
   local selected=0
   local first_render=1
   local index=0
+  local label_color=""
 
   tui_start
-  printf '\n%s%s%s\n' "$BOLD" "$question" "$RESET" > /dev/tty
-  printf '  Up/down or j/k to move; enter to choose.\n' > /dev/tty
+  printf '\n%s%s?%s %s%s%s\n' "$GREEN" "$BOLD" "$RESET" "$BOLD" "$question" "$RESET" > /dev/tty
+  printf '  %sUp/down or j/k to move; enter to choose.%s\n' "$DIM" "$RESET" > /dev/tty
 
   while true; do
     if [ "$first_render" -eq 0 ]; then
@@ -400,10 +516,15 @@ prompt_menu() {
     index=0
     while [ "$index" -lt "$count" ]; do
       printf '\r\033[2K' > /dev/tty
+      case "${labels[$index]}" in
+        Yes) label_color="$GREEN" ;;
+        "Show exact changes") label_color="$YELLOW" ;;
+        *) label_color="$DIM" ;;
+      esac
       if [ "$index" -eq "$selected" ]; then
-        printf '%s%s>%s %s\n' "$CYAN" "$BOLD" "$RESET" "${labels[$index]}" > /dev/tty
+        printf '%s%s>%s %s%s%s%s\n' "$CYAN" "$BOLD" "$RESET" "$label_color" "$BOLD" "${labels[$index]}" "$RESET" > /dev/tty
       else
-        printf '  %s\n' "${labels[$index]}" > /dev/tty
+        printf '  %s%s%s\n' "$label_color" "${labels[$index]}" "$RESET" > /dev/tty
       fi
       index=$((index + 1))
     done
@@ -432,6 +553,7 @@ prompt_tools() {
   local first_render=1
   local index=0
   local result=""
+  local mark=""
 
   for index in 0 1 2 3; do
     case ",$default_tools," in
@@ -440,8 +562,8 @@ prompt_tools() {
   done
 
   tui_start
-  printf '\n%sIntegrations%s\n' "$BOLD" "$RESET" > /dev/tty
-  printf '  Up/down or j/k to move; space to toggle; enter to continue.\n' > /dev/tty
+  printf '\n%s%s?%s %sCoding agents%s\n' "$GREEN" "$BOLD" "$RESET" "$BOLD" "$RESET" > /dev/tty
+  printf '  %sUp/down or j/k to move; space to toggle; enter to continue.%s\n' "$DIM" "$RESET" > /dev/tty
 
   while true; do
     if [ "$first_render" -eq 0 ]; then
@@ -450,10 +572,18 @@ prompt_tools() {
     first_render=0
     for index in 0 1 2 3; do
       printf '\r\033[2K' > /dev/tty
+      mark=' '
+      [ "${checked[$index]}" -eq 0 ] || mark='x'
       if [ "$index" -eq "$selected" ]; then
-        printf '%s%s>%s [%s] %s\n' "$CYAN" "$BOLD" "$RESET" "$([ "${checked[$index]}" -eq 1 ] && printf x || printf ' ')" "${labels[$index]}" > /dev/tty
+        if [ "${checked[$index]}" -eq 1 ]; then
+          printf '%s%s>%s %s%s[%s] %s%s\n' "$CYAN" "$BOLD" "$RESET" "$GREEN" "$BOLD" "$mark" "${labels[$index]}" "$RESET" > /dev/tty
+        else
+          printf '%s%s>%s %s[%s] %s%s\n' "$CYAN" "$BOLD" "$RESET" "$BOLD" "$mark" "${labels[$index]}" "$RESET" > /dev/tty
+        fi
+      elif [ "${checked[$index]}" -eq 1 ]; then
+        printf '  %s[%s] %s%s\n' "$GREEN" "$mark" "${labels[$index]}" "$RESET" > /dev/tty
       else
-        printf '  [%s] %s\n' "$([ "${checked[$index]}" -eq 1 ] && printf x || printf ' ')" "${labels[$index]}" > /dev/tty
+        printf '  %s[%s] %s%s\n' "$DIM" "$mark" "${labels[$index]}" "$RESET" > /dev/tty
       fi
     done
 
@@ -485,19 +615,24 @@ select_tools() {
   if [ -n "$TOOLS_SPEC" ]; then
     normalized="$(normalize_tools "$TOOLS_SPEC")"
   elif [ "$INSTALL_MODE" = "update" ]; then
+    local detected_tools=""
+    detected_tools="$(detect_installed_tools)"
     if [ "$STATE_LOADED" -eq 1 ]; then
       default_tools="$STATE_TOOLS"
+      if [ -n "$default_tools" ] && [ -n "$detected_tools" ]; then
+        default_tools="$(normalize_tools "${default_tools}${default_tools:+,}${detected_tools}")"
+      fi
     else
-      default_tools="$(detect_installed_tools)"
+      default_tools="$detected_tools"
     fi
     prompt_default="$default_tools"
     if has_interactive_tty && [ "$ASSUME_YES" -eq 0 ] && [ "$DRY_RUN" -eq 0 ] && [ "$SAVED_AUTO_UPDATE" -eq 0 ]; then
       if [ -z "$prompt_default" ]; then
-        printf '\n%sNo Macroscope host integrations are currently selected.%s\n' "$YELLOW" "$RESET" > /dev/tty
-        printf 'Select integrations now so a CLI-only install is not preserved accidentally.\n' > /dev/tty
+        printf '\n%s!%s %sNo Macroscope host integrations are currently selected.%s\n' "$YELLOW" "$RESET" "$BOLD" "$RESET" > /dev/tty
+        printf '%s  Select integrations now so a CLI-only install is not preserved accidentally.%s\n' "$DIM" "$RESET" > /dev/tty
         prompt_default="claude,codex,cursor,opencode"
       else
-        printf '\n%sCurrent integrations are selected below.%s\n' "$BOLD" "$RESET" > /dev/tty
+        printf '\n%s•%s Current integrations are selected below.\n' "$CYAN" "$RESET" > /dev/tty
       fi
       prompt_tools "$prompt_default"
       TOOLS_SPEC="$TUI_RESULT"
@@ -1598,12 +1733,10 @@ detect_platform() {
     exit 1
   fi
 
-  success "Detected platform: ${BOLD}${OS}-${ARCH}${RESET}"
 }
 
 determine_install_dir() {
   INSTALL_DIR="${HOME}/.local/bin"
-  info "Installation directory: ${BOLD}${INSTALL_DIR}${RESET}"
 }
 
 prepare_tmp_dir() {
@@ -1614,7 +1747,9 @@ prepare_tmp_dir() {
 
 resolve_version() {
   INSTALL_VERSION="${MACROSCOPE_VERSION:-${INSTALL_VERSION:-latest}}"
-  info "Requested version: ${BOLD}${INSTALL_VERSION}${RESET}"
+  if [ "$INSTALL_VERSION" != "latest" ]; then
+    info "Requested version: ${BOLD}${INSTALL_VERSION}${RESET}"
+  fi
 }
 
 # release_asset_url ASSET_NAME -> download URL for the resolved release.
@@ -1738,9 +1873,8 @@ verify_downloaded_artifact() {
 }
 
 stage_binary() {
-  step "Downloading Macroscope CLI..."
-
   if [ -n "${MACROSCOPE_LOCAL_BINARY_SOURCE:-}" ]; then
+    step "Staging local Macroscope CLI..."
     if [ ! -f "${MACROSCOPE_LOCAL_BINARY_SOURCE}" ]; then
       error "Local binary source not found: ${MACROSCOPE_LOCAL_BINARY_SOURCE}"
       exit 1
@@ -1753,12 +1887,12 @@ stage_binary() {
   fi
 
   if [ -n "${MACROSCOPE_LOCAL_BACK_REPO:-}" ]; then
+    step "Building local Macroscope CLI..."
     if [ ! -d "${MACROSCOPE_LOCAL_BACK_REPO}" ]; then
       error "Local back repo not found: ${MACROSCOPE_LOCAL_BACK_REPO}"
       exit 1
     fi
 
-    step "Building local Macroscope CLI..."
     (
       cd "${MACROSCOPE_LOCAL_BACK_REPO}"
       go build -buildvcs=false -o "$TMP_DIR/macroscope" ./tools/cmd/macrodaemon
@@ -1768,13 +1902,14 @@ stage_binary() {
     return
   fi
 
+  step "Downloading Macroscope CLI..."
   local asset="macroscope-${OS}-${ARCH}"
   local url
   url="$(release_asset_url "$asset")"
 
   info "Downloading from: ${DIM}${url}${RESET}"
 
-  if ! curl -fL --proto '=https' --proto-redir '=https' --progress-bar "$url" -o "$TMP_DIR/macroscope"; then
+  if ! download_with_progress "$url" "$TMP_DIR/macroscope" "Macroscope CLI"; then
     error "Failed to download macroscope"
     echo ""
     echo "Possible reasons:"
@@ -1841,8 +1976,6 @@ validate_staged_artifacts() {
 }
 
 fetch_plugin_bundle() {
-  step "Fetching plugin bundle..."
-
   CHECKOUT_DIR="$TMP_DIR/macroscope-local"
   local bundle_url=""
   local bundle_archive="$TMP_DIR/macroscope-plugin-bundle.tar.gz"
@@ -1857,6 +1990,7 @@ fetch_plugin_bundle() {
   }
 
   if [ -n "${MACROSCOPE_LOCAL_BACK_REPO:-}" ]; then
+    step "Staging public plugin bundle..."
     local_back_plugin_root="${MACROSCOPE_LOCAL_BACK_REPO}/tools/cmd/macrodaemon/public-plugin"
     if ! is_plugin_bundle_root "$local_back_plugin_root"; then
       error "Back repo is missing the public plugin bundle at ${local_back_plugin_root}"
@@ -1866,20 +2000,23 @@ fetch_plugin_bundle() {
     success "Using public plugin bundle from ${BOLD}${MACROSCOPE_LOCAL_BACK_REPO}${RESET}"
   elif [ -n "${MACROSCOPE_PLUGIN_BUNDLE_SOURCE:-}" ]; then
     if [ -d "${MACROSCOPE_PLUGIN_BUNDLE_SOURCE}" ]; then
+      step "Staging local plugin bundle..."
       copy_tree "${MACROSCOPE_PLUGIN_BUNDLE_SOURCE}" "$CHECKOUT_DIR"
       success "Using local plugin bundle from ${BOLD}${MACROSCOPE_PLUGIN_BUNDLE_SOURCE}${RESET}"
     else
+      step "Cloning plugin bundle..."
       git clone --depth 1 "${MACROSCOPE_PLUGIN_BUNDLE_SOURCE}" "$CHECKOUT_DIR" >/dev/null 2>&1
       success "Fetched plugin bundle from ${BOLD}${MACROSCOPE_PLUGIN_BUNDLE_SOURCE}${RESET}"
     fi
   else
+    step "Downloading plugin bundle..."
     local bundle_asset="macroscope-plugin-bundle.tar.gz"
     bundle_url="$(release_asset_url "$bundle_asset")"
 
     info "Downloading plugin bundle from: ${DIM}${bundle_url}${RESET}"
 
     mkdir -p "$CHECKOUT_DIR"
-    if curl -fL --proto '=https' --proto-redir '=https' --progress-bar "$bundle_url" -o "$bundle_archive"; then
+    if download_with_progress "$bundle_url" "$bundle_archive" "Plugin bundle"; then
       verify_downloaded_artifact "$bundle_archive" "$bundle_asset" "Macroscope plugin bundle" || exit 1
       tar -xzf "$bundle_archive" -C "$CHECKOUT_DIR"
       success "Fetched plugin bundle from ${BOLD}${INSTALL_VERSION}${RESET}"
@@ -2795,10 +2932,12 @@ PY
 }
 
 print_installation_completion() {
-  echo ""
-  printf "${GREEN}${BOLD}════════════════════════════════════════════════${RESET}\n"
-  printf "${GREEN}${BOLD}Installation Complete!${RESET}\n"
-  printf "${GREEN}${BOLD}════════════════════════════════════════════════${RESET}\n"
+  local completion="Macroscope installation is complete."
+  [ "$INSTALL_MODE" = "update" ] && completion="Macroscope update is complete."
+
+  printf "\n${GREEN}${BOLD}✓ %s${RESET}\n" "$completion"
+  [ -z "$INSTALLED_VERSION" ] || printf "  Version: %s\n" "$INSTALLED_VERSION"
+  [ -z "$INSTALLED_BINARY" ] || printf "  Binary:  %s\n" "$INSTALLED_BINARY"
   echo ""
   printf "${BOLD}Quick start:${RESET}\n"
   printf "  ${CYAN}macroscope setup${RESET}               ${DIM}# Sign in and select a workspace${RESET}\n"
@@ -2901,17 +3040,10 @@ main() {
     exec 1>&2
   fi
 
-  if ! repair_only_requested && [ -t 1 ]; then
-    printf '\033[H\033[2J'
-  fi
-  if ! repair_only_requested; then
-    print_banner
-  fi
-
-  step "Checking system requirements..."
   check_dependencies
 
   if repair_only_requested; then
+    step "Checking system requirements..."
     STATE_FILE="$(state_file_path)"
     repair_existing_install
     rm -f "$STATE_FILE"
@@ -2919,15 +3051,33 @@ main() {
     return
   fi
 
-  detect_platform
-  resolve_codex_bundled_binary
   load_install_state
   resolve_lifecycle
   resolve_saved_auto_update
-  select_tools
+
+  if [ "$SAVED_AUTO_UPDATE" -eq 0 ]; then
+    if [ -t 1 ]; then
+      printf '\033[H\033[2J'
+    fi
+  fi
+
+  detect_platform
+  determine_install_dir
+  resolve_codex_bundled_binary
   resolve_path_action
   resolve_version
+
   if [ "$SAVED_AUTO_UPDATE" -eq 0 ]; then
+    print_flow_title
+    flow_section 1 "Integrations" "Choose which coding agents to connect"
+  fi
+  select_tools
+  if [ "$SAVED_AUTO_UPDATE" -eq 0 ]; then
+    if [ "$INSTALL_MODE" = "update" ]; then
+      flow_section 2 "Update" "Review and apply the update"
+    else
+      flow_section 2 "Install" "Review and apply the installation"
+    fi
     print_plan
   fi
 
@@ -2941,7 +3091,6 @@ main() {
 
   confirm_plan || return $?
 
-  determine_install_dir
   prepare_tmp_dir
   stage_binary
   if [ -n "$SELECTED_TOOLS" ]; then fetch_plugin_bundle; fi
