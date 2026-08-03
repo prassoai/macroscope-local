@@ -92,17 +92,20 @@ macroscope codereview --raw --base "$base_ref" --auto-update
 macroscope codereview --raw --auto-update
 ```
 
-- Read streamed output via your host's background-output facility (e.g. `BashOutput` in Claude Code) and look for a line containing `review_id=`. Capture that value.
-- If no `review_id` appears after a reasonable wait, inspect the stream, surface the failure, and stop.
-- Do not continue if `review_id` never appears.
-- Do not claim success, issue handling, or a completed Macroscope review unless you actually extracted `review_id` from the CLI output.
+- Read streamed output via your host's background-output facility (e.g. `BashOutput` in Claude Code) and look for a line containing `review_session_id=`. Capture that stable UUID.
+- If no `review_session_id` appears after a reasonable wait, inspect the stream, surface the failure, and stop.
+- Do not continue if `review_session_id` never appears. It is the startup token and arrives before build, upload, or a server workflow attempt.
+- Do not wait for `review_id=` before processing issues. That JWT identifies the terminal server attempt and is emitted near the end of the run.
 - Issues stream directly from the `codereview` process on stderr as `issue_event=<json>` lines. Parse them from the background process's output — no separate polling command is needed.
 - Each `issue_event=` line contains a JSON object:
   ```
   issue_event={"issue_id":"...","sequence":1,"path":"file.go","line":42,"severity":"medium","category":"REVIEW_TYPE_CORRECTNESS","body":"..."}
   ```
+- Capture `review_id=` when it appears. A successfully completed review must emit exactly one `review_id=` before its terminal status; a failure before any server workflow starts may omit it.
 - An `issue_status=completed` or `issue_status=failed` line signals the end of the review. Stop reading after you see it.
+- Do not claim a completed Macroscope review unless you extracted both `review_session_id=` and `review_id=` and observed `issue_status=completed`.
 - Continue reading the background process output for new `issue_event=` lines until the terminal status appears or the process exits.
+- **Stay attached.** Long silent gaps after the last issue are normal. Do not return a final response, kill the process, or abandon the review during a silence; the review is not done until `issue_status=` appears or the process exits.
 
 ## 4. Handle streamed issues one at a time
 
@@ -130,7 +133,7 @@ Once the review reaches its final batch:
 1. Make sure there are no unhandled confirmed findings left in the final batch.
 2. Re-run the most relevant verification for the files you changed.
 3. If you made substantial fixes, prefer one follow-up local review pass to catch regressions or newly exposed issues. Cap yourself at one follow-up pass unless the user asks for more.
-4. Let the attached `codereview` process exit naturally. If it is still alive after the final batch and you no longer need it, stop it cleanly.
+4. Keep consuming output from the attached `codereview` process until `issue_status=` appears or the process exits. Never stop it merely because all currently streamed issues are handled.
 
 ## 5. After the local review phase
 

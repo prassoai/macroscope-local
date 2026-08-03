@@ -89,21 +89,21 @@ printf '%s\n' "$child_pid" > "$pid_file"
 wait "$child_pid"
 ```
 
-- Wait briefly (5-10 seconds), then check the log for `review_id`:
+- Wait briefly (5-10 seconds), then check the log for `review_session_id`:
 
 ```bash
-sleep 8 && grep -m1 'review_id=' "$review_log"
+sleep 8 && grep -m1 'review_session_id=' "$review_log"
 ```
 
-- If no `review_id` appears after 30 seconds of polling, inspect the log:
+- If no `review_session_id` appears after 30 seconds of polling, inspect the log:
 
 ```bash
 cat "$review_log"
 ```
 
 - If the process exited with an error, surface the failure and stop.
-- Do not continue if `review_id` never appears.
-- Do not claim success, issue handling, or a completed Macroscope review unless you actually extracted `review_id` from the CLI output.
+- Do not continue if `review_session_id` never appears. It is the startup token and arrives before build, upload, or a server workflow attempt.
+- Do not wait for `review_id=` before processing issues. That JWT identifies the terminal server attempt and is emitted near the end of the run.
 
 Issues stream directly from the `codereview` process into the log file as `issue_event=<json>` lines. Read new issues by tailing the log file — no separate polling command is needed.
 
@@ -111,14 +111,17 @@ Issues stream directly from the `codereview` process into the log file as `issue
   ```
   issue_event={"issue_id":"...","sequence":1,"path":"file.go","line":42,"severity":"medium","category":"REVIEW_TYPE_CORRECTNESS","body":"..."}
   ```
+- Capture `review_id=` when it appears. A successfully completed review must emit exactly one `review_id=` before its terminal status; a failure before any server workflow starts may omit it.
 - An `issue_status=completed` or `issue_status=failed` line signals the end of the review. Stop reading after you see it.
+- Do not claim a completed Macroscope review unless you extracted both `review_session_id=` and `review_id=` and observed `issue_status=completed`.
 - To incrementally read only new lines, track the line count and use `tail -n +<next_line>`:
 
 ```bash
-tail -n +"$last_line" "$review_log" | grep 'issue_event=\|issue_status='
+tail -n +"$last_line" "$review_log" | grep 'review_id=\|issue_event=\|issue_status='
 ```
 
 - Continue reading the log for new `issue_event=` lines until the terminal status appears or the background process exits.
+- **Stay attached.** Long silent gaps after the last issue are normal. Keep polling the log during this same turn. Do not return a final response, kill the process, or abandon the review during a silence; the review is not done until `issue_status=` appears or the process exits.
 
 When the review finishes, clean up the background process:
 
