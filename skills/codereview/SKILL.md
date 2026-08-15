@@ -45,7 +45,8 @@ All machine tokens arrive on **stderr**. They are emitted at different times; do
 1. `review_session_id=<uuid>` — emitted first and stable across retries. Capture it as the startup signal.
 2. `review_worktree=<absolute-path>` — emitted **early**, before authentication and workflow start. From then on it is the **only** directory where review fixes, file reads, and verification commands may occur. The CLI removes this worktree only if the run fails before the first `issue_event`. Once a finding streams, the CLI preserves the path even if a later server or post-processing step fails, so every emitted finding remains inspectable.
 3. `issue_event=<json>` — findings stream while the review runs. Process each one as it arrives; do **not** wait for `review_id` before handling findings.
-4. `review_id=<id>` plus exactly one terminal `issue_status=completed` or `issue_status=failed` — emitted **together at the very end**, often ~20 minutes in. Long silent gaps (15+ minutes after the last `issue_event`) are normal.
+4. `issue_suppressed=<issue_id>` — zero or more lines, emitted together just before the terminal status, one per finding the review's own triage stage judged not worth surfacing. Findings stream as they are found; triage is a whole-review judgment that cannot run until the last one has landed, so it arrives as a retraction rather than as a filter.
+5. `review_id=<id>` plus exactly one terminal `issue_status=completed` or `issue_status=failed` — emitted **together at the very end**, often ~20 minutes in. Long silent gaps (15+ minutes after the last `issue_event`) are normal.
 
 Do not wait for `review_id=` before processing issues. Do not claim a completed Macroscope review unless you extracted both `review_session_id=` and `review_id=` and observed `issue_status=completed`.
 
@@ -67,6 +68,8 @@ For each finding, in stream order:
 4. For a confirmed finding, edit only the fix target, reread the changed code, and run the narrowest useful verification there.
 
 Use this exact sequence: **validate → reject/confirm → fix if confirmed → verify**. Do not batch unvalidated findings.
+
+When an `issue_suppressed=` line names a finding you have not started, drop it: do not read, validate, or fix it. If you already fixed it, keep the fix and report it as optional rather than as a required change. Never treat a suppression as a reason to revert work.
 
 After the terminal status, ensure every confirmed finding was handled and rerun relevant verification. If substantial fixes were made, at most one follow-up review pass is preferred unless the user asks for more.
 
