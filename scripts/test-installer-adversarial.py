@@ -327,6 +327,55 @@ os.execv("/bin/cp", ["cp", *sys.argv[1:]])
         self.install("--mode", "update", "--tools", "all", expected=1)
         self.assertEqual(original, self.snapshot())
 
+    def metadata_snapshot(self):
+        result = {}
+        for path in [self.home, *self.home.rglob("*")]:
+            info = path.lstat()
+            row = {"mode": info.st_mode, "size": info.st_size, "mtime_ns": info.st_mtime_ns}
+            if path.is_symlink(): row["link"] = os.readlink(path)
+            elif path.is_file(): row["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+            result[str(path.relative_to(self.home))] = row
+        return result
+
+    def test_repair_dry_run_preserves_install_state_and_owned_process(self):
+        self.install("--tools", "all")
+        executable = self.home / ".local/bin/macroscope"
+        executable.unlink()
+        executable.symlink_to("/bin/sleep")
+        child = subprocess.Popen([str(executable), "30"], env=self.env)
+        guard = self.bin / "pgrep"
+        guard.write_text(guard.read_text().replace('if name == "rm":',
+            'if name == "pgrep":\n    with open(os.path.join(root, "process-queries"), "a") as f: f.write("queried\\n")\nif name == "rm":'))
+        try:
+            self.env["MACROSCOPE_REPAIR_ONLY"] = "1"
+            for output_format in ("text", "json"):
+                with self.subTest(format=output_format):
+                    before = self.metadata_snapshot()
+                    result = subprocess.run(self.command("--dry-run", "--format", output_format), env=self.env, capture_output=True, text=True, timeout=15)
+                    after = self.metadata_snapshot()
+                    changed = sorted(key for key in set(before) | set(after) if before.get(key) != after.get(key))
+                    print(json.dumps({"repairDryRunFormat": output_format, "changedPaths": changed, "ownedProcessExit": child.poll(), "processQueries": (self.root / "process-queries").exists(), "exitCode": result.returncode}), flush=True)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertEqual(before, after, "repair dry-run changed files, metadata, state, or lock")
+                    self.assertIsNone(child.poll(), "repair dry-run terminated its installed process")
+                    self.assertFalse((self.root / "process-queries").exists(), "repair dry-run queried processes")
+                    if output_format == "json":
+                        self.assertEqual(json.loads(result.stdout), {"success": True, "dryRun": True, "mode": "repair", "tools": ""})
+                    else:
+                        self.assertIn("Repair dry run", result.stdout)
+        finally:
+            if child.poll() is None: child.terminate()
+            child.wait(timeout=5)
+
+    def test_repair_dry_run_does_not_create_state_or_lock(self):
+        self.env["MACROSCOPE_REPAIR_ONLY"] = "1"
+        for output_format in ("text", "json"):
+            with self.subTest(format=output_format):
+                before = self.metadata_snapshot()
+                self.install("--dry-run", "--format", output_format)
+                self.assertEqual(before, self.metadata_snapshot())
+                self.assertEqual(list(self.home.iterdir()), [])
+
     def test_repair_preserves_unrelated_named_process(self):
         foreign = self.root / "foreign/macroscope"
         foreign.parent.mkdir()

@@ -1638,6 +1638,15 @@ for path in paths[-2:]:
         assert 'wait "$child_pid"' in path.read_text(), path
         continue
     text = path.read_text(encoding="utf-8")
+    if not version.startswith("1."):
+        # Current Codex adapters observe the actual native child exit. The
+        # historical shell/PID-file cleanup contract remains checked for 1.x.
+        assert "Use the native `exec_command` and `write_stdin` tools" in text, path
+        assert "Do not fall back to a detached shell process" in text, path
+        assert "Keep waiting after `issue_status=` until the native tool reports `exit_code`" in text, path
+        assert "session disappears before its exit is observed" in text, path
+        assert 'unlink "$pid_file"' not in text, path
+        continue
     assert 'unlink "$pid_file" 2>/dev/null || true' in text, path
     assert 'unlink "$review_log" 2>/dev/null || true' in text, path
     assert 'rm -f "$pid_file"' not in text, path

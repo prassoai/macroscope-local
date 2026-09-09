@@ -3317,6 +3317,14 @@ main() {
   check_dependencies
 
   if repair_only_requested; then
+    if [ "$DRY_RUN" -eq 1 ]; then
+      info "Repair dry run: would stop this install's Macroscope processes and remove installer-owned binaries, integrations, and install state. Saved credentials are preserved."
+      info "Dry run complete; no processes, files, or locks were changed."
+      if [ "$OUTPUT_FORMAT" = "json" ]; then
+        printf '{"success":true,"dryRun":true,"mode":"repair","tools":""}\n' >&3
+      fi
+      return 0
+    fi
     step "Checking system requirements..."
     STATE_FILE="$(state_file_path)"
     acquire_install_lock || return $?
