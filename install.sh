@@ -202,6 +202,9 @@ PATH_POLICY="auto"
 APPLY_STARTED=0
 APPLY_COMPLETE=0
 ROLLBACK_LOG=""
+RECOVERY_MARKER=""
+ROLLBACK_FAILED=0
+BINARY_STAGING_PATH=""
 SAVED_TTY_STATE=""
 
 # Integrity verification of downloaded release artifacts against the SHA-256
@@ -1041,12 +1044,12 @@ get_opencode_config_dir() {
 
 get_codex_marketplace_name() {
   python3 - "$HOME/.agents/plugins/marketplace.json" <<'PY'
-import json, os, sys
+import json, os, re, sys
 name = "local-user-plugins"
 try:
     with open(sys.argv[1], encoding="utf-8") as f:
         value = json.load(f).get("name")
-    if isinstance(value, str) and value.strip(): name = value.strip()
+    if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", value): name = value
 except Exception: pass
 print(name)
 PY
@@ -1117,43 +1120,22 @@ remove_dir_if_present() {
 }
 
 kill_running_processes() {
-  local found=0
-  local name=""
-  local pids=""
-  local pid=""
-  local deadline=""
-
-  if ! command -v pgrep >/dev/null 2>&1; then
-    info "pgrep not available; skipping process cleanup"
-    return
-  fi
-
-  for name in macroscope macroscope-mcp; do
-    pids="$(pgrep -x "$name" 2>/dev/null || true)"
-    [ -n "$pids" ] || continue
-    found=1
-
+  # A repair owns these per-user installation paths. Matching a process name
+  # would also terminate unrelated sessions and bypass disposable HOME roots.
+  local executable="" pattern="" pids="" pid=""
+  command -v pgrep >/dev/null 2>&1 || return 0
+  for executable in "$HOME/.local/bin/macroscope" "$HOME/.local/bin/macroscope-mcp"; do
+    pattern="$(python3 - "$executable" <<'PY_PATTERN'
+import re, sys
+print("^" + re.escape(sys.argv[1]) + r"([[:space:]]|$)")
+PY_PATTERN
+)"
+    pids="$(pgrep -f "$pattern" 2>/dev/null || true)"
     while IFS= read -r pid; do
       [ -n "$pid" ] || continue
       kill "$pid" 2>/dev/null || true
     done <<< "$pids"
-
-    deadline=$((SECONDS + 3))
-    while pgrep -x "$name" >/dev/null 2>&1 && [ "$SECONDS" -lt "$deadline" ]; do
-      sleep 0.1
-    done
-
-    if pgrep -x "$name" >/dev/null 2>&1; then
-      pkill -9 -x "$name" 2>/dev/null || true
-      sleep 0.2
-    fi
   done
-
-  if [ "$found" -eq 0 ]; then
-    info "No running Macroscope processes found"
-  else
-    success "Stopped running Macroscope processes"
-  fi
 }
 
 cleanup_binaries() {
@@ -1167,11 +1149,7 @@ cleanup_binaries() {
     "$HOME/.local/bin/macroscope-mcp" \
     "$HOME/go/bin/macroscope" \
     "$HOME/go/bin/macroscope.old" \
-    "$HOME/go/bin/macroscope-mcp" \
-    "/usr/local/bin/macroscope" \
-    "/usr/local/bin/macroscope-mcp" \
-    "/opt/homebrew/bin/macroscope" \
-    "/opt/homebrew/bin/macroscope-mcp"
+    "$HOME/go/bin/macroscope-mcp"
   do
     if remove_file_if_present "$path"; then
       removed=1
@@ -1227,9 +1205,12 @@ remove_plugin_directories() {
     "$opencode_config/skills/respond-to-pr-comments" \
     "$opencode_config/skills/review-pr"
   do
-    if remove_dir_if_present "$dir"; then
-      removed=1
-    fi
+    case "$dir" in
+      "$opencode_config"/*)
+        remove_owned_opencode_path "$dir"
+        ;;
+      *) if remove_dir_if_present "$dir"; then removed=1; fi ;;
+    esac
   done
 
   if [ -d "$codex_plugin_cache_root" ]; then
@@ -1247,6 +1228,7 @@ remove_plugin_directories() {
       python3 - "$codex_marketplace_json" <<'PY'
 import json
 import os
+import re
 import sys
 
 path = sys.argv[1]
@@ -1268,7 +1250,7 @@ if os.path.exists(path):
     if isinstance(data, dict):
         marketplace_name = data.get("name")
         plugins = data.get("plugins")
-        if isinstance(marketplace_name, str) and isinstance(plugins, list):
+        if isinstance(marketplace_name, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", marketplace_name) and isinstance(plugins, list):
             for item in plugins:
                 if not isinstance(item, dict):
                     continue
@@ -1300,9 +1282,10 @@ PY
     "$opencode_config/commands/review-pr.md" \
     "$claude_config/hooks/macroscope-bash-autoallow.sh"
   do
-    if remove_file_if_present "$file"; then
-      removed=1
-    fi
+    case "$file" in
+      "$opencode_config"/*) remove_owned_opencode_path "$file" ;;
+      *) if remove_file_if_present "$file"; then removed=1; fi ;;
+    esac
   done
 
   if [ "$removed" -eq 0 ]; then
@@ -1740,7 +1723,7 @@ determine_install_dir() {
 }
 
 prepare_tmp_dir() {
-  TMP_DIR=$(mktemp -d)
+  TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/macroscope-install.XXXXXX")
   chmod 700 "$TMP_DIR"
   trap 'handle_exit $?' EXIT
 }
@@ -1791,15 +1774,57 @@ sha256_of() {
 # TLS, 5xx, rate-limit, disk); a failure is deliberately NOT conflated with a
 # release that genuinely reports no digest, so callers can fail closed on it.
 ensure_release_metadata() {
-  [ -z "$RELEASE_METADATA_STATE" ] || return 0
+  if [ -n "$RELEASE_METADATA_STATE" ]; then
+    [ "$RELEASE_METADATA_STATE" = "ok" ]
+    return
+  fi
   local dest="$TMP_DIR/release.json"
   if curl -fsSL --proto '=https' --proto-redir '=https' \
       -H 'Accept: application/vnd.github+json' \
       "$(release_api_url)" -o "$dest" 2>/dev/null; then
+    local resolved_version=""
+    if ! resolved_version="$(python3 - "$dest" "$INSTALL_VERSION" <<'PY'
+import json, re, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as f:
+        data = json.load(f)
+    tag = data["tag_name"]
+    if not isinstance(tag, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+", tag):
+        raise ValueError("invalid release tag")
+    if sys.argv[2] != "latest" and tag != sys.argv[2]:
+        raise ValueError("wrong release tag")
+    assets = data["assets"]
+    if not isinstance(assets, list):
+        raise ValueError("invalid assets")
+    names = set()
+    for asset in assets:
+        name = asset["name"]
+        if not isinstance(name, str) or not name or name in names:
+            raise ValueError("invalid or duplicate asset")
+        names.add(name)
+        digest = asset.get("digest")
+        if digest not in (None, "") and (
+            not isinstance(digest, str) or not re.fullmatch(r"sha256:[0-9a-fA-F]{64}", digest)
+        ):
+            raise ValueError("invalid digest")
+except (OSError, ValueError, KeyError, TypeError):
+    raise SystemExit(1)
+print(tag)
+PY
+)"; then
+      RELEASE_METADATA_STATE="error"
+      error "Invalid release metadata from GitHub; refusing unverified artifacts."
+      return 1
+    fi
     RELEASE_METADATA="$dest"
     RELEASE_METADATA_STATE="ok"
+    # Freeze latest before either download. Every artifact and checksum now
+    # comes from the same tag even if another release is published meanwhile.
+    INSTALL_VERSION="$resolved_version"
   else
     RELEASE_METADATA_STATE="error"
+    error "Could not fetch release metadata from GitHub; refusing unverified artifacts."
+    return 1
   fi
 }
 
@@ -1812,13 +1837,15 @@ try:
     with open(sys.argv[1], encoding="utf-8") as f:
         data = json.load(f)
 except (OSError, ValueError):
-    sys.exit(0)
+    sys.exit(1)
 for asset in data.get("assets", []):
     if asset.get("name") == sys.argv[2]:
         digest = asset.get("digest") or ""
         if digest.startswith("sha256:"):
             print(digest[len("sha256:"):].strip().lower())
         break
+else:
+    sys.exit(1)
 PY
 }
 
@@ -1838,14 +1865,12 @@ PY
 #   - metadata OK, digest set -> verify; any mismatch aborts
 verify_downloaded_artifact() {
   local file="$1" name="$2" label="$3"
-  ensure_release_metadata
-  if [ "$RELEASE_METADATA_STATE" = "error" ]; then
-    error "Could not fetch release metadata from GitHub to verify ${label} (network or server error)."
-    error "Refusing to install unverified ${label}; please retry."
+  ensure_release_metadata || return 1
+  local expected
+  if ! expected="$(asset_sha256 "$name")"; then
+    error "Release metadata does not identify ${label}; refusing to install."
     return 1
   fi
-  local expected
-  expected="$(asset_sha256 "$name")"
   if [ -z "$expected" ]; then
     if [ "$REQUIRE_CHECKSUM" = "1" ]; then
       error "GitHub reports no SHA-256 for ${name} on release '${INSTALL_VERSION}' and MACROSCOPE_REQUIRE_CHECKSUM=1 is set."
@@ -1903,6 +1928,7 @@ stage_binary() {
   fi
 
   step "Downloading Macroscope CLI..."
+  ensure_release_metadata || exit 1
   local asset="macroscope-${OS}-${ARCH}"
   local url
   url="$(release_asset_url "$asset")"
@@ -1937,10 +1963,13 @@ apply_binary() {
   fi
   local target="$INSTALL_DIR/macroscope"
   local candidate="$TMP_DIR/macroscope"
-  local next="$INSTALL_DIR/.macroscope.new.$$"
+  local next=""
+  next="$(mktemp "$INSTALL_DIR/.macroscope.new.XXXXXX")"
+  BINARY_STAGING_PATH="$next"
   cp "$candidate" "$next"
   chmod +x "$next"
   mv -f "$next" "$target"
+  BINARY_STAGING_PATH=""
   INSTALLED_BINARY="$target"
   success "Installed CLI to ${BOLD}${INSTALLED_BINARY}${RESET}"
 }
@@ -1955,6 +1984,10 @@ validate_staged_artifacts() {
     error "Staged Macroscope binary is not executable on this system"
     return 1
   fi
+  if [ -z "${MACROSCOPE_LOCAL_BINARY_SOURCE:-}" ] && [ -z "${MACROSCOPE_LOCAL_BACK_REPO:-}" ] && [ "$INSTALLED_VERSION" != "$INSTALL_VERSION" ]; then
+    error "Downloaded CLI version does not match the selected release; refusing to install."
+    return 1
+  fi
   local plugin_root="$CHECKOUT_DIR/plugins/macroscope"
   local tool="" required=""
   for tool in claude codex cursor opencode; do
@@ -1964,6 +1997,10 @@ validate_staged_artifacts() {
       codex) required=".codex-plugin/plugin.json commands/macroscope-codereview.md commands/macroscope-autoloop.md skills/codereview/SKILL.md skills/autoloop/SKILL.md" ;;
       cursor) required=".cursor-plugin/plugin.json commands/macroscope-codereview.md commands/macroscope-autoloop.md skills/codereview/SKILL.md skills/autoloop/SKILL.md" ;;
       opencode) required="opencode/macroscope.js commands/macroscope-codereview.md commands/macroscope-autoloop.md skills/codereview/SKILL.md skills/autoloop/SKILL.md" ;;
+    esac
+    case "$PLUGIN_VERSION:$tool" in
+      0.*:*|1.*:*) ;; # Older bundles may legitimately predate host overlays.
+      *:claude|*:codex) required="$required host-overlays/$tool/skills/codereview/SKILL.md host-overlays/$tool/skills/autoloop/SKILL.md" ;;
     esac
     for required in $required; do
       if [ -z "$CHECKOUT_DIR" ] || [ ! -f "$plugin_root/$required" ]; then
@@ -2010,6 +2047,7 @@ fetch_plugin_bundle() {
     fi
   else
     step "Downloading plugin bundle..."
+    ensure_release_metadata || exit 1
     local bundle_asset="macroscope-plugin-bundle.tar.gz"
     bundle_url="$(release_asset_url "$bundle_asset")"
 
@@ -2018,7 +2056,7 @@ fetch_plugin_bundle() {
     mkdir -p "$CHECKOUT_DIR"
     if download_with_progress "$bundle_url" "$bundle_archive" "Plugin bundle"; then
       verify_downloaded_artifact "$bundle_archive" "$bundle_asset" "Macroscope plugin bundle" || exit 1
-      tar -xzf "$bundle_archive" -C "$CHECKOUT_DIR"
+      extract_plugin_bundle "$bundle_archive" "$CHECKOUT_DIR"
       success "Fetched plugin bundle from ${BOLD}${INSTALL_VERSION}${RESET}"
     else
       error "Failed to download the released plugin bundle."
@@ -2034,11 +2072,169 @@ fetch_plugin_bundle() {
   fi
 
   PLUGIN_VERSION="$(python3 - "$CHECKOUT_DIR/plugins/macroscope/.claude-plugin/plugin.json" <<'PY'
-import json, sys
-with open(sys.argv[1], "r", encoding="utf-8") as f:
-    print(json.load(f).get("version", "unknown"))
+import json, pathlib, re, sys
+root = pathlib.Path(sys.argv[1]).parent.parent
+versions = []
+for host in ("claude", "codex", "cursor"):
+    with (root / ("." + host + "-plugin") / "plugin.json").open(encoding="utf-8") as f:
+        manifest = json.load(f)
+    version = manifest.get("version")
+    if manifest.get("name") != "macroscope" or not isinstance(version, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", version):
+        raise SystemExit("Invalid plugin identity or version; refusing to install.")
+    versions.append(version)
+if len(set(versions)) != 1:
+    raise SystemExit("Plugin host versions disagree; refusing to install.")
+with (root.parent.parent / ".claude-plugin/marketplace.json").open(encoding="utf-8") as f:
+    marketplace = json.load(f)
+entries = [item for item in marketplace.get("plugins", []) if item.get("name") == "macroscope"]
+if len(entries) != 1 or entries[0].get("version") != versions[0]:
+    raise SystemExit("Plugin marketplace version disagrees with host manifests; refusing to install.")
+print(versions[0])
 PY
 )"
+}
+
+validate_existing_integrations() {
+  local check_codex=0
+  if repair_only_requested || tool_selected codex || { [ "$INSTALL_MODE" = "update" ] && tool_installed codex; }; then check_codex=1; fi
+  python3 - "$HOME" "$(get_codex_home)" "$(get_opencode_config_dir)" "$SELECTED_TOOLS" "$check_codex" <<'PY'
+import json, os, pathlib, re, sys
+home, codex, opencode, selected, check_codex = sys.argv[1:]
+marketplace = pathlib.Path(home) / ".agents/plugins/marketplace.json"
+if check_codex == "1" and marketplace.exists():
+    with marketplace.open(encoding="utf-8") as f:
+        data = json.load(f)
+    name = data.get("name", "local-user-plugins")
+    if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", name):
+        raise SystemExit("Invalid Codex marketplace name; refusing to change plugin paths.")
+    if "codex" in selected.split(","):
+        for plugin in data.get("plugins", []):
+            if plugin.get("name") == "macroscope" and plugin.get("source") not in (
+                {"source": "local", "path": "./plugins/macroscope"},
+                {"source": "local", "path": "plugins/macroscope"},
+            ):
+                raise SystemExit("Existing Codex macroscope registration has a foreign source; refusing to replace it.")
+PY
+  if tool_selected opencode; then
+    local root="$(get_opencode_config_dir)" relative="" target=""
+    for relative in plugins/macroscope.js commands/macroscope-codereview.md commands/macroscope-autoloop.md skills/codereview skills/autoloop; do
+      target="$root/$relative"
+      if { [ -e "$target" ] || [ -L "$target" ]; } && ! opencode_path_owned "$target"; then
+        error "Existing OpenCode content is not Macroscope-owned; refusing to replace $target."
+        return 1
+      fi
+    done
+  fi
+}
+
+opencode_path_owned() {
+  python3 - "$1" <<'PY'
+import hashlib, pathlib, sys
+target = pathlib.Path(sys.argv[1])
+if target.is_symlink():
+    raise SystemExit(1)
+if target.is_dir():
+    # A user may add resources to an installed skill. Preserve those resources
+    # instead of treating ownership of SKILL.md as ownership of the directory.
+    if {p.name for p in target.iterdir()} != {"SKILL.md"}:
+        raise SystemExit(1)
+    target = target / "SKILL.md"
+if not target.is_file() or target.is_symlink():
+    raise SystemExit(1)
+try:
+    content = target.read_bytes()
+except OSError:
+    raise SystemExit(1)
+marker = b"Installed by Macroscope installer; managed OpenCode integration."
+# Exact unmodified public 1.5.1 files support upgrades from the unmarked layout.
+# Merely mentioning the CLI never establishes ownership of a user's workflow.
+legacy = {
+    "daf59a1b1d2c1f78876f65430e2d739946ca43b687bf8e155b587097b622597b",
+    "ef6158ba11f8b16071ab4eeb7712bafa6717b33f17fb45dd5486965024ddc3f7",
+    "8510537db3992112a621404749ba8af8f8e55021ce9064bd8dc26857de096572",
+    "aebf7a9eaccb7b978d113d079e27564510cdf1504e85068cc9b4cf10727429e6",
+    "d09fa7e2db7b88324cb57194d810a96b391569d03c9d16f604df65c2c5086aae",
+}
+owned = marker in content or hashlib.sha256(content).hexdigest() in legacy
+raise SystemExit(0 if owned else 1)
+PY
+}
+
+remove_owned_opencode_path() {
+  local target="$1"
+  [ -e "$target" ] || [ -L "$target" ] || return 0
+  if opencode_path_owned "$target"; then
+    rm -rf "$target"
+  else
+    warn "Preserved unowned OpenCode content at $target"
+  fi
+}
+
+extract_plugin_bundle() {
+  # Public 1.5.1 and 2.0.0 bundles contain 16 files totaling under 60 KiB.
+  # Generous fixed limits bound corrupt/high-expansion archives before apply:
+  # 16 MiB compressed or file payload total, 4 MiB/file, 2048 members, and
+  # 32 MiB of decompressed tar bytes (including headers and PAX metadata).
+  python3 - "$1" "$2" <<'PY'
+import gzip, os, pathlib, shutil, sys, tarfile
+COMPRESSED_LIMIT = 16 * 1024 * 1024
+FILE_LIMIT = 4 * 1024 * 1024
+TOTAL_LIMIT = 16 * 1024 * 1024
+TAR_LIMIT = 32 * 1024 * 1024
+MEMBER_LIMIT = 2048
+class BoundedReader:
+    def __init__(self, source):
+        self.source, self.remaining = source, TAR_LIMIT
+    def read(self, size=-1):
+        size = self.remaining + 1 if size < 0 else min(size, self.remaining + 1)
+        data = self.source.read(size)
+        self.remaining -= len(data)
+        if self.remaining < 0:
+            raise ValueError("decompressed archive limit exceeded")
+        return data
+try:
+    if os.path.getsize(sys.argv[1]) > COMPRESSED_LIMIT:
+        raise ValueError("compressed archive limit exceeded")
+    # Streaming iteration checks limits before tarfile collects an unbounded
+    # member list or seeks through a claimed oversized file. The second pass
+    # writes only after the complete first pass validated paths and limits.
+    with gzip.open(sys.argv[1], "rb") as source:
+        bounded = BoundedReader(source)
+        with tarfile.open(fileobj=bounded, mode="r|") as archive:
+            seen, total, count = set(), 0, 0
+            for member in archive:
+                if member.size < 0 or (member.isdir() and member.size != 0):
+                    raise ValueError("invalid archive member size")
+                count += 1
+                total += member.size
+                if count > MEMBER_LIMIT or member.size > FILE_LIMIT or total > TOTAL_LIMIT:
+                    raise ValueError("archive member limit exceeded")
+                name = pathlib.PurePosixPath(member.name)
+                if name.is_absolute() or ".." in name.parts or not (member.isdir() or member.isfile()):
+                    raise ValueError("unsafe archive entry")
+                normalized = str(name)
+                if normalized in seen or (normalized == "." and not member.isdir()):
+                    raise ValueError("duplicate archive entry")
+                seen.add(normalized)
+        # Read through gzip EOF: tar end markers alone do not verify a
+        # truncated trailer, CRC, or trailing decompression expansion.
+        while bounded.read(64 * 1024):
+            pass
+    with gzip.open(sys.argv[1], "rb") as source:
+        with tarfile.open(fileobj=BoundedReader(source), mode="r|") as archive:
+            for member in archive:
+                target = pathlib.Path(sys.argv[2]) / member.name
+                if member.isdir():
+                    target.mkdir(parents=True, exist_ok=True)
+                else:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    with archive.extractfile(member) as content, target.open("xb") as dest:
+                        shutil.copyfileobj(content, dest)
+                    os.chmod(target, member.mode & 0o777)
+except (OSError, ValueError, EOFError, tarfile.TarError):
+    print("Invalid, oversized, or unsafe plugin archive; refusing to install.", file=sys.stderr)
+    raise SystemExit(1)
+PY
 }
 
 copy_tree() {
@@ -2495,14 +2691,23 @@ if tool == "claude":
 elif tool == "codex" and remove_plugin:
     marketplace = os.path.join(home, ".agents/plugins/marketplace.json")
     data, mode = load(marketplace)
-    names = {"local-user-plugins"}
+    names = set()
     if isinstance(data, dict):
-        names.add(str(data.get("name", "local-user-plugins")))
         plugins = data.get("plugins")
         if isinstance(plugins, list):
-            filtered = [p for p in plugins if not (isinstance(p, dict) and p.get("name") in ("macroscope", "macroscope-codereview"))]
-            if filtered != plugins: data["plugins"] = filtered; save(marketplace, data, mode)
-    config = os.path.join(codex_home, "config.toml")
+            def owned_plugin(p):
+                if not isinstance(p, dict) or p.get("name") not in ("macroscope", "macroscope-codereview"):
+                    return False
+                source = p.get("source")
+                return isinstance(source, dict) and source.get("source") == "local" and source.get("path") in (
+                    "./plugins/macroscope", "plugins/macroscope", "./plugins/macroscope-codereview", "plugins/macroscope-codereview"
+                )
+            filtered = [p for p in plugins if not owned_plugin(p)]
+            if filtered != plugins:
+                names.add(str(data.get("name", "local-user-plugins")))
+                data["plugins"] = filtered
+                save(marketplace, data, mode)
+    config = os.path.realpath(os.path.join(codex_home, "config.toml"))
     if os.path.exists(config):
         mode = os.stat(config).st_mode
         with open(config, encoding="utf-8") as f: text = f.read()
@@ -2581,13 +2786,15 @@ remove_tool_integration() {
       ;;
     codex)
       rm -rf "$HOME/plugins/macroscope"
-      find "$(get_codex_home)/plugins/cache" -type d -path '*/macroscope/local' -prune -exec rm -rf {} + 2>/dev/null || true
+      rm -rf "$(get_codex_home)/plugins/cache/$(get_codex_marketplace_name)/macroscope/$CODEX_LOCAL_PLUGIN_VERSION"
       if is_managed_codex_shim "$HOME/.local/bin/codex"; then rm -f "$HOME/.local/bin/codex"; fi
       ;;
     cursor) rm -rf "$HOME/.cursor/plugins/local/macroscope" ;;
     opencode)
-      rm -f "$(get_opencode_config_dir)/plugins/macroscope.js" "$(get_opencode_config_dir)/commands/macroscope-codereview.md" "$(get_opencode_config_dir)/commands/macroscope-autoloop.md"
-      rm -rf "$(get_opencode_config_dir)/skills/codereview" "$(get_opencode_config_dir)/skills/autoloop"
+      local opencode_root="$(get_opencode_config_dir)" relative=""
+      for relative in plugins/macroscope.js commands/macroscope-codereview.md commands/macroscope-autoloop.md skills/codereview skills/autoloop; do
+        remove_owned_opencode_path "$opencode_root/$relative"
+      done
       ;;
   esac
   clean_tool_state "$tool" 1
@@ -2681,20 +2888,81 @@ PY
   done < <(rollback_targets)
 }
 
+acquire_install_lock() {
+  # The binary always belongs to HOME even when install.json uses XDG state.
+  # All installers for that HOME must share one transaction/recovery gate.
+  local state_dir="$HOME/.local/state/macroscope"
+  python3 - "$HOME" "$state_dir" "$STATE_FILE" <<'PY'
+import os, pathlib, stat, sys
+home, state_dir, state_file = map(pathlib.Path, sys.argv[1:])
+for target in (state_dir, state_file.parent):
+    for parent in (target, *target.parents):
+        if parent == home or parent == pathlib.Path(parent.anchor):
+            break
+        if parent.is_symlink():
+            raise SystemExit("Installer state directory is a symlink; refusing to follow it.")
+if state_file.is_symlink():
+    raise SystemExit("Installer state file is a symlink; refusing to replace it.")
+lock = state_dir / "install.lock"
+if os.path.lexists(lock):
+    info = lock.lstat()
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1:
+        raise SystemExit("Installer lock must be an owned regular file with one link.")
+PY
+  local validation_status=$?
+  [ "$validation_status" -eq 0 ] || return "$validation_status"
+  mkdir -p "$state_dir" || return $?
+  local lock_file="$state_dir/install.lock"
+  if [ -L "$lock_file" ]; then
+    error "Installer lock is a symlink; refusing to change installation state."
+    return 1
+  fi
+  # flock is associated with this open file description, retained by Bash and
+  # inherited children. A killed parent cannot release the lock while a copy
+  # child is still writing. The lock file must not be unlinked after use.
+  (umask 077; touch "$lock_file") || return $?
+  exec 9>"$lock_file" || return $?
+  if ! python3 - <<'PY'
+import fcntl
+try:
+    fcntl.flock(9, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except BlockingIOError:
+    raise SystemExit(1)
+PY
+  then
+    error "Another Macroscope installer is active; retry after it finishes."
+    return 75
+  fi
+  RECOVERY_MARKER="$state_dir/install-recovery"
+  if [ -e "$RECOVERY_MARKER" ] || [ -L "$RECOVERY_MARKER" ]; then
+    error "A previous installation was interrupted. Recovery location is recorded in $RECOVERY_MARKER; restore it before retrying."
+    return 1
+  fi
+}
+
 rollback_install() {
   [ -f "$ROLLBACK_LOG" ] || return 0
   warn "Installation failed; restoring the previous install-owned state"
-  local status="" path="" backup=""
+  local status="" path="" backup="" restored="" index=0
   while IFS= read -r -d '' status &&
         IFS= read -r -d '' path &&
         IFS= read -r -d '' backup; do
     [ -n "$path" ] || continue
-    rm -rf "$path"
+    index=$((index + 1))
     if [ "$status" = "present" ]; then
-      mkdir -p "$(dirname "$path")"
-      cp -a "$backup" "$path"
+      restored="$(dirname "$path")/.macroscope-restore.$$.$index"
+      if ! mkdir -p "$(dirname "$path")" || ! cp -a "$backup" "$restored"; then
+        ROLLBACK_FAILED=1
+        continue
+      fi
+      if ! rm -rf "$path" || ! mv "$restored" "$path"; then
+        ROLLBACK_FAILED=1
+      fi
+    elif ! rm -rf "$path"; then
+      ROLLBACK_FAILED=1
     fi
   done < "$ROLLBACK_LOG"
+  [ "$ROLLBACK_FAILED" -eq 0 ]
 }
 
 handle_exit() {
@@ -2705,8 +2973,16 @@ handle_exit() {
     SAVED_TTY_STATE=""
   fi
   if [ "$status" -ne 0 ] && [ "$APPLY_STARTED" -eq 1 ] && [ "$APPLY_COMPLETE" -eq 0 ]; then
-    rollback_install || true
+    rollback_install || ROLLBACK_FAILED=1
   fi
+  if [ -n "$BINARY_STAGING_PATH" ]; then
+    rm -f "$BINARY_STAGING_PATH" || ROLLBACK_FAILED=1
+  fi
+  if [ "$ROLLBACK_FAILED" -ne 0 ]; then
+    error "Rollback is incomplete. Recovery backups were preserved at $TMP_DIR; do not retry installation until they are restored."
+    return
+  fi
+  if [ "$APPLY_STARTED" -eq 1 ] && [ -n "$RECOVERY_MARKER" ]; then rm -f "$RECOVERY_MARKER"; fi
   [ -z "$TMP_DIR" ] || rm -rf "$TMP_DIR"
 }
 
@@ -2763,6 +3039,14 @@ install_opencode_support() {
   fi
   copy_tree "$skills_src/codereview" "$opencode_skills/codereview"
   copy_tree "$skills_src/autoloop" "$opencode_skills/autoloop"
+
+  printf '\n// Installed by Macroscope installer; managed OpenCode integration.\n' >> "$opencode_plugins/macroscope.js"
+  for command_name in macroscope-codereview macroscope-autoloop; do
+    printf '\n<!-- Installed by Macroscope installer; managed OpenCode integration. -->\n' >> "$opencode_commands/$command_name.md"
+  done
+  for skill_name in codereview autoloop; do
+    printf '\n<!-- Installed by Macroscope installer; managed OpenCode integration. -->\n' >> "$opencode_skills/$skill_name/SKILL.md"
+  done
 
   success "Installed OpenCode plugin to ${BOLD}${opencode_plugins}/macroscope.js${RESET}"
   success "Installed OpenCode commands to ${BOLD}${opencode_commands}${RESET}"
@@ -2867,21 +3151,8 @@ verify_install() {
 
   codex_home="$(get_codex_home)"
   codex_source="$HOME/plugins/macroscope"
-  codex_marketplace_name="$(python3 - <<'PY'
-import json
-import os
-
-path = os.path.expanduser("~/.agents/plugins/marketplace.json")
-name = "local-user-plugins"
-
-if os.path.exists(path):
-    with open(path, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    name = data.get("name", name)
-
-print(name)
-PY
-)"
+  codex_marketplace_name="local-user-plugins"
+  if tool_selected codex; then codex_marketplace_name="$(get_codex_marketplace_name)"; fi
   codex_cache="$codex_home/plugins/cache/$codex_marketplace_name/macroscope/$CODEX_LOCAL_PLUGIN_VERSION"
 
   if tool_selected codex && [ -f "$codex_source/.codex-plugin/plugin.json" ]; then
@@ -3034,6 +3305,9 @@ launch_wizard() {
 
 main() {
   trap 'handle_exit $?' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  trap 'exit 129' HUP
   parse_options "$@"
   if [ "$OUTPUT_FORMAT" = "json" ]; then
     exec 3>&1
@@ -3045,6 +3319,8 @@ main() {
   if repair_only_requested; then
     step "Checking system requirements..."
     STATE_FILE="$(state_file_path)"
+    acquire_install_lock || return $?
+    validate_existing_integrations
     repair_existing_install
     rm -f "$STATE_FILE"
     info "Repair cleanup complete (MACROSCOPE_REPAIR_ONLY=1). Preserved ~/.macroscope and saved credentials."
@@ -3091,12 +3367,15 @@ main() {
 
   confirm_plan || return $?
 
+  acquire_install_lock || return $?
   prepare_tmp_dir
   stage_binary
   if [ -n "$SELECTED_TOOLS" ]; then fetch_plugin_bundle; fi
   validate_staged_artifacts
+  validate_existing_integrations
   snapshot_for_rollback
   APPLY_STARTED=1
+  (umask 077; printf '%s\n' "$TMP_DIR" > "$RECOVERY_MARKER")
 
   apply_binary
   if [ "${MACROSCOPE_TEST_FAIL_AFTER_BINARY:-0}" = "1" ]; then

@@ -1,12 +1,52 @@
 #!/bin/bash
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-INSTALLER="$REPO_ROOT/install.sh"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+INSTALLER="${1:-$REPO_ROOT/install.sh}"
+BUNDLE_ROOT="${2:-$REPO_ROOT}"
 PASS=0
 TEST_SUITE_ROOT="$(mktemp -d)"
 DECOY_PID=""
 TEST_BINARY_DEFAULT="$TEST_SUITE_ROOT/macroscope"
+SAFETY_BIN="$TEST_SUITE_ROOT/safety-bin"
+mkdir -p "$SAFETY_BIN"
+# Defense in depth for maintenance regressions: test installers may only remove
+# fixture paths and query processes at their exact fixture executable paths.
+cat > "$SAFETY_BIN/rm" <<'SAFE_RM'
+#!/usr/bin/python3
+import os, sys
+def blocked():
+    if os.environ.get("MACROSCOPE_TEST_GUARD_LOG"):
+        with open(os.environ["MACROSCOPE_TEST_GUARD_LOG"], "a") as f: f.write("removal escaped fixture\n")
+root = os.path.realpath(os.environ["MACROSCOPE_TEST_ROOT"])
+for arg in sys.argv[1:]:
+    if arg.startswith("-"):
+        continue
+    target = os.path.join(os.path.realpath(os.path.dirname(os.path.abspath(arg))), os.path.basename(arg))
+    if os.path.commonpath([root, target]) != root:
+        print("BLOCKED test removal:", target, "outside", root, file=sys.stderr)
+        blocked()
+        raise SystemExit(97)
+os.execv("/bin/rm", ["rm", *sys.argv[1:]])
+SAFE_RM
+cat > "$SAFETY_BIN/pgrep" <<'SAFE_PGREP'
+#!/usr/bin/python3
+import os, re, sys
+patterns = ["^" + re.escape(os.path.join(os.environ["HOME"], ".local/bin", name)) + r"([[:space:]]|$)" for name in ("macroscope", "macroscope-mcp")]
+if len(sys.argv) != 3 or sys.argv[1] != "-f" or sys.argv[2] not in patterns:
+    if os.environ.get("MACROSCOPE_TEST_GUARD_LOG"):
+        with open(os.environ["MACROSCOPE_TEST_GUARD_LOG"], "a") as f: f.write("process query escaped fixture\n")
+    print("BLOCKED test process query outside fixture executable", file=sys.stderr)
+    raise SystemExit(97)
+os.execv("/usr/bin/pgrep", ["pgrep", *sys.argv[1:]])
+SAFE_PGREP
+cat > "$SAFETY_BIN/pkill" <<'SAFE_PKILL'
+#!/bin/sh
+[ -z "${MACROSCOPE_TEST_GUARD_LOG:-}" ] || printf 'bulk process termination blocked\n' >> "$MACROSCOPE_TEST_GUARD_LOG"
+printf 'BLOCKED bulk process termination\n' >&2
+exit 97
+SAFE_PKILL
+chmod +x "$SAFETY_BIN/"*
 
 printf '#!/bin/sh\nprintf "test-version\\n"\n' > "$TEST_BINARY_DEFAULT"
 chmod +x "$TEST_BINARY_DEFAULT"
@@ -21,37 +61,55 @@ cleanup() {
 trap cleanup EXIT
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
-pass() { PASS=$((PASS + 1)); echo "PASS: $*"; }
+assert_clean_guards() {
+  local guard_log=""
+  while IFS= read -r guard_log; do
+    [ ! -s "$guard_log" ] || fail "installer attempted fixture escape: $(cat "$guard_log")"
+  done < <(find "$TEST_SUITE_ROOT" -name guard-violations -type f)
+}
+pass() { assert_clean_guards; PASS=$((PASS + 1)); echo "PASS: $*"; }
 
 new_home() {
   TEST_ROOT="$(mktemp -d "$TEST_SUITE_ROOT/test.XXXXXX")"
   TEST_HOME="$TEST_ROOT/home"
-  mkdir -p "$TEST_HOME"
+  mkdir -p "$TEST_HOME" "$TEST_ROOT/tmp"
 }
 
 run_install() {
-  env \
+  local install_status=0
+  env -i \
     HOME="$TEST_HOME" \
+    CODEX_HOME="$TEST_HOME/.codex" \
+    XDG_STATE_HOME="$TEST_HOME/.local/state" \
+    XDG_CACHE_HOME="$TEST_HOME/.cache" \
+    TMPDIR="$TEST_ROOT/tmp" \
     SHELL="${TEST_SHELL:-/bin/zsh}" \
-    PATH="${TEST_PATH:-/usr/bin:/bin}" \
+    PATH="$SAFETY_BIN:${TEST_PATH:-/usr/bin:/bin}" \
+    MACROSCOPE_TEST_ROOT="$TEST_SUITE_ROOT" \
+    MACROSCOPE_TEST_GUARD_LOG="$TEST_ROOT/guard-violations" \
     CLAUDE_CONFIG_DIR="${TEST_CLAUDE_CONFIG_DIR:-}" \
     OPENCODE_CONFIG_DIR="${TEST_OPENCODE_CONFIG_DIR:-}" \
     XDG_CONFIG_HOME="${TEST_XDG_CONFIG_HOME:-}" \
     TEST_CLAUDE_LOG="${TEST_CLAUDE_LOG:-}" \
     MACROSCOPE_LOCAL_BINARY_SOURCE="${TEST_BINARY:-$TEST_BINARY_DEFAULT}" \
-    MACROSCOPE_PLUGIN_BUNDLE_SOURCE="${TEST_PLUGIN_BUNDLE:-$REPO_ROOT}" \
+    MACROSCOPE_PLUGIN_BUNDLE_SOURCE="${TEST_PLUGIN_BUNDLE:-$BUNDLE_ROOT}" \
     MACROSCOPE_CODEX_BUNDLED_BINARY="${TEST_CODEX_BUNDLED_BINARY:-}" \
     MACROSCOPE_CODEX_APP_BINARY="${TEST_CODEX_APP_BINARY:-$TEST_SUITE_ROOT/missing-codex-app}" \
     MACROSCOPE_CHATGPT_APP_BINARY="${TEST_CHATGPT_APP_BINARY:-$TEST_SUITE_ROOT/missing-chatgpt-app}" \
     MACROSCOPE_TEST_NONINTERACTIVE=1 \
-    bash "$INSTALLER" "$@"
+    MACROSCOPE_REPAIR_ONLY="${MACROSCOPE_REPAIR_ONLY:-0}" \
+    MACROSCOPE_TEST_FAIL_AFTER_BINARY="${MACROSCOPE_TEST_FAIL_AFTER_BINARY:-0}" \
+    MACROSCOPE_TEST_FAIL_AFTER_LEGACY_CLEANUP="${MACROSCOPE_TEST_FAIL_AFTER_LEGACY_CLEANUP:-0}" \
+    bash "$INSTALLER" "$@" || install_status=$?
+  [ ! -s "$TEST_ROOT/guard-violations" ] || { cat "$TEST_ROOT/guard-violations" >&2; return 97; }
+  return "$install_status"
 }
 
 run_interactive_install() {
   local output="$1"
   local expected_status="$2"
   shift 2
-  python3 - "$INSTALLER" "$TEST_HOME" "${TEST_BINARY:-$TEST_BINARY_DEFAULT}" "$REPO_ROOT" "$output" "$expected_status" "$@" <<'PY'
+  python3 - "$INSTALLER" "$TEST_HOME" "${TEST_BINARY:-$TEST_BINARY_DEFAULT}" "$BUNDLE_ROOT" "$output" "$expected_status" "$SAFETY_BIN" "$TEST_SUITE_ROOT" "$@" <<'PY'
 import errno
 import os
 import pty
@@ -61,7 +119,7 @@ import sys
 import termios
 import time
 
-installer, home, binary, bundle, output, expected_status, *args = sys.argv[1:]
+installer, home, binary, bundle, output, expected_status, safety_bin, suite_root, *args = sys.argv[1:]
 try:
     event_separator = args.index("--events")
 except ValueError:
@@ -74,25 +132,22 @@ for event in args[event_separator + 1:]:
     prompt, keys = event.split("=", 1)
     events.append((prompt.encode(), keys.encode()))
 
-env = os.environ.copy()
-env.update({
+env = {
     "HOME": home,
+    "CODEX_HOME": home + "/.codex",
+    "XDG_STATE_HOME": home + "/.local/state",
+    "XDG_CACHE_HOME": home + "/.cache",
+    "TMPDIR": os.path.dirname(home) + "/tmp",
     "SHELL": "/bin/zsh",
-    "PATH": "/usr/bin:/bin",
+    "PATH": safety_bin + ":/usr/bin:/bin",
+    "MACROSCOPE_TEST_ROOT": suite_root,
+    "MACROSCOPE_TEST_GUARD_LOG": os.path.dirname(output) + "/guard-violations",
     "MACROSCOPE_LOCAL_BINARY_SOURCE": binary,
     "MACROSCOPE_PLUGIN_BUNDLE_SOURCE": bundle,
     "MACROSCOPE_CODEX_BUNDLED_BINARY": os.environ.get("TEST_CODEX_BUNDLED_BINARY", ""),
     "MACROSCOPE_CODEX_APP_BINARY": os.environ.get("TEST_CODEX_APP_BINARY") or "/nonexistent/test-codex-app",
     "MACROSCOPE_CHATGPT_APP_BINARY": os.environ.get("TEST_CHATGPT_APP_BINARY") or "/nonexistent/test-chatgpt-app",
-})
-for name in (
-    "MACROSCOPE_TEST_NONINTERACTIVE",
-    "CLAUDE_CONFIG_DIR",
-    "OPENCODE_CONFIG_DIR",
-    "XDG_CONFIG_HOME",
-    "NO_COLOR",
-):
-    env.pop(name, None)
+}
 
 pid, fd = pty.fork()
 if pid == 0:
@@ -142,7 +197,8 @@ interrupted = (
 expected_exit = interrupted if expected_status == "interrupt" else actual_status == int(expected_status)
 tty_mask = termios.ECHO | termios.ICANON
 tty_restored = initial_tty[3] & tty_mask == final_tty[3] & tty_mask
-if next_event != len(events) or not expected_exit or not tty_restored:
+guard_failed = os.path.exists(env["MACROSCOPE_TEST_GUARD_LOG"]) and os.path.getsize(env["MACROSCOPE_TEST_GUARD_LOG"]) > 0
+if next_event != len(events) or not expected_exit or not tty_restored or guard_failed:
     sys.stderr.buffer.write(captured)
     print(
         f"PTY events {next_event}/{len(events)}, exit {actual_status}, "
@@ -184,7 +240,7 @@ setup_download_mocks() {
 
   printf '#!/bin/sh\nprintf "test-version\\n"\n' > "$FIX/binary"
   chmod +x "$FIX/binary"
-  tar -czf "$FIX/bundle" -C "$REPO_ROOT" .
+  tar -czf "$FIX/bundle" -C "$BUNDLE_ROOT" .
 
   cat > "$MOCK_BIN/curl" <<'CURL'
 #!/bin/bash
@@ -235,7 +291,7 @@ write_release_metadata() {
   fi
   cat > "$FIX/release.json" <<JSON
 {
-  "tag_name": "test",
+  "tag_name": "test-version",
   "assets": [
     {"name": "macroscope-${OS_TAG}-${ARCH_TAG}", "digest": ${bdigest}},
     {"name": "macroscope-plugin-bundle.tar.gz", "digest": ${bundledigest}}
@@ -245,15 +301,24 @@ JSON
 }
 
 run_install_download() {
-  env \
+  local install_status=0
+  env -i \
     HOME="$TEST_HOME" \
+    CODEX_HOME="$TEST_HOME/.codex" \
+    XDG_STATE_HOME="$TEST_HOME/.local/state" \
+    XDG_CACHE_HOME="$TEST_HOME/.cache" \
+    TMPDIR="$TEST_ROOT/tmp" \
     SHELL="/bin/zsh" \
-    PATH="$MOCK_BIN:/usr/bin:/bin" \
+    PATH="$SAFETY_BIN:$MOCK_BIN:/usr/bin:/bin" \
+    MACROSCOPE_TEST_ROOT="$TEST_SUITE_ROOT" \
+    MACROSCOPE_TEST_GUARD_LOG="$TEST_ROOT/guard-violations" \
     MOCK_CURL_FIX="$FIX" \
     MOCK_CURL_LOG="$TEST_ROOT/curl.log" \
     MACROSCOPE_REQUIRE_CHECKSUM="${MACROSCOPE_REQUIRE_CHECKSUM:-0}" \
     MACROSCOPE_TEST_NONINTERACTIVE=1 \
-    bash "$INSTALLER" "$@"
+    bash "$INSTALLER" "$@" || install_status=$?
+  [ ! -s "$TEST_ROOT/guard-violations" ] || { cat "$TEST_ROOT/guard-violations" >&2; return 97; }
+  return "$install_status"
 }
 
 test_asset_digest_is_parsed_from_release_metadata() {
@@ -276,12 +341,12 @@ JSON
     RELEASE_METADATA="$work/release.json"
     [ "$(asset_sha256 artifact)" = "abcdef0123456789" ] || exit 11
     [ -z "$(asset_sha256 no-digest)" ] || exit 12
-    [ -z "$(asset_sha256 absent)" ] || exit 13
+    if asset_sha256 absent >/dev/null; then exit 13; fi
     exit 0
   )
   local code=$?
   [ "$code" -eq 0 ] || fail "asset_sha256 misbehaved (code $code)"
-  pass "asset_sha256 extracts a lowercase digest and is empty when unavailable"
+  pass "asset_sha256 parses digests and rejects absent assets"
 }
 
 test_download_verifies_against_github_digest() {
@@ -430,7 +495,7 @@ test_empty_version_binary_is_rejected_before_apply() {
 test_selected_tool_assets_are_validated_before_apply() {
   new_home
   local broken_bundle="$TEST_ROOT/bundle"
-  cp -R "$REPO_ROOT" "$broken_bundle"
+  cp -R "$BUNDLE_ROOT" "$broken_bundle"
   rm -f "$broken_bundle/plugins/macroscope/skills/autoloop/SKILL.md"
   set +e
   TEST_PLUGIN_BUNDLE="$broken_bundle" run_install --yes --tools opencode --no-path --no-wizard >"$TEST_ROOT/out" 2>"$TEST_ROOT/err"
@@ -527,7 +592,7 @@ test_repair_fails_closed_on_invalid_permission_ownership() {
 test_legacy_cleanup_does_not_kill_regex_near_process() {
   new_home
   local legacy_path="$TEST_HOME/.local/bin/macroscope-mcp"
-  local decoy_path="${legacy_path//./x}"
+  local decoy_path="${legacy_path/\/.local\//\/xlocal\/}"
   mkdir -p "$(dirname "$decoy_path")"
   ln -s /bin/sleep "$decoy_path"
   "$decoy_path" 86400 &
@@ -601,12 +666,12 @@ test_no_controlling_tty_requires_consent() {
   new_home
   set +e
   python3 -c 'import subprocess, sys; raise SystemExit(subprocess.run(sys.argv[1:], start_new_session=True).returncode)' \
-    env \
+    env -i \
     HOME="$TEST_HOME" \
     SHELL=/bin/zsh \
     PATH=/usr/bin:/bin \
     MACROSCOPE_LOCAL_BINARY_SOURCE=/usr/bin/true \
-    MACROSCOPE_PLUGIN_BUNDLE_SOURCE="$REPO_ROOT" \
+    MACROSCOPE_PLUGIN_BUNDLE_SOURCE="$BUNDLE_ROOT" \
     bash "$INSTALLER" --tools none --no-wizard \
       >"$TEST_ROOT/out" 2>"$TEST_ROOT/err"
   local code=$?
@@ -903,7 +968,7 @@ test_empty_recorded_footprint_does_not_expand_from_stale_files() {
   TEST_PATH="$TEST_HOME/.local/bin:/usr/bin:/bin"
   run_install --yes --tools none --no-wizard >"$TEST_ROOT/initial"
   mkdir -p "$TEST_HOME/.cursor/plugins/local/macroscope"
-  cp "$REPO_ROOT/plugins/macroscope/.cursor-plugin/plugin.json" "$TEST_HOME/.cursor/plugins/local/macroscope/plugin.json"
+  cp "$BUNDLE_ROOT/plugins/macroscope/.cursor-plugin/plugin.json" "$TEST_HOME/.cursor/plugins/local/macroscope/plugin.json"
   run_install --mode update --yes >"$TEST_ROOT/update"
   [ ! -e "$TEST_HOME/.cursor/plugins/local/macroscope" ] || fail "update expanded an explicitly empty integration footprint"
   python3 - "$TEST_HOME/.local/state/macroscope/install.json" <<'PY' || fail "empty integration footprint was not retained"
@@ -1484,7 +1549,7 @@ test_completion_keeps_setup_and_verification_in_quick_start() {
 }
 
 test_codex_plugin_uses_dollar_prefixed_commands() {
-  python3 - "$REPO_ROOT" <<'PY' || fail "Codex plugin command assertions failed"
+  python3 - "$BUNDLE_ROOT" <<'PY' || fail "Codex plugin command assertions failed"
 import json
 from pathlib import Path
 import sys
@@ -1506,7 +1571,7 @@ PY
 }
 
 test_skills_use_remote_base_without_permission_rules() {
-  python3 - "$REPO_ROOT" <<'PY' || fail "shipped skill base resolution assertions failed"
+  python3 - "$BUNDLE_ROOT" <<'PY' || fail "shipped skill base resolution assertions failed"
 from pathlib import Path
 import sys
 
@@ -1524,20 +1589,38 @@ paths = [
 
 for path in paths:
     text = path.read_text(encoding="utf-8")
-    # origin is authoritative: when configured, always refresh the exact origin
-    # branch and treat any fetch failure as fatal.
-    assert 'if git remote get-url origin >/dev/null 2>&1; then' in text, path
-    assert 'git fetch --quiet --no-tags origin "+refs/heads/${base_branch}:refs/remotes/origin/${base_branch}"' in text, path
-    assert 'Failed to refresh base branch' in text, path
-    assert 'base_ref="origin/$base_branch"' in text, path
-    # local resolution only with no origin remote.
-    assert 'refs/heads/${base_branch}^{commit}' in text, path
-    assert 'base_ref="refs/heads/$base_branch"' in text, path
-    assert '--base "$base_ref"' in text, path
-    # local default-branch discovery is gated on the absence of an origin remote;
-    # it must never guess a local branch while origin exists.
-    assert '[ -z "$base_branch" ] && ! git remote get-url origin >/dev/null 2>&1' in text, path
-    assert 'for candidate in "$(git config --get init.defaultBranch)" main master' in text, path
+    # Version 1 autoloop owns Git resolution; codereview already delegates to
+    # the CLI. Version 2 moves every workflow to CLI-owned resolution. Keep
+    # the legacy compatibility assertions while checking the current contract.
+    import json
+    version = json.loads((root / "plugins/macroscope/.claude-plugin/plugin.json").read_text())["version"]
+    if version.startswith("1.") and path.parent.name == "autoloop":
+        # origin is authoritative: when configured, always refresh the exact origin
+        # branch and treat any fetch failure as fatal.
+        assert 'if git remote get-url origin >/dev/null 2>&1; then' in text, path
+        assert 'git fetch --quiet --no-tags origin "+refs/heads/${base_branch}:refs/remotes/origin/${base_branch}"' in text, path
+        assert 'Failed to refresh base branch' in text, path
+        assert 'base_ref="origin/$base_branch"' in text, path
+        # local resolution only with no origin remote.
+        assert 'refs/heads/${base_branch}^{commit}' in text, path
+        assert 'base_ref="refs/heads/$base_branch"' in text, path
+        assert '--base "$base_ref"' in text, path
+        # local default-branch discovery is gated on the absence of an origin remote;
+        # it must never guess a local branch while origin exists.
+        assert '[ -z "$base_branch" ] && ! git remote get-url origin >/dev/null 2>&1' in text, path
+        assert 'for candidate in "$(git config --get init.defaultBranch)" main master' in text, path
+    else:
+        assert "The CLI is the source of truth for base resolution" in text, path
+        assert "Do not pass `--base` unless the user explicitly supplies" in text, path
+        assert "if git remote get-url origin" not in text, path
+        assert "git fetch --quiet --no-tags origin" not in text, path
+        assert 'base_ref="origin/$base_branch"' not in text, path
+        if not version.startswith("1."):
+            assert "## CLI compatibility preflight" in text, path
+            assert "macroscope update --yes" in text, path
+            if path.parent.name == "codereview":
+                assert "report-only" in text, path
+                assert "Do not edit, stage, commit, or create patches" in text, path
     # never trust a cached remote-tracking ref, gate on a probe, prefer a bare
     # local branch, hand the CLI a bare base, or describe removed permission rules.
     assert 'git rev-parse --verify --quiet "refs/remotes/origin/' not in text, path
@@ -1550,14 +1633,55 @@ for path in paths:
     assert all(" --auto-update" in line for line in launches), (path, launches)
 
 for path in paths[-2:]:
+    if version.startswith("1.") and path.parent.name == "codereview":
+        # The shipped legacy Codex review adapter predates pid-file cleanup.
+        assert 'wait "$child_pid"' in path.read_text(), path
+        continue
     text = path.read_text(encoding="utf-8")
     assert 'unlink "$pid_file" 2>/dev/null || true' in text, path
     assert 'unlink "$review_log" 2>/dev/null || true' in text, path
     assert 'rm -f "$pid_file"' not in text, path
 PY
-  pass "skills resolve a strictly origin-authoritative base"
+  pass "legacy and current skills preserve their base-resolution contracts"
 }
 
+test_harness_isolation_guards() {
+  new_home
+  local outside="$(mktemp -d)" result=0
+  printf 'preserve\n' > "$outside/sentinel"
+  env -i PATH=/usr/bin:/bin MACROSCOPE_TEST_ROOT="$TEST_SUITE_ROOT" "$SAFETY_BIN/rm" -rf "$outside" >"$TEST_ROOT/guard.log" 2>&1 || result=$?
+  [ "$result" -eq 97 ] && [ -f "$outside/sentinel" ] || fail "fixture deletion guard failed"
+  /bin/rm -rf "$outside"
+  result=0
+  env -i PATH=/usr/bin:/bin HOME="$TEST_HOME" "$SAFETY_BIN/pgrep" -x macroscope >>"$TEST_ROOT/guard.log" 2>&1 || result=$?
+  [ "$result" -eq 97 ] || fail "host-wide process query guard failed"
+  # Expected installer failures must not conceal blocked process cleanup.
+  local harness_path="${BASH_SOURCE[0]}"
+  result=0
+  env -i PATH=/usr/bin:/bin HOME=/tmp /bin/bash -c '
+    source "$1" "$2" "$3"
+    new_home
+    env -i PATH=/usr/bin:/bin MACROSCOPE_TEST_GUARD_LOG="$TEST_ROOT/guard-violations" "$SAFETY_BIN/pkill" -9 -x macroscope || true
+    pass "must not pass"
+  ' guard-proof "$harness_path" "$INSTALLER" "$BUNDLE_ROOT" > "$TEST_ROOT/swallowed-guard-proof.log" 2>&1 || result=$?
+  [ "$result" -eq 1 ] || fail "expected failure concealed a blocked process operation"
+  grep -Fq 'installer attempted fixture escape' "$TEST_ROOT/swallowed-guard-proof.log" || fail "suite boundary missed guard log"
+  # Host-root variables and shell startup hooks must not survive into helpers.
+  local foreign="$TEST_ROOT/foreign"
+  mkdir -p "$foreign"
+  printf 'preserve\n' > "$foreign/config.toml"
+  printf 'touch "%s/escaped"\n' "$foreign" > "$TEST_ROOT/startup.sh"
+  CODEX_HOME="$foreign" XDG_STATE_HOME="$foreign" BASH_ENV="$TEST_ROOT/startup.sh" MACROSCOPE_REPAIR_ONLY=1 run_install >"$TEST_ROOT/repair.log" 2>&1
+  [ ! -e "$foreign/escaped" ] || fail "installer inherited a shell startup hook"
+  [ "$(cat "$foreign/config.toml")" = preserve ] || fail "installer used inherited Codex root"
+  ! grep -q BLOCKED "$TEST_ROOT/repair.log" || fail "repair escaped its fixture operations"
+  pass "fixture guards reject host cleanup and inherited environment escapes"
+}
+
+# Sourcing provides the same guarded helpers for focused regression runs.
+[ "${BASH_SOURCE[0]}" = "$0" ] || return 0
+
+test_harness_isolation_guards
 test_dry_run_is_read_only
 test_empty_version_binary_is_rejected_before_apply
 test_selected_tool_assets_are_validated_before_apply
@@ -1630,4 +1754,6 @@ test_download_progress_tracks_curl_percentages
 test_download_progress_preserves_errors_and_no_color
 test_skills_use_remote_base_without_permission_rules
 
+assert_clean_guards
+echo "Guard violations: 0"
 echo "All $PASS installer tests passed."
