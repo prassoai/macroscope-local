@@ -1,0 +1,45 @@
+name: Installer tests
+
+# scripts/test-install.sh is the single entry point: it runs the shell harness
+# against install.sh and then the adversarial Python regressions against the
+# same installer and bundle. Nothing ran either suite before this workflow, so
+# every transaction, rollback and filesystem-race guarantee they encode could
+# regress without a red check.
+#
+# Linux only. The suites assume GNU procps `pgrep -f` and a bash new enough for
+# the installer's own requirements; the macOS runners ship bash 3.2, so native
+# macOS validation stays a manual step rather than a check that is red by
+# construction.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: installer-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      # The suites default their bundle fixture to the checkout root, so the
+      # plugin and skill trees must be present exactly as a user would fetch
+      # them. Fail loudly here rather than letting a shallow or filtered
+      # checkout silently reduce the bundle tests to no-ops.
+      - name: Verify bundle fixture is present
+        run: |
+          set -euo pipefail
+          for path in install.sh plugins skills scripts/test-installer-adversarial.py; do
+            [ -e "$path" ] || { echo "::error::missing bundle fixture: $path"; exit 1; }
+          done
+
+      - name: Run installer test suites
+        run: scripts/test-install.sh

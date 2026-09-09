@@ -1767,3 +1767,14 @@ test_skills_use_remote_base_without_permission_rules
 assert_clean_guards
 echo "Guard violations: 0"
 echo "All $PASS installer tests passed."
+
+# The adversarial suite drives the same installer and the same bundle through
+# crashes, signals, symlink swaps and hostile registry contents. It runs from
+# here because this is the repository's only test entry point: a regression
+# suite nothing invokes is a regression suite that rots. The suite builds its
+# own fixture homes and guards, so it inherits only the installer under test.
+# Not wired: scripts/test-sync-skills.py, which requires the private back
+# repository as its candidate input and cannot run from a public checkout.
+echo "Running adversarial installer regressions against $INSTALLER"
+TEST_INSTALLER="$INSTALLER" TEST_BUNDLE="$BUNDLE_ROOT" \
+  python3 "$REPO_ROOT/scripts/test-installer-adversarial.py"
