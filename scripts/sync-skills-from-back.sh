@@ -7,6 +7,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 exec python3 - "$SCRIPT_DIR/.." "$@" <<'PY'
 import argparse
+from collections import namedtuple
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -37,6 +38,10 @@ If `macroscope` is not found, tell the user:
 
 Stop here if the CLI is missing.
 """
+
+# relative: the destination below --output, walked one component at a time.
+# candidate: the staged entry's name, replaced in from the transaction.
+Target = namedtuple("Target", "relative candidate")
 
 
 def fail(message):
@@ -143,6 +148,9 @@ def validate_bundle(root):
 
 
 def check_target(output, target):
+    # Advisory pre-flight only: a pathname cannot bind the inode that the later
+    # rename resolves. apply_targets enforces the same rule with O_NOFOLLOW
+    # directory descriptors, which a concurrent writer cannot redirect.
     for path in (target, *target.parents):
         if path == output:
             break
@@ -150,6 +158,19 @@ def check_target(output, target):
             fail(f"refusing to replace or traverse a destination symlink: {path}")
         if path != target and path.exists() and not path.is_dir():
             fail(f"destination parent is not a directory: {path}")
+
+
+def owned_skill(path, name):
+    # Ownership is the marker's position, not its presence anywhere in the file:
+    # a foreign skill that merely quotes the prerequisite block is not ours.
+    # Bundles written before the generated marker existed lead with PREREQ, so
+    # that shape stays owned for the one-time migration onto an older checkout.
+    # Anything we cannot parse is somebody else's file, so ownership fails closed
+    # rather than reporting our own well-formedness rules against a foreign skill.
+    try:
+        return skill_frontmatter(path, name)[1].startswith((GENERATED_MARKER, PREREQ))
+    except (OSError, ValueError):
+        return False
 
 
 def prepare_targets(root, output, transaction, marketplace, skills):
@@ -182,14 +203,14 @@ def prepare_targets(root, output, transaction, marketplace, skills):
     market_stage.chmod(market_target.stat().st_mode & 0o777 if market_target.exists() else 0o644)
     plugin_stage = staged / "plugin"
     shutil.copytree(root / "plugins/macroscope", plugin_stage)
-    targets = [(market_target, market_stage), (plugin_target, plugin_stage)]
+    targets = [Target(PurePosixPath(".claude-plugin/marketplace.json"), market_stage.name),
+               Target(PurePosixPath("plugins/macroscope"), plugin_stage.name)]
     for skill in skills:
         target = output / "skills" / skill.name
         candidate = staged / ("skill-" + skill.name)
         if target.exists():
             check_target(output, target / "SKILL.md")
-            old_text = (target / "SKILL.md").read_text(encoding="utf-8")
-            if GENERATED_MARKER not in old_text and PREREQ not in old_text:
+            if not owned_skill(target / "SKILL.md", skill.name):
                 fail(f"unowned standalone skill destination: {target}")
             shutil.copytree(target, candidate, symlinks=True)
         else:
@@ -207,67 +228,122 @@ def prepare_targets(root, output, transaction, marketplace, skills):
             frontmatter + "\n" + GENERATED_MARKER + "\n\n" + PREREQ + "\n" + body,
             encoding="utf-8")
         skill_frontmatter(candidate / "SKILL.md", skill.name)
-        targets.append((target, candidate))
+        targets.append(Target(PurePosixPath("skills") / skill.name, candidate.name))
     return targets
 
 
-def remove_path(path):
-    if path.is_dir() and not path.is_symlink():
-        shutil.rmtree(path)
-    elif os.path.lexists(path):
-        path.unlink()
+def open_dir(name, dir_fd=None):
+    return os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dir_fd)
 
 
-def apply_targets(targets, transaction):
-    backups = transaction / "backups"
-    backups.mkdir()
+def exists_at(name, dir_fd):
+    try:
+        os.lstat(name, dir_fd=dir_fd)
+    except FileNotFoundError:
+        return False
+    return True
+
+
+def open_parent(output_fd, relative, fds, created):
+    # Resolve one component at a time from the validated --output descriptor.
+    # O_NOFOLLOW turns a directory swapped for a symlink into ELOOP instead of
+    # a rename that lands outside --output.
+    fd = output_fd
+    for depth, part in enumerate(relative.parts[:-1], start=1):
+        try:
+            child = open_dir(part, dir_fd=fd)
+        except FileNotFoundError:
+            os.mkdir(part, dir_fd=fd)
+            os.fsync(fd)
+            created.append((fd, part))
+            child = open_dir(part, dir_fd=fd)
+        fds.append(child)
+        fd = child
+    return fd
+
+
+def fsync_tree(path):
+    # A durable directory entry pointing at unflushed data is still data loss,
+    # so staged contents are flushed before any of them is published.
+    for item in sorted(path.rglob("*"), reverse=True):
+        if item.is_symlink():
+            continue
+        fd = os.open(item, os.O_RDONLY | (os.O_DIRECTORY if item.is_dir() else 0))
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+
+def apply_targets(output, targets, transaction):
+    # os.replace and os.lstat are not listed in their own right; they are
+    # renameat and fstatat, so os.rename and os.stat are the probe for both.
+    if not {os.open, os.rename, os.stat, os.mkdir, os.rmdir}.issubset(os.supports_dir_fd):
+        fail("platform cannot perform race-safe directory-relative replacement")
+    staged = transaction / "staged"
+    fsync_tree(staged)
+    for name in ("backups", "discarded"):
+        (transaction / name).mkdir()
     # Retain an explicit recovery map if SIGKILL or a machine shutdown prevents
     # the normal rollback handler from running. The lock blocks a second sync.
-    recovery = [{"target": str(target), "candidate": str(candidate),
-                 "backup": str(backups / str(index)), "existed": os.path.lexists(target)}
-                for index, (target, candidate) in enumerate(targets)]
+    recovery = [{"target": str(output / target.relative), "candidate": str(staged / target.candidate),
+                 "backup": str(transaction / "backups" / str(index)),
+                 "existed": os.path.lexists(output / target.relative)}
+                for index, target in enumerate(targets)]
     with (transaction / "recovery.json").open("w", encoding="utf-8") as stream:
         json.dump(recovery, stream, indent=2)
         stream.write("\n")
         stream.flush()
         os.fsync(stream.fileno())
     journal = []
-    new_parents = []
+    created = []
+    fds = [open_dir(str(transaction))]
     try:
-        for index, (target, candidate) in enumerate(targets):
-            missing = []
-            parent = target.parent
-            while not parent.exists():
-                missing.append(parent)
-                parent = parent.parent
-            for parent in reversed(missing):
-                parent.mkdir()
-                new_parents.append(parent)
-            backup = backups / str(index)
-            existed = os.path.lexists(target)
+        # Durable before the first replacement: a recovery map that survives the
+        # crash it describes, and directory entries for the backups it names.
+        os.fsync(fds[0])
+        staged_fd, backups_fd, discarded_fd = (
+            open_dir(name, dir_fd=fds[0]) for name in ("staged", "backups", "discarded"))
+        # The transaction directory was created inside --output, so its parent is
+        # that directory by inode. Reopening the pathname would resolve --output a
+        # second time, which is the very race these descriptors exist to close.
+        output_fd = open_dir("..", dir_fd=fds[0])
+        fds += [staged_fd, backups_fd, discarded_fd, output_fd]
+        for index, target in enumerate(targets):
+            parent_fd = open_parent(output_fd, target.relative, fds, created)
+            name, backup = target.relative.name, str(index)
+            existed = exists_at(name, parent_fd)
             # Record before either rename; backup/candidate existence tells us
             # whether an interrupted syscall completed before Python resumed.
-            journal.append((target, candidate, backup, existed))
+            journal.append((parent_fd, target, backup, existed))
             if existed:
-                os.replace(target, backup)
-            os.replace(candidate, target)
+                os.replace(name, backup, src_dir_fd=parent_fd, dst_dir_fd=backups_fd)
+                os.fsync(backups_fd)
+            os.replace(target.candidate, name, src_dir_fd=staged_fd, dst_dir_fd=parent_fd)
+            os.fsync(parent_fd)
+            os.fsync(staged_fd)
     except BaseException:
         handlers = {sig: signal.signal(sig, signal.SIG_IGN)
                     for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
         errors = []
         try:
-            for target, candidate, backup, existed in reversed(journal):
+            for parent_fd, target, backup, existed in reversed(journal):
+                name = target.relative.name
                 try:
-                    if os.path.lexists(backup):
-                        remove_path(target)
-                        os.replace(backup, target)
-                    elif not existed and not os.path.lexists(candidate):
-                        remove_path(target)
+                    if exists_at(backup, backups_fd):
+                        discard(parent_fd, name, discarded_fd, backup)
+                        os.replace(backup, name, src_dir_fd=backups_fd, dst_dir_fd=parent_fd)
+                    elif not existed and not exists_at(target.candidate, staged_fd):
+                        discard(parent_fd, name, discarded_fd, backup)
+                    else:
+                        continue
+                    os.fsync(parent_fd)
                 except OSError as error:
-                    errors.append(f"{target}: {error}")
-            for parent in reversed(new_parents):
+                    errors.append(f"{output / target.relative}: {error}")
+            for parent_fd, part in reversed(created):
                 try:
-                    parent.rmdir()
+                    os.rmdir(part, dir_fd=parent_fd)
+                    os.fsync(parent_fd)
                 except OSError:
                     pass
         finally:
@@ -277,6 +353,18 @@ def apply_targets(targets, transaction):
             raise RuntimeError("rollback incomplete; retained recovery files at "
                                + str(transaction) + ": " + "; ".join(errors))
         raise
+    finally:
+        for fd in dict.fromkeys(fds):
+            os.close(fd)
+
+
+def discard(parent_fd, name, discarded_fd, slot):
+    # rename cannot replace a non-empty directory and rmtree would resolve the
+    # pathname again, so an entry is retired by moving it into the transaction.
+    try:
+        os.replace(name, slot, src_dir_fd=parent_fd, dst_dir_fd=discarded_fd)
+    except FileNotFoundError:
+        pass
 
 
 def sync(repo, ref, output):
@@ -303,12 +391,12 @@ def sync(repo, ref, output):
                                                        "transaction": str(transaction)}) + "\n")
             targets = prepare_targets(root, output, transaction, marketplace, skills)
             try:
-                apply_targets(targets, transaction)
+                apply_targets(output, targets, transaction)
             except RuntimeError:
                 keep_recovery = True
                 raise
-            for target, _ in targets:
-                print(f"synced: {target.relative_to(output)}")
+            for target in targets:
+                print(f"synced: {target.relative}")
             print(f"done: source {resolved}, plugin {version}, {len(skills)} standalone skill(s)")
         finally:
             if not keep_recovery:

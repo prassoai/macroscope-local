@@ -1122,9 +1122,12 @@ remove_dir_if_present() {
 kill_running_processes() {
   # A repair owns these per-user installation paths. Matching a process name
   # would also terminate unrelated sessions and bypass disposable HOME roots.
-  local executable="" pattern="" pids="" pid=""
+  # The list must cover every path cleanup_binaries rewrites, or repair would
+  # replace a binary underneath a process still running from it.
+  local executable="" pattern="" pids="" pid="" waited=0
   command -v pgrep >/dev/null 2>&1 || return 0
-  for executable in "$HOME/.local/bin/macroscope" "$HOME/.local/bin/macroscope-mcp"; do
+  for executable in "$HOME/.local/bin/macroscope" "$HOME/.local/bin/macroscope-mcp" \
+                    "$HOME/go/bin/macroscope" "$HOME/go/bin/macroscope-mcp"; do
     pattern="$(python3 - "$executable" <<'PY_PATTERN'
 import re, sys
 print("^" + re.escape(sys.argv[1]) + r"([[:space:]]|$)")
@@ -1134,6 +1137,20 @@ PY_PATTERN
     while IFS= read -r pid; do
       [ -n "$pid" ] || continue
       kill "$pid" 2>/dev/null || true
+    done <<< "$pids"
+    # Wait for the owned paths to go quiet before cleanup_binaries runs. Each
+    # poll re-matches the same path pattern, so a PID recycled during the wait
+    # is only ever escalated when the new process is itself one of ours.
+    waited=0
+    pids="$(pgrep -f "$pattern" 2>/dev/null || true)"
+    while [ -n "$pids" ] && [ "$waited" -lt 50 ]; do
+      sleep 0.1
+      waited=$((waited + 1))
+      pids="$(pgrep -f "$pattern" 2>/dev/null || true)"
+    done
+    while IFS= read -r pid; do
+      [ -n "$pid" ] || continue
+      kill -9 "$pid" 2>/dev/null || true
     done <<< "$pids"
   done
 }
@@ -2102,14 +2119,26 @@ import json, os, pathlib, re, sys
 home, codex, opencode, selected, check_codex = sys.argv[1:]
 marketplace = pathlib.Path(home) / ".agents/plugins/marketplace.json"
 if check_codex == "1" and marketplace.exists():
-    with marketplace.open(encoding="utf-8") as f:
-        data = json.load(f)
+    # Unreadable content still refuses, but as a message that names the file
+    # instead of a traceback, so the operator can act on it.
+    try:
+        with marketplace.open(encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError) as error:
+        raise SystemExit(f"Cannot read {marketplace} ({error}); refusing to change plugin paths.")
+    if not isinstance(data, dict):
+        raise SystemExit(f"{marketplace} is not a JSON object; refusing to change plugin paths.")
     name = data.get("name", "local-user-plugins")
     if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", name):
         raise SystemExit("Invalid Codex marketplace name; refusing to change plugin paths.")
     if "codex" in selected.split(","):
-        for plugin in data.get("plugins", []):
-            if plugin.get("name") == "macroscope" and plugin.get("source") not in (
+        # Repair is the recovery path for a damaged install, so damaged data
+        # must not abort it. A null or non-list value registers no plugin and
+        # a non-object entry is not a Macroscope registration: nothing foreign
+        # to preserve, and the later rewrite is free to proceed.
+        entries = data.get("plugins")
+        for plugin in entries if isinstance(entries, list) else []:
+            if isinstance(plugin, dict) and plugin.get("name") == "macroscope" and plugin.get("source") not in (
                 {"source": "local", "path": "./plugins/macroscope"},
                 {"source": "local", "path": "plugins/macroscope"},
             ):
@@ -2432,10 +2461,16 @@ else:
         "plugins": [],
     }
 
-data.setdefault("name", "local-user-plugins")
-data.setdefault("interface", {})
+# A present key holding null is not a missing key, so setdefault leaves it in
+# place. Every field this rewrites is retyped rather than defaulted, and a
+# malformed entry registers no plugin: it is dropped, not iterated into.
+if not isinstance(data.get("name"), str):
+    data["name"] = "local-user-plugins"
+if not isinstance(data.get("interface"), dict):
+    data["interface"] = {}
 data["interface"].setdefault("displayName", "Local Plugins")
-plugins = [p for p in data.get("plugins", []) if p.get("name") != "macroscope"]
+existing = data.get("plugins")
+plugins = [p for p in existing if isinstance(p, dict) and p.get("name") != "macroscope"] if isinstance(existing, list) else []
 plugins.append(
     {
         "name": "macroscope",
@@ -2620,9 +2655,13 @@ else:
     data = {"version": 2, "plugins": {}}
 
 data.setdefault("version", 2)
-plugins = data.setdefault("plugins", {})
-existing = plugins.get(key, [])
-installed_at = existing[0].get("installedAt", now) if existing else now
+# setdefault keeps a present null, so the container is retyped instead. An
+# unusable prior record loses only its original install timestamp.
+if not isinstance(data.get("plugins"), dict):
+    data["plugins"] = {}
+plugins = data["plugins"]
+existing = plugins.get(key)
+installed_at = existing[0].get("installedAt", now) if isinstance(existing, list) and existing and isinstance(existing[0], dict) else now
 plugins[key] = [
     {
         "scope": "user",
@@ -3383,7 +3422,20 @@ main() {
   validate_existing_integrations
   snapshot_for_rollback
   APPLY_STARTED=1
-  (umask 077; printf '%s\n' "$TMP_DIR" > "$RECOVERY_MARKER")
+  # acquire_install_lock checked this path before staging and downloading, so
+  # its result cannot be trusted here. O_EXCL|O_NOFOLLOW refuses an existing
+  # file or a symlink swapped in since, instead of following it and truncating
+  # whatever it points at.
+  if ! python3 - "$RECOVERY_MARKER" "$TMP_DIR" <<'PY'
+import os, sys
+marker, tmp_dir = sys.argv[1:]
+with os.fdopen(os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600), "w") as stream:
+    stream.write(tmp_dir + "\n")
+PY
+  then
+    error "Could not exclusively create the recovery marker at $RECOVERY_MARKER; refusing to continue."
+    return 1
+  fi
 
   apply_binary
   if [ "${MACROSCOPE_TEST_FAIL_AFTER_BINARY:-0}" = "1" ]; then

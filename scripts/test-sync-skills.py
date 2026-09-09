@@ -6,6 +6,7 @@ python3 scripts/test-sync-skills.py --back-repo /path/to/back --ref FULL_SHA \
 """
 import argparse
 import contextlib
+import errno
 import io
 import json
 import os
@@ -265,6 +266,85 @@ class SyncTests(unittest.TestCase):
             self.sync()
         self.assertEqual(before, snapshot(self.root))
 
+    def test_destination_swapped_for_a_symlink_after_validation_cannot_escape(self):
+        """check_target compares pathnames, and a pathname cannot bind the inode
+        that a later rename resolves. A concurrent writer that replaces an
+        already-approved destination parent with a symlink must not redirect the
+        replacement outside --output, so the publish walks O_NOFOLLOW directory
+        descriptors instead of re-resolving the path."""
+        self.seed_owned_and_foreign()
+        market = self.output / ".claude-plugin/marketplace.json"
+        market_before = market.read_bytes()
+        outside = self.root / "outside"
+        (outside / "macroscope").mkdir(parents=True)
+        outside_before = snapshot(outside)
+        original = SYNC.fsync_tree
+
+        def swap_after_validation(path):
+            # prepare_targets and every check_target call have completed and no
+            # rename has run: exactly the window the pathname check cannot cover.
+            shutil.rmtree(self.output / "plugins")
+            (self.output / "plugins").symlink_to(outside, target_is_directory=True)
+            return original(path)
+
+        with mock.patch.object(SYNC, "fsync_tree", side_effect=swap_after_validation):
+            with self.assertRaises(OSError) as caught:
+                self.sync()
+        # O_DIRECTORY|O_NOFOLLOW over a symlink is ELOOP on macOS and ENOTDIR on
+        # Linux; both are the refusal, and neither is a followed symlink.
+        self.assertIn(caught.exception.errno, (errno.ELOOP, errno.ENOTDIR))
+        self.assertEqual(outside_before, snapshot(outside))
+        self.assertEqual(market_before, market.read_bytes())
+
+    def test_every_new_directory_entry_is_flushed_before_it_is_relied_on(self):
+        """Power loss during apply must not lose the previous bundle. Every
+        directory receiving an entry is fsynced, and so is every staged file:
+        a durable directory entry over unwritten data is still data loss.
+        os.replace preserves inodes, so a staged file flushed before its rename
+        is identifiable at its published path."""
+        flushed = []
+        original = os.fsync
+
+        def record(fd):
+            flushed.append(os.fstat(fd).st_ino)
+            return original(fd)
+
+        with mock.patch.object(SYNC.os, "fsync", side_effect=record):
+            self.sync()
+        self.assertIn(self.output.stat().st_ino, flushed, "output gained plugins/, skills/")
+        for relative in (".claude-plugin", "plugins", "skills", "plugins/macroscope/assets",
+                         ".claude-plugin/marketplace.json", "plugins/macroscope/README.md",
+                         "skills/codereview/SKILL.md"):
+            self.assertIn((self.output / relative).stat().st_ino, flushed, relative)
+
+    def test_foreign_skill_quoting_the_prerequisite_is_not_treated_as_owned(self):
+        """Ownership is the marker's position, not its presence anywhere in the
+        file. A foreign skill that documents the same CLI prerequisite is not a
+        previous output of this script and must never be overwritten."""
+        path = self.output / "skills/codereview"
+        path.mkdir(parents=True)
+        (path / "SKILL.md").write_text("---\nname: codereview\ndescription: House review process.\n---\n"
+                                       "Run our own review checklist.\n\n" + SYNC.PREREQ)
+        before = snapshot(self.output)
+        with self.assertRaisesRegex(ValueError, "unowned standalone"):
+            self.sync()
+        self.assertEqual(before, snapshot(self.output))
+
+    def test_marker_free_legacy_layout_stays_owned_for_migration(self):
+        """The bundle that produced today's public checkout predates the
+        generated marker and leads with the prerequisite block instead.
+        Requiring both markers would fail the first migration sync onto that
+        checkout, so the legacy shape has to remain owned."""
+        self.sync()
+        for name in ("codereview", "autoloop"):
+            skill = self.output / "skills" / name / "SKILL.md"
+            frontmatter, body = SYNC.skill_frontmatter(skill, name)
+            skill.write_text(frontmatter + "\n" + body.split(SYNC.GENERATED_MARKER, 1)[1].lstrip("\r\n"))
+            self.assertNotIn(SYNC.GENERATED_MARKER, skill.read_text())
+            self.assertTrue(skill.read_text().split("---\n", 2)[2].lstrip("\r\n").startswith(SYNC.PREREQ))
+        self.sync()
+        self.assertIn(SYNC.GENERATED_MARKER, (self.output / "skills/codereview/SKILL.md").read_text())
+
     def test_generation_failure_preserves_every_target(self):
         self.seed_owned_and_foreign()
         before = snapshot(self.output)
@@ -298,14 +378,14 @@ class SyncTests(unittest.TestCase):
                     original = os.replace
                     calls = 0
 
-                    def injected(source, target):
+                    def injected(source, target, **directories):
                         nonlocal calls
                         calls += 1
                         if calls == fail_at:
                             if after:
-                                original(source, target)
+                                original(source, target, **directories)
                             raise OSError("simulated apply failure")
-                        return original(source, target)
+                        return original(source, target, **directories)
 
                     with mock.patch.object(SYNC.os, "replace", side_effect=injected):
                         with self.assertRaisesRegex(OSError, "simulated apply"):
@@ -320,10 +400,10 @@ class SyncTests(unittest.TestCase):
                 original = os.replace
                 calls = 0
 
-                def interrupted_replace(source, target):
+                def interrupted_replace(source, target, **directories):
                     nonlocal calls
                     calls += 1
-                    original(source, target)
+                    original(source, target, **directories)
                     if calls == 3:
                         os.kill(os.getpid(), sig)
 
@@ -341,10 +421,12 @@ class SyncTests(unittest.TestCase):
         original_market = (self.output / ".claude-plugin/marketplace.json").read_bytes()
         original = os.replace
 
-        def fail_apply_and_restore(source, target):
-            if str(source).endswith("staged/plugin") or str(source).endswith("backups/0"):
+        # Renames are directory-relative now, so match the publish of the staged
+        # plugin tree and the restore of the marketplace backup by their names.
+        def fail_apply_and_restore(source, target, **directories):
+            if (source, target) in (("plugin", "macroscope"), ("0", "marketplace.json")):
                 raise OSError("simulated persistent filesystem failure")
-            return original(source, target)
+            return original(source, target, **directories)
 
         with mock.patch.object(SYNC.os, "replace", side_effect=fail_apply_and_restore):
             with self.assertRaisesRegex(RuntimeError, "retained recovery files"):

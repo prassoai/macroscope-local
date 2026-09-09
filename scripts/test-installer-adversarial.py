@@ -67,7 +67,8 @@ if name == "rm":
             raise SystemExit(97)
     os.execv("/bin/rm", ["rm", *sys.argv[1:]])
 elif name == "pgrep":
-    patterns = ["^" + re.escape(os.path.join(os.environ["HOME"], ".local/bin", n)) + r"([[:space:]]|$)" for n in ("macroscope", "macroscope-mcp")]
+    patterns = ["^" + re.escape(os.path.join(os.environ["HOME"], d, n)) + r"([[:space:]]|$)"
+                for d in (".local/bin", "go/bin") for n in ("macroscope", "macroscope-mcp")]
     if len(sys.argv) != 3 or sys.argv[1] != "-f" or sys.argv[2] not in patterns:
         with open(os.path.join(root, "guard-violations"), "a") as f: f.write("process query escaped fixture\\n")
         raise SystemExit(97)
@@ -100,10 +101,14 @@ exec /usr/bin/mktemp "$@"
         return result.stdout + result.stderr
 
     def rejected(self, *args):
+        # The guarantee is not the exit status: it is that a validation failure
+        # applies nothing. An absent CLI proves only that one path was untouched,
+        # so the whole home is compared instead.
+        original = self.snapshot()
         result = subprocess.run(self.command(*args), env=self.env, capture_output=True, text=True, timeout=30)
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertFalse((self.root / "guard-violations").exists(), "rejection concealed host-wide fixture escape")
-        self.assertFalse((self.home / ".local/bin/macroscope").exists())
+        self.assertEqual(original, self.snapshot(), "rejection applied changes before failing")
         return result.stdout + result.stderr
 
     def downloads(self):
@@ -326,6 +331,9 @@ os.execv("/bin/cp", ["cp", *sys.argv[1:]])
         cp.chmod(0o755)
         self.install("--mode", "update", "--tools", "all", expected=1)
         self.assertEqual(original, self.snapshot())
+        # "cleans temp" is half the promise: a preserved home over an abandoned
+        # staging tree still fills the disk one failed update at a time.
+        self.assertEqual(list(self.tmp.iterdir()), [])
 
     def metadata_snapshot(self):
         result = {}
@@ -389,6 +397,63 @@ os.execv("/bin/cp", ["cp", *sys.argv[1:]])
         finally:
             if child.poll() is None: child.terminate()
             child.wait(timeout=5)
+
+    def test_repair_stops_go_bin_processes_and_escalates_past_a_term_refusal(self):
+        """cleanup_binaries rewrites $HOME/go/bin as well as $HOME/.local/bin, so
+        repair must stop processes running from either path first: replacing a
+        binary under a live process is the corruption this prevents. A process
+        that ignores SIGTERM must still be gone before cleanup, so termination
+        waits and escalates to SIGKILL on the same full-path match."""
+        stubborn = self.home / "go/bin/macroscope-mcp"
+        stubborn.parent.mkdir(parents=True)
+        stubborn.symlink_to("/usr/bin/python3")
+        child = subprocess.Popen([str(stubborn), "-c",
+            "import signal, time\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\ntime.sleep(30)\n"], env=self.env)
+        try:
+            self.env["MACROSCOPE_REPAIR_ONLY"] = "1"
+            self.install("--tools", "none")
+            self.assertEqual(child.wait(timeout=5), -signal.SIGKILL, "TERM-ignoring go/bin process outlived repair")
+            self.assertFalse(stubborn.exists() or stubborn.is_symlink(), "repair left the go/bin binary it rewrites")
+        finally:
+            if child.poll() is None: child.kill()
+            child.wait(timeout=5)
+
+    def test_recovery_marker_symlink_planted_after_the_lock_check_is_not_followed(self):
+        """acquire_install_lock inspects the recovery marker before staging and
+        downloading, so its verdict is stale by the time the marker is written.
+        A symlink planted in that window must not be followed: the installer
+        refuses, and the file it aimed at keeps its contents."""
+        outside = self.root / "precious.toml"
+        outside.write_text("user configuration\n")
+        cp = self.bin / "cp"
+        cp.write_text('''#!/usr/bin/python3
+import os, sys
+marker = os.path.join(os.environ["HOME"], ".local/state/macroscope/install-recovery")
+if os.path.isdir(os.path.dirname(marker)) and not os.path.lexists(marker):
+    os.symlink(os.path.join(os.environ["FIXTURE_ROOT"], "precious.toml"), marker)
+os.execv("/bin/cp", ["cp", *sys.argv[1:]])
+''')
+        cp.chmod(0o755)
+        self.assertIn("recovery marker", self.install("--tools", "all", expected=1))
+        self.assertEqual(outside.read_text(), "user configuration\n")
+        self.assertFalse((self.home / ".local/bin/macroscope").exists())
+
+    def test_null_registry_containers_do_not_abort_the_installer(self):
+        """Registry files another tool wrote can carry a null plugin container.
+        A present key holding null is not a missing key, so `.get(k, default)`
+        and `setdefault` both hand back the null and the next iteration raises.
+        Nothing foreign is registered in a null container: there is nothing to
+        preserve and no reason to refuse. This is reached whenever the host is
+        selected, so it is the install and update path, not repair, where
+        SELECTED_TOOLS is empty and the ownership loop never executes."""
+        marketplace = self.home / ".agents/plugins/marketplace.json"
+        installed = self.home / ".claude/plugins/installed_plugins.json"
+        for path in (marketplace, installed):
+            path.parent.mkdir(parents=True)
+            path.write_text('{"plugins": null}')
+        self.install("--tools", "claude,codex")
+        self.assertEqual([entry["name"] for entry in json.loads(marketplace.read_text())["plugins"]], ["macroscope"])
+        self.assertIn("macroscope@macroscope-local", json.loads(installed.read_text())["plugins"])
 
     def test_symlinked_opencode_skill_is_rejected_without_target_mutation(self):
         foreign = self.root / "foreign"

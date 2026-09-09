@@ -32,7 +32,8 @@ SAFE_RM
 cat > "$SAFETY_BIN/pgrep" <<'SAFE_PGREP'
 #!/usr/bin/python3
 import os, re, sys
-patterns = ["^" + re.escape(os.path.join(os.environ["HOME"], ".local/bin", name)) + r"([[:space:]]|$)" for name in ("macroscope", "macroscope-mcp")]
+patterns = ["^" + re.escape(os.path.join(os.environ["HOME"], directory, name)) + r"([[:space:]]|$)"
+            for directory in (".local/bin", "go/bin") for name in ("macroscope", "macroscope-mcp")]
 if len(sys.argv) != 3 or sys.argv[1] != "-f" or sys.argv[2] not in patterns:
     if os.environ.get("MACROSCOPE_TEST_GUARD_LOG"):
         with open(os.environ["MACROSCOPE_TEST_GUARD_LOG"], "a") as f: f.write("process query escaped fixture\n")
