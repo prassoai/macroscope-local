@@ -29,17 +29,15 @@ for arg in sys.argv[1:]:
         raise SystemExit(97)
 os.execv("/bin/rm", ["rm", *sys.argv[1:]])
 SAFE_RM
+# Any command-line process search is a violation, not just an unowned one.
+# The installer identifies what to stop by the executable the kernel recorded
+# at exec time; searching the command line instead silently misses every PATH
+# invocation, whose argv[0] is the bare name and never the installation path.
 cat > "$SAFETY_BIN/pgrep" <<'SAFE_PGREP'
-#!/usr/bin/python3
-import os, re, sys
-patterns = ["^" + re.escape(os.path.join(os.environ["HOME"], directory, name)) + r"([[:space:]]|$)"
-            for directory in (".local/bin", "go/bin") for name in ("macroscope", "macroscope-mcp")]
-if len(sys.argv) != 3 or sys.argv[1] != "-f" or sys.argv[2] not in patterns:
-    if os.environ.get("MACROSCOPE_TEST_GUARD_LOG"):
-        with open(os.environ["MACROSCOPE_TEST_GUARD_LOG"], "a") as f: f.write("process query escaped fixture\n")
-    print("BLOCKED test process query outside fixture executable", file=sys.stderr)
-    raise SystemExit(97)
-os.execv("/usr/bin/pgrep", ["pgrep", *sys.argv[1:]])
+#!/bin/sh
+[ -z "${MACROSCOPE_TEST_GUARD_LOG:-}" ] || printf 'process matched by command line\n' >> "$MACROSCOPE_TEST_GUARD_LOG"
+printf 'BLOCKED command-line process search\n' >&2
+exit 97
 SAFE_PGREP
 cat > "$SAFETY_BIN/pkill" <<'SAFE_PKILL'
 #!/bin/sh

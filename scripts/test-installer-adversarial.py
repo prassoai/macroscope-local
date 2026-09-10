@@ -51,10 +51,14 @@ class InstallerTests(unittest.TestCase):
             "MACROSCOPE_CODEX_APP_BINARY": str(self.root / "missing-codex"),
             "MACROSCOPE_CHATGPT_APP_BINARY": str(self.root / "missing-chatgpt"),
         }
+        # pgrep and pkill are both violations now, not just pkill. The installer
+        # identifies what to stop by the executable the kernel recorded, so any
+        # command-line search is a regression to matching argv -- which silently
+        # misses every PATH invocation and can match unrelated sessions.
         for name in ("rm", "pgrep", "pkill"):
             guard = self.bin / name
             guard.write_text('''#!/usr/bin/python3
-import os, re, sys
+import os, sys
 name = os.path.basename(sys.argv[0])
 root = os.path.realpath(os.environ["FIXTURE_ROOT"])
 if name == "rm":
@@ -66,16 +70,9 @@ if name == "rm":
             print("BLOCKED test removal:", target, "outside", root, file=sys.stderr)
             raise SystemExit(97)
     os.execv("/bin/rm", ["rm", *sys.argv[1:]])
-elif name == "pgrep":
-    patterns = ["^" + re.escape(os.path.join(os.environ["HOME"], d, n)) + r"([[:space:]]|$)"
-                for d in (".local/bin", "go/bin") for n in ("macroscope", "macroscope-mcp")]
-    if len(sys.argv) != 3 or sys.argv[1] != "-f" or sys.argv[2] not in patterns:
-        with open(os.path.join(root, "guard-violations"), "a") as f: f.write("process query escaped fixture\\n")
-        raise SystemExit(97)
-    os.execv("/usr/bin/pgrep", ["pgrep", *sys.argv[1:]])
-else:
-    with open(os.path.join(root, "guard-violations"), "a") as f: f.write("bulk process termination blocked\\n")
-    raise SystemExit(97)
+with open(os.path.join(root, "guard-violations"), "a") as f:
+    f.write("installer matched processes by command line via %s\\n" % name)
+raise SystemExit(97)
 ''')
             guard.chmod(0o755)
         if os.environ.get("TEST_BASELINE_SANDBOX") == "1":
@@ -346,14 +343,16 @@ os.execv("/bin/cp", ["cp", *sys.argv[1:]])
         return result
 
     def test_repair_dry_run_preserves_install_state_and_owned_process(self):
+        """A dry run reports what a repair would do and must do none of it. The
+        installed binary is replaced with a real copy of /bin/sleep so the
+        running child is genuinely one of the processes a live repair stops:
+        the child holds the default SIGTERM disposition, so its survival is
+        proof that no signal was sent, not merely that none was fatal."""
         self.install("--tools", "all")
         executable = self.home / ".local/bin/macroscope"
         executable.unlink()
-        executable.symlink_to("/bin/sleep")
+        shutil.copy("/bin/sleep", executable)
         child = subprocess.Popen([str(executable), "30"], env=self.env)
-        guard = self.bin / "pgrep"
-        guard.write_text(guard.read_text().replace('if name == "rm":',
-            'if name == "pgrep":\n    with open(os.path.join(root, "process-queries"), "a") as f: f.write("queried\\n")\nif name == "rm":'))
         try:
             self.env["MACROSCOPE_REPAIR_ONLY"] = "1"
             for output_format in ("text", "json"):
@@ -362,11 +361,10 @@ os.execv("/bin/cp", ["cp", *sys.argv[1:]])
                     result = subprocess.run(self.command("--dry-run", "--format", output_format), env=self.env, capture_output=True, text=True, timeout=15)
                     after = self.metadata_snapshot()
                     changed = sorted(key for key in set(before) | set(after) if before.get(key) != after.get(key))
-                    print(json.dumps({"repairDryRunFormat": output_format, "changedPaths": changed, "ownedProcessExit": child.poll(), "processQueries": (self.root / "process-queries").exists(), "exitCode": result.returncode}), flush=True)
+                    print(json.dumps({"repairDryRunFormat": output_format, "changedPaths": changed, "ownedProcessExit": child.poll(), "exitCode": result.returncode}), flush=True)
                     self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                     self.assertEqual(before, after, "repair dry-run changed files, metadata, state, or lock")
-                    self.assertIsNone(child.poll(), "repair dry-run terminated its installed process")
-                    self.assertFalse((self.root / "process-queries").exists(), "repair dry-run queried processes")
+                    self.assertIsNone(child.poll(), "repair dry-run signalled its installed process")
                     if output_format == "json":
                         self.assertEqual(json.loads(result.stdout), {"success": True, "dryRun": True, "mode": "repair", "tools": ""})
                     else:
@@ -385,17 +383,41 @@ os.execv("/bin/cp", ["cp", *sys.argv[1:]])
                 self.assertEqual(list(self.home.iterdir()), [])
 
     def test_repair_preserves_unrelated_named_process(self):
+        """Sharing a basename with an installed binary is not grounds for being
+        killed. A real binary at an unowned path is the case that matters: it
+        would match any search by name, and its executable identity is the only
+        thing that distinguishes it from the file repair actually owns."""
         foreign = self.root / "foreign/macroscope"
         foreign.parent.mkdir()
-        foreign.symlink_to("/bin/sleep")
+        shutil.copy("/bin/sleep", foreign)
         child = subprocess.Popen([str(foreign), "30"], env=self.env)
         try:
             self.env["MACROSCOPE_REPAIR_ONLY"] = "1"
             self.install("--tools", "none")
             self.assertIsNone(child.poll())
-            self.assertTrue(foreign.is_symlink())
+            self.assertTrue(foreign.exists())
         finally:
             if child.poll() is None: child.terminate()
+            child.wait(timeout=5)
+
+    def test_repair_stops_a_binary_launched_through_path(self):
+        """The ordinary way to run an installed CLI is by name, which leaves
+        argv[0] as the bare name and the absolute path nowhere in the command
+        line. Searching the command line for the installation path therefore
+        finds nothing and repair rewrites the binary under a live process --
+        exactly the corruption stopping processes first exists to prevent. The
+        process is identified by the executable the kernel recorded at exec."""
+        executable = self.home / ".local/bin/macroscope"
+        executable.parent.mkdir(parents=True)
+        shutil.copy("/bin/sleep", executable)
+        child = subprocess.Popen(["macroscope", "30"], executable=str(executable), env=self.env)
+        try:
+            self.env["MACROSCOPE_REPAIR_ONLY"] = "1"
+            self.install("--tools", "none")
+            self.assertEqual(child.wait(timeout=5), -signal.SIGTERM,
+                             "repair left a PATH-invoked process running from the binary it rewrites")
+        finally:
+            if child.poll() is None: child.kill()
             child.wait(timeout=5)
 
     def test_repair_stops_go_bin_processes_and_escalates_past_a_term_refusal(self):
@@ -403,12 +425,11 @@ os.execv("/bin/cp", ["cp", *sys.argv[1:]])
         repair must stop processes running from either path first: replacing a
         binary under a live process is the corruption this prevents. A process
         that ignores SIGTERM must still be gone before cleanup, so termination
-        waits and escalates to SIGKILL on the same full-path match."""
+        waits and escalates to SIGKILL on the same executable identity."""
         stubborn = self.home / "go/bin/macroscope-mcp"
         stubborn.parent.mkdir(parents=True)
-        stubborn.symlink_to("/usr/bin/python3")
-        child = subprocess.Popen([str(stubborn), "-c",
-            "import signal, time\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\ntime.sleep(30)\n"], env=self.env)
+        shutil.copy("/bin/sh", stubborn)
+        child = subprocess.Popen([str(stubborn), "-c", 'trap "" TERM; while :; do sleep 1; done'], env=self.env)
         try:
             self.env["MACROSCOPE_REPAIR_ONLY"] = "1"
             self.install("--tools", "none")
@@ -417,6 +438,51 @@ os.execv("/bin/cp", ["cp", *sys.argv[1:]])
         finally:
             if child.poll() is None: child.kill()
             child.wait(timeout=5)
+
+    def test_install_lock_relinked_after_validation_is_refused_without_truncating_it(self):
+        """acquire_install_lock validates the lock pathname and then opens it, and
+        the validation is stale the moment it returns. So the open must destroy
+        nothing -- `exec 9>` is O_TRUNC and would empty whatever it lands on --
+        and the descriptor must be proved to be the file the pathname still
+        names before the lock is taken. A hard link planted in that window is
+        the reachable case: it is not a symlink, so every pathname check passes,
+        and it aims the installer at a file with another name and other
+        contents."""
+        precious = self.root / "precious.toml"
+        precious.write_text("user configuration\n")
+        shim = self.bin / "mkdir"
+        shim.write_text(f'''#!/usr/bin/python3
+import os, subprocess, sys
+subprocess.run(["/bin/mkdir", *sys.argv[1:]], check=True)
+lock = os.path.join(os.environ["HOME"], ".local/state/macroscope/install.lock")
+if os.path.isdir(os.path.dirname(lock)) and not os.path.lexists(lock):
+    os.link({str(precious)!r}, lock)
+''')
+        shim.chmod(0o755)
+        result = subprocess.run(self.command("--tools", "none"), env=self.env, capture_output=True, text=True, timeout=30)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Installer lock", result.stdout + result.stderr)
+        self.assertEqual(precious.read_text(), "user configuration\n",
+                         "the installer truncated the file its lock was hard-linked to")
+
+    def test_repair_refuses_to_replace_a_foreign_codex_registration(self):
+        """A repair selects no tools, so gating the foreign-source refusal on the
+        selected tool list disarmed it on the one path that most needs it:
+        repair is what goes on to delete $HOME/plugins/macroscope. A
+        registration whose source is not one we write is somebody else's
+        plugin, and repair must refuse rather than remove it."""
+        marketplace = self.home / ".agents/plugins/marketplace.json"
+        marketplace.parent.mkdir(parents=True)
+        marketplace.write_text(json.dumps({"name": "local-user-plugins", "plugins": [
+            {"name": "macroscope", "source": {"source": "git", "path": "https://example.invalid/other.git"}}]}))
+        foreign = self.home / "plugins/macroscope"
+        foreign.mkdir(parents=True)
+        (foreign / "plugin.json").write_text('{"name": "macroscope"}\n')
+        self.env["MACROSCOPE_REPAIR_ONLY"] = "1"
+        result = subprocess.run(self.command("--tools", "none"), env=self.env, capture_output=True, text=True, timeout=30)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("foreign source", result.stdout + result.stderr)
+        self.assertTrue((foreign / "plugin.json").exists(), "repair deleted a foreign Codex plugin")
 
     def test_recovery_marker_symlink_planted_after_the_lock_check_is_not_followed(self):
         """acquire_install_lock inspects the recovery marker before staging and

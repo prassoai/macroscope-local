@@ -436,6 +436,65 @@ class SyncTests(unittest.TestCase):
                     signal.signal(sig, old_handler)
                 self.assertEqual(before, snapshot(self.output))
 
+    def test_signal_during_cleanup_still_releases_the_sync_lock(self):
+        """Cleanup removes the transaction and then releases the lock, and a
+        signal landing between the two is the worst possible moment: the sync
+        is over, but the lock it left behind fails every later sync until a
+        human deletes it. Cleanup therefore runs with the termination signals
+        ignored, so an interrupt cannot separate the two removals."""
+        for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+            with self.subTest(signal=sig):
+                shutil.rmtree(self.output)
+                self.output.mkdir()
+                original = SYNC.remove_tree_at
+
+                def signalling_remove(name, dir_fd, _signal=sig):
+                    os.kill(os.getpid(), _signal)
+                    return original(name, dir_fd)
+
+                old_handler = signal.signal(sig, SYNC.interrupted)
+                try:
+                    with mock.patch.object(SYNC, "remove_tree_at", side_effect=signalling_remove):
+                        with contextlib.suppress(InterruptedError):
+                            self.sync()
+                finally:
+                    signal.signal(sig, old_handler)
+                self.assertFalse((self.output / SYNC.LOCK_NAME).exists(),
+                                 "a signal during cleanup stranded the sync lock")
+                self.assertEqual([path.name for path in self.output.iterdir()
+                                  if path.name.startswith(".macroscope-sync-")], [],
+                                 "a signal during cleanup stranded the transaction directory")
+
+    def test_output_replaced_during_extraction_cannot_relocate_the_transaction(self):
+        """--output is validated and then git and tar run for seconds before
+        anything is created inside it, so every check made beforehand is stale.
+        If the lock and the transaction are named by that pathname instead of
+        by a descriptor opened before the slow work, replacing the pathname
+        with a symlink during extraction relocates the whole transaction, and
+        the bundle is published into the attacker's directory rather than the
+        one the operator named."""
+        decoy = self.root / "decoy"
+        decoy.mkdir()
+        (decoy / "untouched.txt").write_text("decoy contents")
+        before = snapshot(decoy)
+        moved = self.root / "moved-aside"
+        original = SYNC.extract_source
+
+        def swap_output_then_extract(repo, ref, destination):
+            result = original(repo, ref, destination)
+            self.output.rename(moved)
+            self.output.symlink_to(decoy)
+            return result
+
+        with mock.patch.object(SYNC, "extract_source", side_effect=swap_output_then_extract):
+            with self.assertRaises(OSError):
+                self.sync()
+        self.assertEqual(before, snapshot(decoy), "the sync published into the swapped-in directory")
+        self.assertFalse((moved / SYNC.LOCK_NAME).exists(), "the swap stranded the sync lock")
+        self.assertEqual([path.name for path in moved.iterdir()
+                          if path.name.startswith(".macroscope-sync-")], [],
+                         "the swap stranded the transaction directory")
+
     def test_restore_failure_keeps_original_backups_and_blocks_next_sync(self):
         self.seed_owned_and_foreign()
         original_market = (self.output / ".claude-plugin/marketplace.json").read_bytes()

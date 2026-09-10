@@ -6,10 +6,10 @@ name: Installer tests
 # every transaction, rollback and filesystem-race guarantee they encode could
 # regress without a red check.
 #
-# Linux only. The suites assume GNU procps `pgrep -f` and a bash new enough for
-# the installer's own requirements; the macOS runners ship bash 3.2, so native
-# macOS validation stays a manual step rather than a check that is red by
-# construction.
+# Linux only. The suites assume /proc for executable identity and a bash new
+# enough for the installer's own requirements; the macOS runners ship bash 3.2,
+# so native macOS validation stays a manual step rather than a check that is
+# red by construction.
 
 on:
   pull_request:

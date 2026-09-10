@@ -1119,40 +1119,78 @@ remove_dir_if_present() {
   return 1
 }
 
+stop_owned_processes() {
+  # Stop every process running one of the given executables, and do not return
+  # until they are gone. Identity is the executable the kernel recorded at exec
+  # time, never the command line: a PATH invocation leaves argv[0] as the bare
+  # name, so an absolute-path `pgrep -f` pattern matches nothing and the caller
+  # goes on to rewrite a binary underneath a live process.
+  #
+  # Path equality, not inode equality. Resolving both sides to an inode looks
+  # stricter and is much looser in practice: whenever an owned path is a
+  # symlink to a shared interpreter, every process running that interpreter
+  # becomes a match, including this helper.
+  python3 - "$@" <<'PY'
+import os, signal, subprocess, sys, time
+
+owned = set(sys.argv[1:])
+
+def linux_candidates():
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        try:
+            executable = os.readlink("/proc/" + entry + "/exe")
+        except OSError:
+            continue  # exited, or another user's process
+        # A binary that has already been rewritten or unlinked keeps running,
+        # and the kernel marks the path it still names. That process is exactly
+        # the one to stop, so the marker is stripped, not treated as a mismatch.
+        deleted = " (deleted)"
+        yield int(entry), executable[:-len(deleted)] if executable.endswith(deleted) else executable
+
+def macos_candidates():
+    # BSD ps: -x without -a keeps this to the current user's processes, and
+    # comm is the path handed to execve. -ww disables the column truncation
+    # that would otherwise clip a long HOME out of the path and match nothing,
+    # and a failing ps is fatal: no output is indistinguishable from no
+    # matching process, and the caller would rewrite a live binary.
+    listing = subprocess.run(["ps", "-ww", "-xo", "pid=,comm="], capture_output=True, text=True, check=True)
+    for line in listing.stdout.splitlines():
+        fields = line.strip().split(None, 1)
+        if len(fields) == 2 and fields[0].isdigit():
+            yield int(fields[0]), fields[1]
+
+def owned_pids():
+    return [pid for pid, executable in (linux_candidates() if os.path.isdir("/proc") else macos_candidates())
+            if executable in owned]
+
+def signal_all(pids, number):
+    for pid in pids:
+        try:
+            os.kill(pid, number)
+        except OSError:
+            pass  # exited between the scan and the signal
+
+# Every poll re-matches, so a PID recycled during the wait is only ever
+# escalated when the new process is itself running one of these executables.
+remaining = owned_pids()
+signal_all(remaining, signal.SIGTERM)
+deadline = time.monotonic() + 5
+while remaining and time.monotonic() < deadline:
+    time.sleep(0.1)
+    remaining = owned_pids()
+signal_all(remaining, signal.SIGKILL)
+PY
+}
+
 kill_running_processes() {
   # A repair owns these per-user installation paths. Matching a process name
   # would also terminate unrelated sessions and bypass disposable HOME roots.
   # The list must cover every path cleanup_binaries rewrites, or repair would
   # replace a binary underneath a process still running from it.
-  local executable="" pattern="" pids="" pid="" waited=0
-  command -v pgrep >/dev/null 2>&1 || return 0
-  for executable in "$HOME/.local/bin/macroscope" "$HOME/.local/bin/macroscope-mcp" \
-                    "$HOME/go/bin/macroscope" "$HOME/go/bin/macroscope-mcp"; do
-    pattern="$(python3 - "$executable" <<'PY_PATTERN'
-import re, sys
-print("^" + re.escape(sys.argv[1]) + r"([[:space:]]|$)")
-PY_PATTERN
-)"
-    pids="$(pgrep -f "$pattern" 2>/dev/null || true)"
-    while IFS= read -r pid; do
-      [ -n "$pid" ] || continue
-      kill "$pid" 2>/dev/null || true
-    done <<< "$pids"
-    # Wait for the owned paths to go quiet before cleanup_binaries runs. Each
-    # poll re-matches the same path pattern, so a PID recycled during the wait
-    # is only ever escalated when the new process is itself one of ours.
-    waited=0
-    pids="$(pgrep -f "$pattern" 2>/dev/null || true)"
-    while [ -n "$pids" ] && [ "$waited" -lt 50 ]; do
-      sleep 0.1
-      waited=$((waited + 1))
-      pids="$(pgrep -f "$pattern" 2>/dev/null || true)"
-    done
-    while IFS= read -r pid; do
-      [ -n "$pid" ] || continue
-      kill -9 "$pid" 2>/dev/null || true
-    done <<< "$pids"
-  done
+  stop_owned_processes "$HOME/.local/bin/macroscope" "$HOME/.local/bin/macroscope-mcp" \
+                       "$HOME/go/bin/macroscope" "$HOME/go/bin/macroscope-mcp"
 }
 
 cleanup_binaries() {
@@ -2112,11 +2150,19 @@ PY
 }
 
 validate_existing_integrations() {
-  local check_codex=0
-  if repair_only_requested || tool_selected codex || { [ "$INSTALL_MODE" = "update" ] && tool_installed codex; }; then check_codex=1; fi
-  python3 - "$HOME" "$(get_codex_home)" "$(get_opencode_config_dir)" "$SELECTED_TOOLS" "$check_codex" <<'PY'
-import json, os, pathlib, re, sys
-home, codex, opencode, selected, check_codex = sys.argv[1:]
+  # Two different questions. The marketplace name is validated whenever this
+  # run touches Codex state at all, including an update that deselects Codex
+  # and so removes only our own. The foreign-source refusal is narrower: it
+  # applies when this run would rewrite or delete the registration itself,
+  # which is repair as much as it is an explicit Codex selection. Repair was
+  # the gap -- it selects no tools, so keying the refusal off the selected
+  # tool list disarmed it on the path that deletes $HOME/plugins/macroscope.
+  local check_source=0 check_codex=0
+  if repair_only_requested || tool_selected codex; then check_source=1; fi
+  if [ "$check_source" -eq 1 ] || { [ "$INSTALL_MODE" = "update" ] && tool_installed codex; }; then check_codex=1; fi
+  python3 - "$HOME" "$check_codex" "$check_source" <<'PY'
+import json, pathlib, re, sys
+home, check_codex, check_source = sys.argv[1:]
 marketplace = pathlib.Path(home) / ".agents/plugins/marketplace.json"
 if check_codex == "1" and marketplace.exists():
     # Unreadable content still refuses, but as a message that names the file
@@ -2131,7 +2177,7 @@ if check_codex == "1" and marketplace.exists():
     name = data.get("name", "local-user-plugins")
     if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", name):
         raise SystemExit("Invalid Codex marketplace name; refusing to change plugin paths.")
-    if "codex" in selected.split(","):
+    if check_source == "1":
         # Repair is the recovery path for a damaged install, so damaged data
         # must not abort it. A null or non-list value registers no plugin and
         # a non-object entry is not a Macroscope registration: nothing foreign
@@ -2766,20 +2812,10 @@ clean_legacy_mcp_state() {
   [ "$INSTALL_MODE" = "update" ] || return 0
   step "Cleaning legacy MCP artifacts..."
   local legacy_mcp="$HOME/.local/bin/macroscope-mcp"
-  if command -v pgrep >/dev/null 2>&1; then
-    local legacy_pattern="" legacy_pids=""
-    legacy_pattern="$(python3 - "$legacy_mcp" <<'PY'
-import re, sys
-print("^" + re.escape(sys.argv[1]) + r"([[:space:]]|$)")
-PY
-)"
-    legacy_pids="$(pgrep -f "$legacy_pattern" 2>/dev/null || true)"
-    if [ -n "$legacy_pids" ]; then
-      while IFS= read -r pid; do
-        [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
-      done <<< "$legacy_pids"
-    fi
-  fi
+  # Unlinking a binary out from under a live process is the same corruption
+  # kill_running_processes exists to prevent, so this waits and escalates on
+  # the same executable identity rather than sending one hopeful SIGTERM.
+  stop_owned_processes "$legacy_mcp"
   rm -f "$legacy_mcp"
   local codex_home="$(get_codex_home)"
   python3 - "$(get_claude_state_file)" "$HOME/.cursor/mcp.json" "$codex_home/config.toml" <<'PY'
@@ -2952,25 +2988,54 @@ PY
   [ "$validation_status" -eq 0 ] || return "$validation_status"
   mkdir -p "$state_dir" || return $?
   local lock_file="$state_dir/install.lock"
+  # Create the lock without following a symlink. The validation above is stale
+  # the moment it returns, and `touch` follows symlinks, so creation has to
+  # carry O_NOFOLLOW itself. On an existing path O_EXCL fails first and the
+  # descriptor check below is what decides.
+  python3 - "$lock_file" <<'PY'
+import os, sys
+try:
+    os.close(os.open(sys.argv[1], os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600))
+except FileExistsError:
+    pass
+PY
+  local create_status=$?
+  [ "$create_status" -eq 0 ] || return "$create_status"
   if [ -L "$lock_file" ]; then
     error "Installer lock is a symlink; refusing to change installation state."
     return 1
   fi
+  # Read-write, never `exec 9>`: that is O_TRUNC, so a symlink planted in the
+  # window between the check above and this open would have its target emptied
+  # before anything noticed. O_RDWR|O_CREAT destroys nothing whatever it opens.
+  #
   # flock is associated with this open file description, retained by Bash and
   # inherited children. A killed parent cannot release the lock while a copy
   # child is still writing. The lock file must not be unlinked after use.
-  (umask 077; touch "$lock_file") || return $?
-  exec 9>"$lock_file" || return $?
-  if ! python3 - <<'PY'
-import fcntl
+  exec 9<>"$lock_file" || return $?
+  # Bash cannot open with O_NOFOLLOW, so prove after the fact that fd 9 is the
+  # file the pathname still names: same inode, an owned regular file, one link.
+  # Revalidation and the lock happen in one step, leaving no window between
+  # them where the pathname could be swapped again.
+  python3 - "$lock_file" <<'PY'
+import fcntl, os, stat, sys
+held, named = os.fstat(9), os.lstat(sys.argv[1])
+if ((held.st_dev, held.st_ino) != (named.st_dev, named.st_ino) or not stat.S_ISREG(held.st_mode)
+        or held.st_nlink != 1 or held.st_uid != os.getuid()):
+    raise SystemExit(2)
 try:
     fcntl.flock(9, fcntl.LOCK_EX | fcntl.LOCK_NB)
 except BlockingIOError:
-    raise SystemExit(1)
+    raise SystemExit(75)
 PY
-  then
+  local lock_status=$?
+  if [ "$lock_status" -eq 75 ]; then
     error "Another Macroscope installer is active; retry after it finishes."
     return 75
+  fi
+  if [ "$lock_status" -ne 0 ]; then
+    error "Installer lock is not the file that was opened; refusing to change installation state."
+    return 1
   fi
   RECOVERY_MARKER="$state_dir/install-recovery"
   if [ -e "$RECOVERY_MARKER" ] || [ -L "$RECOVERY_MARKER" ]; then
