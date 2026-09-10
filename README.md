@@ -63,6 +63,17 @@ Integrations honor `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `OPENCODE_CONFIG_DIR`, and
 macroscope uninstall
 ```
 
+## Source
+
+This repository is a publish mirror. The installer, the plugin bundle, and the
+generated skills are authored in `prassoai/back` under
+`tools/cmd/macrodaemon/installer/` and `tools/cmd/macrodaemon/public-plugin/`,
+reviewed there through normal pull requests, and pushed here by the CLI release
+workflow together with each GitHub release. Pull requests that edit those files
+here will be overwritten by the next release; open them against `back` instead.
+
+Issues are welcome here.
+
 ## Documentation
 
 Full documentation is available at [docs.macroscope.com/cli](https://docs.macroscope.com/cli).
