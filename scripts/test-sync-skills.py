@@ -88,10 +88,10 @@ class SyncTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def sync(self, output=None, repo=None, ref=None):
+    def sync(self, output=None, repo=None, ref=None, adopt_unmarked=False):
         stdout = io.StringIO()
         with contextlib.redirect_stdout(stdout):
-            SYNC.sync(repo or OPTIONS.back_repo, ref or OPTIONS.ref, output or self.output)
+            SYNC.sync(repo or OPTIONS.back_repo, ref or OPTIONS.ref, output or self.output, adopt_unmarked)
         return stdout.getvalue()
 
     def strip_generated_markers(self):
@@ -187,7 +187,9 @@ class SyncTests(unittest.TestCase):
             skill = self.output / "skills" / name / "SKILL.md"
             skill.write_text("\n".join(line for line in skill.read_text().split("\n")
                                       if not line.startswith(SYNC.GENERATED_MARKER)))
-        self.sync()
+        # The real migration onto the published 1.5.1 checkout: unmarked skills
+        # are claimed once, explicitly, and every sync after this needs no flag.
+        self.sync(adopt_unmarked=True)
         self.assertIn("macroscope update --yes", (self.output / "skills/codereview/SKILL.md").read_text())
         self.assertNotIn("--in-place", (self.output / "skills/codereview/SKILL.md").read_text())
 
@@ -342,26 +344,40 @@ class SyncTests(unittest.TestCase):
             self.sync()
         self.assertEqual(before, snapshot(self.output))
 
-    def test_marker_free_legacy_layout_stays_owned_for_migration(self):
+    def test_marker_free_legacy_layout_is_adoptable_for_migration(self):
         """The bundle that produced today's public checkout predates the
-        generated marker and leads with the prerequisite block instead.
-        Requiring both markers would fail the first migration sync onto that
-        checkout, so the legacy shape has to remain owned."""
+        generated marker and leads with the prerequisite block instead. Refusing
+        that shape outright would make the first migration sync onto that
+        checkout impossible, so it has to remain claimable on request."""
         self.sync()
         self.strip_generated_markers()
-        self.sync()
+        self.sync(adopt_unmarked=True)
         self.assertIn(SYNC.GENERATED_MARKER, (self.output / "skills/codereview/SKILL.md").read_text())
+
+    def test_unmarked_skill_is_refused_until_adoption_is_asked_for(self):
+        """Leading with the prerequisite block is evidence that an earlier sync
+        wrote the file, not proof of it: any author can produce that shape, and
+        deciding ownership by shape alone is what lets a foreign skill be
+        overwritten. So the default refuses and preserves the destination, and
+        the operator claims a pre-marker checkout explicitly, once."""
+        self.sync()
+        self.strip_generated_markers()
+        before = snapshot(self.output)
+        with self.assertRaisesRegex(ValueError, "carries no generated marker"):
+            self.sync()
+        self.assertEqual(before, snapshot(self.output))
 
     def test_shape_only_adoption_is_announced_and_then_extinguishes(self):
         """Adopting an unmarked skill is the one replacement decided by the body's
         shape rather than by a marker this script wrote, so it must be visible in
         the sync output instead of silently overwriting the destination. Writing
-        the marker retires the branch: the next sync owns the file outright and
-        announces nothing, so a recurring notice means something is restoring the
+        the marker retires the branch: the next sync owns the file outright, needs
+        no flag and announces nothing, so a recurring notice -- or a later sync
+        that still needs --adopt-unmarked -- means something is restoring the
         legacy shape underneath us."""
         self.sync()
         self.strip_generated_markers()
-        adopted = [line for line in self.sync().splitlines() if line.startswith("adopting:")]
+        adopted = [line for line in self.sync(adopt_unmarked=True).splitlines() if line.startswith("adopting:")]
         self.assertEqual(sorted(line.rsplit("/", 1)[1] for line in adopted), ["autoloop", "codereview"])
         self.assertNotIn("adopting:", self.sync())
 

@@ -175,14 +175,14 @@ def skill_ownership(path, name):
     if body.startswith(GENERATED_MARKER):
         return "generated"
     # Bundles written before the generated marker existed lead with PREREQ, and
-    # the published checkout is still one of them, so that shape stays owned for
-    # the one-time migration. Every sync writes the marker, so the branch
-    # extinguishes itself after one run. It is reported rather than silently
-    # taken: it is the only replacement decided by shape alone.
+    # the published checkout is still one of them, so that shape has to remain
+    # recognizable for the one-time migration. It is reported separately, never
+    # as ownership: shape is a weaker claim than a marker this script wrote, and
+    # the caller decides whether it is enough.
     return "legacy" if body.startswith(PREREQ) else None
 
 
-def prepare_targets(root, output, transaction, marketplace, skills):
+def prepare_targets(root, output, transaction, marketplace, skills, adopt_unmarked):
     staged = transaction / "staged"
     staged.mkdir()
     plugin_target = output / "plugins/macroscope"
@@ -223,6 +223,14 @@ def prepare_targets(root, output, transaction, marketplace, skills):
             if ownership is None:
                 fail(f"unowned standalone skill destination: {target}")
             if ownership == "legacy":
+                # Shape alone never authorizes a replacement. A body that leads
+                # with the prerequisite block is evidence of an earlier sync, not
+                # proof of one, so the operator has to say so for the single
+                # migration run; the marker it then writes owns the file outright
+                # and no later sync needs the flag.
+                if not adopt_unmarked:
+                    fail(f"standalone skill destination carries no generated marker: {target}; "
+                         "pass --adopt-unmarked to claim a pre-marker sync once")
                 print(f"adopting: unmarked standalone skill from an earlier sync: {target}")
             shutil.copytree(target, candidate, symlinks=True)
         else:
@@ -432,7 +440,7 @@ def discard(parent_fd, name, discarded_fd, slot):
         pass
 
 
-def sync(repo, ref, output):
+def sync(repo, ref, output, adopt_unmarked=False):
     repo = Path(repo).resolve(strict=True)
     output = Path(output).absolute()
     if output.is_symlink() or not output.is_dir():
@@ -465,7 +473,7 @@ def sync(repo, ref, output):
                                                                 "transaction": str(transaction)}) + "\n")
                 finally:
                     os.close(lock_fd)
-                targets = prepare_targets(root, output, transaction, marketplace, skills)
+                targets = prepare_targets(root, output, transaction, marketplace, skills, adopt_unmarked)
                 try:
                     apply_targets(output, targets, transaction, output_fd)
                 except RuntimeError:
@@ -496,11 +504,13 @@ def main(argv, default_output):
     parser.add_argument("back_repo")
     parser.add_argument("--ref", required=True, help="full source commit SHA; dirty files are ignored")
     parser.add_argument("--output", default=str(default_output), help="existing output directory (default: script repository)")
+    parser.add_argument("--adopt-unmarked", action="store_true",
+                        help="claim standalone skills written before the generated marker existed; needed once per checkout")
     args = parser.parse_args(argv)
     for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         signal.signal(sig, interrupted)
     try:
-        sync(args.back_repo, args.ref, args.output)
+        sync(args.back_repo, args.ref, args.output, args.adopt_unmarked)
     except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError, tarfile.TarError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
