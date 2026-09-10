@@ -2963,6 +2963,20 @@ PY
   done < <(rollback_targets)
 }
 
+recorded_recovery_dir() {
+  # Print the recovery directory a marker records, or nothing at all. Read with
+  # O_NOFOLLOW: a marker that is a symlink records nothing this installer
+  # wrote, so it names no backups to protect and is stale by definition.
+  python3 - "$1" <<'PY'
+import os, sys
+try:
+    with os.fdopen(os.open(sys.argv[1], os.O_RDONLY | os.O_NOFOLLOW), encoding="utf-8") as stream:
+        print(stream.readline().strip())
+except OSError:
+    pass
+PY
+}
+
 acquire_install_lock() {
   # The binary always belongs to HOME even when install.json uses XDG state.
   # All installers for that HOME must share one transaction/recovery gate.
@@ -3038,9 +3052,23 @@ PY
     return 1
   fi
   RECOVERY_MARKER="$state_dir/install-recovery"
+  # The marker exists for one reason: to stop a later run from overwriting
+  # backups a killed installer left behind. That reason expires with the
+  # backups. It records them under $TMPDIR, which the OS reaps, and the CLI
+  # kills this script with SIGKILL at its own two-minute update timeout -- so a
+  # slow link on an ordinary machine leaves a marker pointing at nothing. If
+  # that marker still refused, it would wedge update, fresh install and repair
+  # alike, and repair is the recovery path. Read what it records and decide.
   if [ -e "$RECOVERY_MARKER" ] || [ -L "$RECOVERY_MARKER" ]; then
-    error "A previous installation was interrupted. Recovery location is recorded in $RECOVERY_MARKER; restore it before retrying."
-    return 1
+    local recovery_dir=""
+    recovery_dir="$(recorded_recovery_dir "$RECOVERY_MARKER")" || recovery_dir=""
+    if [ -n "$recovery_dir" ] && [ -d "$recovery_dir" ]; then
+      error "A previous installation was interrupted and its backups are still at $recovery_dir."
+      error "Restore what you need from there, then clear the marker: rm -f '$RECOVERY_MARKER'"
+      return 1
+    fi
+    warn "Ignoring a stale recovery marker: the backups it recorded are gone."
+    rm -f "$RECOVERY_MARKER"
   fi
 }
 

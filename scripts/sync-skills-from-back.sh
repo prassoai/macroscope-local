@@ -458,13 +458,33 @@ def sync(repo, ref, output, adopt_unmarked=False):
         with tempfile.TemporaryDirectory(prefix="macroscope-sync-source-") as source_dir:
             root, resolved = extract_source(repo, ref, Path(source_dir))
             marketplace, skills, version = validate_bundle(root)
-            try:
-                os.mkdir(LOCK_NAME, 0o700, dir_fd=output_fd)
-            except FileExistsError:
-                fail(f"sync lock exists; another sync or interrupted recovery owns {output / LOCK_NAME}")
             transaction_name = None
             keep_recovery = False
-            try:
+
+            def release():
+                # Removing the transaction and releasing the lock is one
+                # indivisible step. A signal landing between them strands the
+                # lock, and a stranded lock fails every later sync.
+                if keep_recovery:
+                    return
+                with deferred_signals():
+                    if transaction_name is not None:
+                        remove_tree_at(transaction_name, output_fd)
+                    remove_tree_at(LOCK_NAME, output_fd)
+
+            with contextlib.ExitStack() as cleanup:
+                # Creating the lock and arming its removal is also one step, for
+                # the same reason: the handler raises from whatever instruction
+                # the signal interrupts, so an interrupt landing between a bare
+                # mkdir and the try that removes it strands a lock nothing owns.
+                # Deferring across both closes that window; a lock held by
+                # somebody else is left alone, having never been armed.
+                with deferred_signals():
+                    try:
+                        os.mkdir(LOCK_NAME, 0o700, dir_fd=output_fd)
+                    except FileExistsError:
+                        fail(f"sync lock exists; another sync or interrupted recovery owns {output / LOCK_NAME}")
+                    cleanup.callback(release)
                 transaction_name = make_transaction(output_fd)
                 transaction = output / transaction_name
                 lock_fd = open_dir(LOCK_NAME, dir_fd=output_fd)
@@ -482,15 +502,6 @@ def sync(repo, ref, output, adopt_unmarked=False):
                 for target in targets:
                     print(f"synced: {target.relative}")
                 print(f"done: source {resolved}, plugin {version}, {len(skills)} standalone skill(s)")
-            finally:
-                # Removing the transaction and releasing the lock is one
-                # indivisible step. A signal landing between them strands the
-                # lock, and a stranded lock fails every later sync.
-                if not keep_recovery:
-                    with deferred_signals():
-                        if transaction_name is not None:
-                            remove_tree_at(transaction_name, output_fd)
-                        remove_tree_at(LOCK_NAME, output_fd)
     finally:
         os.close(output_fd)
 

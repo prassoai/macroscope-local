@@ -627,13 +627,40 @@ os.execv("/bin/cp", ["cp", *sys.argv[1:]])
         self.assertEqual(child.returncode, 0, output)
 
     def test_repair_cannot_destroy_pending_recovery(self):
+        """Backups a killed installer left behind outrank anything a later run
+        wants to do, repair included: repair rewrites the very binaries those
+        backups hold. The refusal must also name the way out, because the user
+        cannot guess which file to remove."""
         self.install("--tools", "all")
+        recovery = self.root / "owned-recovery"
+        recovery.mkdir()
         marker = self.home / ".local/state/macroscope/install-recovery"
-        marker.write_text(str(self.root / "owned-recovery") + "\n")
+        marker.write_text(str(recovery) + "\n")
         original = self.snapshot()
         self.env["MACROSCOPE_REPAIR_ONLY"] = "1"
-        self.assertIn("previous installation was interrupted", self.install("--tools", "none", expected=1))
+        output = self.install("--tools", "none", expected=1)
+        self.assertIn("previous installation was interrupted", output)
+        self.assertIn(f"rm -f '{marker}'", output, "the refusal did not name the command that clears it")
         self.assertEqual(original, self.snapshot())
+
+    def test_stale_recovery_marker_with_reaped_backups_does_not_wedge_the_installer(self):
+        """The marker records backups under $TMPDIR, which the OS reaps, and the
+        CLI kills this script with SIGKILL at its own two-minute update timeout
+        -- so an ordinary slow download on an ordinary machine leaves a marker
+        pointing at nothing. Refusing on it would wedge update, fresh install
+        and repair together, with repair being the documented recovery path and
+        no other code path removing the marker. A marker whose backups are gone
+        protects nothing, so it is reported and cleared rather than obeyed."""
+        self.install("--tools", "all")
+        marker = self.home / ".local/state/macroscope/install-recovery"
+        marker.write_text(str(self.root / "reaped-by-the-os") + "\n")
+        for mode in ({}, {"MACROSCOPE_REPAIR_ONLY": "1"}):
+            with self.subTest(repair=bool(mode)):
+                marker.write_text(str(self.root / "reaped-by-the-os") + "\n")
+                self.env.update(mode)
+                self.assertIn("stale recovery marker", self.install("--tools", "none"))
+                self.assertFalse(marker.exists(), "the stale marker survived the run that ignored it")
+                self.env.pop("MACROSCOPE_REPAIR_ONLY", None)
 
     def test_unrelated_malformed_codex_configuration_does_not_block_cli(self):
         marketplace = self.home / ".agents/plugins/marketplace.json"

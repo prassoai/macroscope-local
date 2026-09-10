@@ -34,8 +34,12 @@ def command(repo, *args):
 
 
 def export_committed(repo, ref, prefix, destination):
-    names = command(repo, "ls-tree", "-r", "--name-only", ref, "--", prefix).decode().splitlines()
-    for name in names:
+    # -z: git quotes any name containing a control or high-bit byte unless the
+    # output is NUL-delimited, so splitting decoded lines mangles a legal
+    # pathname into one git show cannot resolve, or splits it in two. surrogate-
+    # escape decoding round-trips bytes that are not valid UTF-8.
+    listing = command(repo, "ls-tree", "-r", "-z", "--name-only", ref, "--", prefix)
+    for name in (os.fsdecode(entry) for entry in listing.split(b"\0") if entry):
         relative = Path(name).relative_to(prefix) if prefix else Path(name)
         target = destination / relative
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -192,6 +196,19 @@ class SyncTests(unittest.TestCase):
         self.sync(adopt_unmarked=True)
         self.assertIn("macroscope update --yes", (self.output / "skills/codereview/SKILL.md").read_text())
         self.assertNotIn("--in-place", (self.output / "skills/codereview/SKILL.md").read_text())
+
+    def test_export_committed_reproduces_names_git_would_quote(self):
+        """Every candidate this suite compares against is built by exporting a
+        committed tree, so a pathname git quotes -- any control or high-bit byte
+        -- has to survive the round trip. Splitting decoded lines turns one such
+        name into a quoted string `git show` cannot resolve, or into two names,
+        and the expected tree is then silently wrong rather than loudly broken."""
+        repo = self.root / "quoted-names"
+        (repo / "prefix").mkdir(parents=True)
+        command(repo, "init", "-q")
+        (repo / "prefix" / "a\nb\tc").write_bytes(b"contents")
+        export_committed(repo, commit_fixture(repo), "prefix", self.root / "exported")
+        self.assertEqual((self.root / "exported/a\nb\tc").read_bytes(), b"contents")
 
     def test_dirty_source_is_ignored(self):
         repo, source, ref = self.fixture()
@@ -480,6 +497,38 @@ class SyncTests(unittest.TestCase):
                 self.assertEqual([path.name for path in self.output.iterdir()
                                   if path.name.startswith(".macroscope-sync-")], [],
                                  "a signal during cleanup stranded the transaction directory")
+
+    def test_signal_between_creating_the_lock_and_arming_its_removal_is_deferred(self):
+        """Creating the lock and registering its removal is the same indivisible
+        step as the cleanup itself, and for the same reason: the handler raises
+        from whatever instruction the signal interrupts, so an interrupt landing
+        after mkdir returns but before the removal is armed propagates out of a
+        sync that now owns a lock nothing will ever release -- and a stranded
+        lock fails every later sync until a human deletes it."""
+        for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+            with self.subTest(signal=sig):
+                shutil.rmtree(self.output)
+                self.output.mkdir()
+                real_mkdir = os.mkdir
+
+                def mkdir_then_signal(name, *args, _signal=sig, **kwargs):
+                    real_mkdir(name, *args, **kwargs)
+                    if name == SYNC.LOCK_NAME:
+                        # Restore first: os.supports_dir_fd holds the real
+                        # function object, and apply_targets probes membership.
+                        os.mkdir = real_mkdir
+                        os.kill(os.getpid(), _signal)
+
+                old_handler = signal.signal(sig, SYNC.interrupted)
+                os.mkdir = mkdir_then_signal
+                try:
+                    with contextlib.suppress(InterruptedError):
+                        self.sync()
+                finally:
+                    os.mkdir = real_mkdir
+                    signal.signal(sig, old_handler)
+                self.assertFalse((self.output / SYNC.LOCK_NAME).exists(),
+                                 "a signal before the lock's removal was armed stranded the lock")
 
     def test_output_replaced_during_extraction_cannot_relocate_the_transaction(self):
         """--output is validated and then git and tar run for seconds before
