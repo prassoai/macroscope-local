@@ -585,6 +585,50 @@ class SyncTests(unittest.TestCase):
             self.sync()
         self.assertEqual(before, snapshot(self.output))
 
+    def test_read_only_directory_in_an_owned_skill_does_not_strand_the_lock(self):
+        """An owned skill's extra files are preserved, and nothing constrains
+        their modes -- a read-only subdirectory is ordinary. Two copies of it
+        reach the transaction: copytree(symlinks=True) reproduces the mode into
+        the staged candidate, and the published tree is renamed into backups
+        wholesale. Cleanup then cannot unlink through it, and the sync that
+        already succeeded raises on the way out, leaving a lock that fails
+        every later sync. Removal restores the mode of each directory it is
+        about to delete."""
+        self.seed_owned_and_foreign()
+        locked = self.output / "skills/codereview/reference"
+        locked.mkdir()
+        (locked / "notes.md").write_text("extra resource in a read-only directory")
+        locked.chmod(0o500)
+        self.sync()
+        self.assertEqual((locked / "notes.md").read_text(), "extra resource in a read-only directory",
+                         "the preserved extra resource did not survive the sync")
+        self.assertFalse((self.output / SYNC.LOCK_NAME).exists(), "the sync lock was stranded")
+        self.assertEqual([path.name for path in self.output.iterdir()
+                          if path.name.startswith(".macroscope-sync-")], [],
+                         "the transaction directory was stranded")
+
+    def test_a_transaction_that_cannot_be_removed_still_releases_the_lock(self):
+        """The transaction and the lock are not equally important once the
+        publish has succeeded. What remains in the transaction is the
+        superseded copy of what was just published: leaving it wastes disk.
+        Leaving the lock wedges every later sync until a human deletes it. So
+        no failure removing the former may skip removing the latter, whatever
+        the cause -- the read-only directory above is one, and it will not be
+        the last."""
+        original = SYNC.remove_tree_at
+
+        def refuse_the_transaction(name, dir_fd):
+            if name.startswith(".macroscope-sync-"):
+                raise PermissionError(errno.EACCES, "simulated undeletable transaction")
+            return original(name, dir_fd)
+
+        with mock.patch.object(SYNC, "remove_tree_at", side_effect=refuse_the_transaction):
+            with contextlib.redirect_stderr(io.StringIO()) as stderr:
+                self.sync()
+        self.assertIn("could not remove", stderr.getvalue(), "the retained transaction was not reported")
+        self.assertFalse((self.output / SYNC.LOCK_NAME).exists(),
+                         "an undeletable transaction stranded the sync lock")
+
     def test_existing_lock_rejects_concurrent_sync_without_changes(self):
         (self.output / ".macroscope-sync.lock").mkdir()
         before = snapshot(self.output)

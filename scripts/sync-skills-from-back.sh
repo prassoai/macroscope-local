@@ -286,6 +286,18 @@ def remove_tree_at(name, dir_fd):
     primitive aimed wherever they like."""
     fd = open_dir(name, dir_fd=dir_fd)
     try:
+        # Unlinking an entry needs write permission on the directory holding
+        # it, and these trees carry whatever modes the checkout had: a
+        # read-only extra directory inside an owned skill arrives here through
+        # copytree(symlinks=True) and again as the backup of the entry just
+        # replaced. Restore it, because the directory is about to cease to
+        # exist and the alternative is a stranded lock. fchmod acts on the
+        # descriptor opened with O_NOFOLLOW above, so no pathname is resolved a
+        # second time. Failing it is not fatal: a directory somebody else owns
+        # but left group-writable is removable anyway, and if it is not, the
+        # unlink below reports the error that actually stopped us.
+        with contextlib.suppress(OSError):
+            os.fchmod(fd, 0o700)
         for entry in list(os.scandir(fd)):
             if entry.is_dir(follow_symlinks=False):
                 remove_tree_at(entry.name, fd)
@@ -469,7 +481,17 @@ def sync(repo, ref, output, adopt_unmarked=False):
                     return
                 with deferred_signals():
                     if transaction_name is not None:
-                        remove_tree_at(transaction_name, output_fd)
+                        try:
+                            remove_tree_at(transaction_name, output_fd)
+                        except OSError as error:
+                            # By this point the transaction holds only the
+                            # superseded copies of what was just published, so
+                            # leaving it behind costs disk. Leaving the lock
+                            # behind fails every later sync until a human
+                            # deletes it, so nothing that goes wrong here is
+                            # allowed to skip the line below.
+                            print(f"warning: could not remove {output / transaction_name}: {error}",
+                                  file=sys.stderr)
                     remove_tree_at(LOCK_NAME, output_fd)
 
             with contextlib.ExitStack() as cleanup:
