@@ -89,8 +89,20 @@ class SyncTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def sync(self, output=None, repo=None, ref=None):
-        with contextlib.redirect_stdout(io.StringIO()):
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
             SYNC.sync(repo or OPTIONS.back_repo, ref or OPTIONS.ref, output or self.output)
+        return stdout.getvalue()
+
+    def strip_generated_markers(self):
+        # Rewrite synced skills into the pre-marker shape the public checkout
+        # still has: frontmatter, then the prerequisite block, no marker.
+        for name in ("codereview", "autoloop"):
+            skill = self.output / "skills" / name / "SKILL.md"
+            frontmatter, body = SYNC.skill_frontmatter(skill, name)
+            skill.write_text(frontmatter + "\n" + body.split(SYNC.GENERATED_MARKER, 1)[1].lstrip("\r\n"))
+            self.assertNotIn(SYNC.GENERATED_MARKER, skill.read_text())
+            self.assertTrue(skill.read_text().split("---\n", 2)[2].lstrip("\r\n").startswith(SYNC.PREREQ))
 
     def fixture(self, bundle=None):
         repo = self.root / "fixture-back"
@@ -336,14 +348,22 @@ class SyncTests(unittest.TestCase):
         Requiring both markers would fail the first migration sync onto that
         checkout, so the legacy shape has to remain owned."""
         self.sync()
-        for name in ("codereview", "autoloop"):
-            skill = self.output / "skills" / name / "SKILL.md"
-            frontmatter, body = SYNC.skill_frontmatter(skill, name)
-            skill.write_text(frontmatter + "\n" + body.split(SYNC.GENERATED_MARKER, 1)[1].lstrip("\r\n"))
-            self.assertNotIn(SYNC.GENERATED_MARKER, skill.read_text())
-            self.assertTrue(skill.read_text().split("---\n", 2)[2].lstrip("\r\n").startswith(SYNC.PREREQ))
+        self.strip_generated_markers()
         self.sync()
         self.assertIn(SYNC.GENERATED_MARKER, (self.output / "skills/codereview/SKILL.md").read_text())
+
+    def test_shape_only_adoption_is_announced_and_then_extinguishes(self):
+        """Adopting an unmarked skill is the one replacement decided by the body's
+        shape rather than by a marker this script wrote, so it must be visible in
+        the sync output instead of silently overwriting the destination. Writing
+        the marker retires the branch: the next sync owns the file outright and
+        announces nothing, so a recurring notice means something is restoring the
+        legacy shape underneath us."""
+        self.sync()
+        self.strip_generated_markers()
+        adopted = [line for line in self.sync().splitlines() if line.startswith("adopting:")]
+        self.assertEqual(sorted(line.rsplit("/", 1)[1] for line in adopted), ["autoloop", "codereview"])
+        self.assertNotIn("adopting:", self.sync())
 
     def test_generation_failure_preserves_every_target(self):
         self.seed_owned_and_foreign()

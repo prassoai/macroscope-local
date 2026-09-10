@@ -160,17 +160,24 @@ def check_target(output, target):
             fail(f"destination parent is not a directory: {path}")
 
 
-def owned_skill(path, name):
-    # Ownership is the marker's position, not its presence anywhere in the file:
-    # a foreign skill that merely quotes the prerequisite block is not ours.
-    # Bundles written before the generated marker existed lead with PREREQ, so
-    # that shape stays owned for the one-time migration onto an older checkout.
-    # Anything we cannot parse is somebody else's file, so ownership fails closed
-    # rather than reporting our own well-formedness rules against a foreign skill.
+def skill_ownership(path, name):
+    # Which marker, if any, makes this destination ours to replace. Ownership is
+    # the marker's position, not its presence anywhere in the file: a foreign
+    # skill that merely quotes the prerequisite block is not ours. Anything we
+    # cannot parse is somebody else's file, so ownership fails closed rather
+    # than reporting our own well-formedness rules against a foreign skill.
     try:
-        return skill_frontmatter(path, name)[1].startswith((GENERATED_MARKER, PREREQ))
+        body = skill_frontmatter(path, name)[1]
     except (OSError, ValueError):
-        return False
+        return None
+    if body.startswith(GENERATED_MARKER):
+        return "generated"
+    # Bundles written before the generated marker existed lead with PREREQ, and
+    # the published checkout is still one of them, so that shape stays owned for
+    # the one-time migration. Every sync writes the marker, so the branch
+    # extinguishes itself after one run. It is reported rather than silently
+    # taken: it is the only replacement decided by shape alone.
+    return "legacy" if body.startswith(PREREQ) else None
 
 
 def prepare_targets(root, output, transaction, marketplace, skills):
@@ -210,8 +217,11 @@ def prepare_targets(root, output, transaction, marketplace, skills):
         candidate = staged / ("skill-" + skill.name)
         if target.exists():
             check_target(output, target / "SKILL.md")
-            if not owned_skill(target / "SKILL.md", skill.name):
+            ownership = skill_ownership(target / "SKILL.md", skill.name)
+            if ownership is None:
                 fail(f"unowned standalone skill destination: {target}")
+            if ownership == "legacy":
+                print(f"adopting: unmarked standalone skill from an earlier sync: {target}")
             shutil.copytree(target, candidate, symlinks=True)
         else:
             candidate.mkdir()
