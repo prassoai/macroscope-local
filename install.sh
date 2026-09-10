@@ -2150,19 +2150,19 @@ PY
 }
 
 validate_existing_integrations() {
-  # Two different questions. The marketplace name is validated whenever this
-  # run touches Codex state at all, including an update that deselects Codex
-  # and so removes only our own. The foreign-source refusal is narrower: it
-  # applies when this run would rewrite or delete the registration itself,
-  # which is repair as much as it is an explicit Codex selection. Repair was
-  # the gap -- it selects no tools, so keying the refusal off the selected
-  # tool list disarmed it on the path that deletes $HOME/plugins/macroscope.
-  local check_source=0 check_codex=0
-  if repair_only_requested || tool_selected codex; then check_source=1; fi
-  if [ "$check_source" -eq 1 ] || { [ "$INSTALL_MODE" = "update" ] && tool_installed codex; }; then check_codex=1; fi
-  python3 - "$HOME" "$check_codex" "$check_source" <<'PY'
+  # Every run that touches Codex state at all writes, rewrites or deletes the
+  # registration: an explicit selection installs it, repair deletes and
+  # rebuilds it, and an update that deselects Codex `rm -rf`s
+  # $HOME/plugins/macroscope. Which is why this is one question and not two.
+  # Keying it off the selected tool list disarmed both removal paths -- repair
+  # selects no tools, and a deselecting update selects everything but Codex --
+  # leaving the installer free to delete a directory a foreign source owns.
+  local check_codex=0
+  if repair_only_requested || tool_selected codex \
+     || { [ "$INSTALL_MODE" = "update" ] && tool_installed codex; }; then check_codex=1; fi
+  python3 - "$HOME" "$check_codex" <<'PY'
 import json, pathlib, re, sys
-home, check_codex, check_source = sys.argv[1:]
+home, check_codex = sys.argv[1:]
 marketplace = pathlib.Path(home) / ".agents/plugins/marketplace.json"
 if check_codex == "1" and marketplace.exists():
     # Unreadable content still refuses, but as a message that names the file
@@ -2177,18 +2177,17 @@ if check_codex == "1" and marketplace.exists():
     name = data.get("name", "local-user-plugins")
     if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", name):
         raise SystemExit("Invalid Codex marketplace name; refusing to change plugin paths.")
-    if check_source == "1":
-        # Repair is the recovery path for a damaged install, so damaged data
-        # must not abort it. A null or non-list value registers no plugin and
-        # a non-object entry is not a Macroscope registration: nothing foreign
-        # to preserve, and the later rewrite is free to proceed.
-        entries = data.get("plugins")
-        for plugin in entries if isinstance(entries, list) else []:
-            if isinstance(plugin, dict) and plugin.get("name") == "macroscope" and plugin.get("source") not in (
-                {"source": "local", "path": "./plugins/macroscope"},
-                {"source": "local", "path": "plugins/macroscope"},
-            ):
-                raise SystemExit("Existing Codex macroscope registration has a foreign source; refusing to replace it.")
+    # Repair is the recovery path for a damaged install, so damaged data must
+    # not abort it. A null or non-list value registers no plugin and a
+    # non-object entry is not a Macroscope registration: nothing foreign to
+    # preserve, and the later rewrite is free to proceed.
+    entries = data.get("plugins")
+    for plugin in entries if isinstance(entries, list) else []:
+        if isinstance(plugin, dict) and plugin.get("name") == "macroscope" and plugin.get("source") not in (
+            {"source": "local", "path": "./plugins/macroscope"},
+            {"source": "local", "path": "plugins/macroscope"},
+        ):
+            raise SystemExit("Existing Codex macroscope registration has a foreign source; refusing to replace it.")
 PY
   if tool_selected opencode; then
     local root="$(get_opencode_config_dir)" relative="" target=""

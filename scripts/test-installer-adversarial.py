@@ -532,19 +532,29 @@ os.execv("/bin/cp", ["cp", *sys.argv[1:]])
         self.assertTrue(target.is_symlink())
         self.assertEqual((foreign / "SKILL.md").read_text(), "macroscope codereview; user customization")
 
-    def test_foreign_codex_registration_and_symlink_are_preserved(self):
+    def test_deselecting_codex_refuses_to_delete_a_foreign_registration(self):
+        """Deselecting Codex on an update is a removal path: it `rm -rf`s
+        $HOME/plugins/macroscope. If the registration names a foreign source,
+        that directory is somebody else's, and deleting it is the same
+        destruction the repair path refuses -- so the run aborts before
+        touching anything, leaving the registration, the plugin directory and
+        a symlinked config exactly as they were. Deselection selects Codex in
+        no list, which is why gating this on the selected tools disarms it."""
         self.install("--tools", "codex")
         marketplace = self.home / ".agents/plugins/marketplace.json"
         data = json.loads(marketplace.read_text())
         data["plugins"][0]["source"] = {"source": "github", "repo": "example/foreign"}
         marketplace.write_text(json.dumps(data))
+        plugin = self.home / "plugins/macroscope"
+        self.assertTrue(plugin.is_dir())
         config = self.home / ".codex/config.toml"
         original_config = config.read_bytes()
         target = self.home / "managed.toml"
         config.rename(target)
         config.symlink_to(target)
-        self.install("--mode", "update", "--tools", "none")
+        self.assertIn("foreign source", self.install("--mode", "update", "--tools", "none", expected=1))
         self.assertEqual(json.loads(marketplace.read_text())["plugins"], data["plugins"])
+        self.assertTrue(plugin.is_dir(), "a deselecting update deleted a foreign source's plugin directory")
         self.assertTrue(config.is_symlink())
         self.assertEqual(target.read_bytes(), original_config)
 
