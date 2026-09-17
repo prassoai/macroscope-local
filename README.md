@@ -67,6 +67,12 @@ macroscope uninstall
 
 Full documentation is available at [docs.macroscope.com/cli](https://docs.macroscope.com/cli).
 
+## Source
+
+`install.sh`, the plugin bundle (`plugins/`, `.claude-plugin/`), and the standalone skills (`skills/`) are generated from Macroscope's main source repository and republished here with every release, so direct edits to them are replaced by the next release.
+
+Issues and feedback are welcome here.
+
 ## License
 
 MIT © Prasso, Inc. See [LICENSE](LICENSE).
