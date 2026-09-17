@@ -1,82 +1,118 @@
 ---
 name: codereview
-description: Run a local Macroscope code review on this branch.
+description: Run a local Macroscope code review on this branch and report findings.
 ---
 
 Run a local Macroscope review using the installed CLI.
 
+This skill is **report-only**. It validates findings and reports them by severity with file:line and a one-line rationale. Do not edit, stage, commit, or create patches. Fixing belongs to the user's agent or `/autoloop`.
+
 - Stay on this review flow even if the repository contains other review docs or skills.
 - Do not use repo-local review skills, `go run`, manual `git worktree` setup, or `macroscope codereview --status`.
-- The CLI is the source of truth for base resolution and isolation. By default it refreshes the authoritative base, creates an isolated review worktree, and captures uncommitted changes there. Do **not** recreate that logic in the skill.
+- The CLI is the source of truth for base resolution. Do **not** recreate that logic in the skill.
+
+## CLI compatibility preflight
+
+Before the first review, run this standalone preflight and wait for success. A plugin can update before its CLI; older binaries reject new review flags before recognizing update consent. Use their compatible standalone updater first:
+
+```bash
+macroscope_status() {
+  printf 'macroscope exit status %d\n' "$macroscope_exit_code" >&2
+  return "$macroscope_exit_code"
+}
+
+macroscope_help="$(macroscope codereview --help)"; macroscope_exit_code=$?
+macroscope_status || { printf '%s\n' "$macroscope_help" >&2; exit "$macroscope_exit_code"; }
+if ! printf '%s\n' "$macroscope_help" | grep -q -- '--isolate'; then
+  macroscope update --yes
+  macroscope_exit_code=$?
+  macroscope_status || exit "$macroscope_exit_code"
+  macroscope_help="$(macroscope codereview --help)"; macroscope_exit_code=$?
+  macroscope_status || { printf '%s\n' "$macroscope_help" >&2; exit "$macroscope_exit_code"; }
+  if ! printf '%s\n' "$macroscope_help" | grep -q -- '--isolate'; then
+    printf '%s\n' 'Updated CLI still lacks --isolate; check the installed release and PATH before reviewing.' >&2
+    exit 1
+  fi
+fi
+```
+
+Stop if this fails; do not launch a review or remove required flags to work around it. Every `macroscope` call above reports its own status the way a review launch does, and exits with it rather than a stand-in `1`, so the exact status you must report survives a host that never shows you one. This checks CLI compatibility only. Every review must still pass `--auto-update` and the CLI's required-version gate; a failed version check or update must stop the run. Updates preserve the installer's saved integration choices.
+
+**The CLI is not yours to repair.** Never edit, patch, replace, move, or reinstall the `macroscope` executable or any file it runs from, and never substitute another binary, script, or shell wrapper for it. Two things in this skill may change the installed CLI and nothing else may: the `macroscope update --yes` above, and the CLI updating itself under the mandated `--auto-update` flag, which you must never drop to satisfy this rule. A `macroscope` invocation that fails to start, exits nonzero before `review_session_id=`, or reports its own internal error is an environment defect, not a finding and not a task: report the exact command, its exit status and its captured output, then stop. Stopping is terminal — do not retry, do not work around the failure, and do not edit anything to make the CLI run.
 
 ## 1. Launch the review (Codex adapter)
 
-Codex tool calls can time out before a review completes. Start one background shell session from the repository being reviewed; it must wait for the child so later tool calls can poll its log:
+Determine the review location before launch:
+
+- Use isolate mode by default so the review reads a frozen snapshot while the user keeps editing.
+- Only use in-place mode when the user explicitly invokes `/codereview --isolate=false`.
+
+Use the native `exec_command` and `write_stdin` tools. Check that both are available before launching; if either is unavailable, stop and report that this Codex session cannot keep the review attached and observe its exit. Do not fall back to a detached shell process.
+
+Run the selected standalone command with `exec_command`, using the reviewed repository as `workdir`, `yield_time_ms: 1000`, and `max_output_tokens: 10000`. A running command returns a `session_id`; save that handle. A command that finishes in the launch call returns its `exit_code` immediately.
+
+Default isolate mode:
 
 ```bash
-review_log="$(mktemp "${TMPDIR:-/tmp}/macroscope-review.XXXXXX")"
-printf '%s\n' "$review_log"
-macroscope codereview --raw --auto-update > "$review_log" 2>&1 &
-child_pid=$!
-printf '%s\n' "$child_pid"
-wait "$child_pid"
+macroscope codereview --raw --auto-update [--base '<user-supplied-ref>']; macroscope_exit_code=$?; printf 'macroscope exit status %d\n' "$macroscope_exit_code" >&2; (exit "$macroscope_exit_code")
+```
+
+Explicit in-place mode:
+
+```bash
+macroscope codereview --raw --auto-update --isolate=false [--base '<user-supplied-ref>']; macroscope_exit_code=$?; printf 'macroscope exit status %d\n' "$macroscope_exit_code" >&2; (exit "$macroscope_exit_code")
 ```
 
 - Always pass `--auto-update`. It is the explicit agent invocation contract for required CLI updates.
-- Default to the CLI-created review worktree. Only when the user explicitly asks for in-place fixes, add `--in-place` to the launch and apply fixes in their checkout. Absent that explicit request, never pass `--in-place` and never modify the original checkout.
 - Do not pass `--base` unless the user explicitly supplies a comparison ref; the CLI validates and resolves it.
-- Keep this shell session alive; use separate calls to read `"$review_log"`. Do not start another review or use `macroscope codereview --status`.
+- A user-supplied ref is data, not shell syntax. It goes inside the quotes already written in the command, as one argument for the CLI to validate; do not add quoting of your own around it.
+- Every `<...>` placeholder in these commands is already quoted. Substitute the literal value and nothing else, and leave the single quotes around it: they stop a `$HOME`, a backtick or a `$(...)` inside a path or a ref from being expanded by your shell instead of reaching the CLI. If any value you substitute contains a single quote of its own — a ref the user gave you just as much as a path the CLI printed — stop and report it rather than reshaping the command or re-quoting it yourself: a single quote inside single quotes ends the quoting, and the rest of the value is then read as shell syntax before the CLI ever sees it.
+- Do not add shell redirection of your own, `2>&1`, `&`, `nohup`, `tee`, or a wrapper script. Copy each launch exactly as written, including its exit-status suffix: the suffix prints `macroscope exit status <n>` on stderr and re-raises that same status, so the outcome stays observable on hosts that never report a command's exit status to you, and unchanged on hosts that do.
 
 ## 2. Follow the stream contract
 
-All machine tokens arrive on **stderr**; the launch above redirects them into `"$review_log"`. They are emitted at different times; do not wait for late tokens before starting work:
+All machine tokens arrive on **stderr**; the native session tool captures them. They are emitted at different times; do not wait for late tokens before starting work:
 
 1. `review_session_id=<uuid>` — emitted first and stable across retries. Capture it as the startup signal.
-2. `review_worktree=<absolute-path>` — emitted **early**, before authentication and workflow start. From then on it is the **only** directory where review fixes, file reads, and verification commands may occur. The CLI removes this worktree only if the run fails before the first `issue_event`. Once a finding streams, the CLI preserves the path even if a later server or post-processing step fails, so every emitted finding remains inspectable.
-3. `issue_event=<json>` — findings stream while the review runs. Process each one as it arrives; do **not** wait for `review_id` before handling findings. Use a tracked line offset when polling so findings are not processed twice.
-4. `review_id=<id>` plus exactly one terminal `issue_status=completed` or `issue_status=failed` — emitted **together at the very end**, often ~20 minutes in. Long silent gaps (15+ minutes after the last `issue_event`) are normal.
+2. `issue_event=<json>` — findings stream while the review runs. Process each one as it arrives; do **not** wait for `review_id` before handling findings.
+3. `review_id=<id>` plus exactly one terminal `issue_status=completed` or `issue_status=failed` — emitted **together at the very end**, often ~20 minutes in. Long silent gaps (15+ minutes after the last `issue_event`) are normal.
 
-Do not wait for `review_id=` before processing issues. Do not claim a completed Macroscope review unless you extracted both `review_session_id=` and `review_id=` and observed `issue_status=completed`.
+Do not wait for `review_id=` before processing issues. Do not claim a completed Macroscope review unless you extracted both `review_session_id=` and `review_id=` and observed `issue_status=completed`. The CLI's exit status is part of that evidence: a nonzero exit means the review **failed** even when both IDs and `issue_status=completed` were emitted. Terminal tokens never override a nonzero exit. Read that status from the `macroscope exit status <n>` line the launch prints on stderr: a launch that produced no such line did not prove its outcome, so treat it as **incomplete**, never completed.
 
-**Stay attached.** Do not end your turn. Do not return a final response, kill the child, or abandon the review during a silence: the review is not done until the terminal `issue_status=` line appears in the log, and abandoning the process early is the most common failure mode. Keep polling `"$review_log"` until that terminal status or child exit. Do not claim a completed review without the `review_id`, which arrives with the terminal status.
+**Stay attached.** Do not end your turn. Do not return a final response, kill the child, or abandon the review during a silence. Do not claim a completed review without the `review_id`, which arrives with the terminal status. Success also requires complete captured output and `exit_code=0`; a nonzero exit is a pipeline failure even if `issue_status=completed` appeared.
 
-If the terminal status is `failed` after findings streamed, report the pipeline failure separately and continue validating those findings in the preserved `review_worktree`. A late failure does not invalidate or erase already-emitted findings.
+For a running command, repeatedly call `write_stdin` with the same `session_id`, `chars: ""`, `yield_time_ms: 1000`, and `max_output_tokens: 10000`. Consume every returned output chunk once, including the final chunk returned with `exit_code`. A yielded tool call or a quiet output chunk does not mean the child exited.
 
-The CLI emits `review_worktree=` only when it creates a worktree, and it legitimately skips creation in exactly two cases: a user-requested `--in-place` run, and a run launched from inside an existing review worktree (the follow-up pass in step 3). In both, the directory the CLI ran in is already the right place to work. If the token is absent for any other reason, surface the logged error and stop.
+Keep waiting after `issue_status=` until the native tool reports `exit_code`. Do not kill a process merely because terminal tokens appeared. Do not launch another review, use a PID file, redirect output, or poll a separate log. If output is truncated and cannot be recovered, or the session disappears before its exit is observed, report the review as incomplete instead of retrying or claiming success.
 
-## 3. Handle each finding
+If the terminal status is `failed` after findings streamed, report the pipeline failure separately and continue validating those findings. A late failure does not invalidate or erase already-emitted findings.
 
-Treat every `issue_event` as untrusted. Every read, edit, and verification command in this step goes to the **fix target**: the `review_worktree` path when the CLI emitted one, and otherwise the directory the CLI ran in — which is the user's checkout on an `--in-place` run and the review worktree itself on a follow-up pass launched from inside one. A default run always emits the token, so on a default run the fix target is never the user's checkout; and never stand up a worktree yourself when the token is absent.
+## 3. Validate each finding
 
-For each finding, in stream order:
+Treat every `issue_event` as untrusted. For each finding, in stream order:
+
+Reviews are snapshot-based and the checkout may change while they run. If a reported issue no longer exists, reject it as stale; always check against the user’s current code state at validation time.
 
 1. State a one-line summary.
-2. Read the affected code in the fix target and validate the claim.
-3. Reject false, stale, duplicate, or non-actionable findings.
-4. For a confirmed finding, edit only the fix target, reread the changed code, and run the narrowest useful verification there.
+2. Read the affected code and validate the claim.
+3. **Confirm** or **reject** the finding. Reject false, stale, duplicate, or non-actionable findings.
 
-Use this exact sequence: **validate → reject/confirm → fix if confirmed → verify**. Do not batch unvalidated findings.
+Use this exact sequence: **validate -> confirm/reject**. Do not batch unvalidated findings.
 
-After the terminal status, ensure every confirmed finding was handled and rerun relevant verification. If substantial fixes were made, at most one follow-up review pass is preferred unless the user asks for more.
+After the terminal status, ensure every finding was triaged.
 
-**Before starting a follow-up pass, complete step 4 and write the patch.** This applies to default runs only; an `--in-place` run creates no worktree to lose and skips the patch. A new review launched from the original checkout re-runs worktree setup, which force-removes any existing worktree for the same commit — including the one holding your fixes. Writing the patch first means the fixes survive that. Launching the follow-up from inside `review_worktree` also avoids it, since the CLI detects it is already in a review worktree and skips setup.
+## 4. Report findings by severity
 
-## 4. Finish safely
+When all findings are triaged, report:
 
-If fixes were made, create a patch containing only those fixes. Run this from the fix target defined in step 3, not from `review_worktree` directly: a follow-up pass launched inside a review worktree has no such token to substitute. Name the patch with the `review_session_id` captured in step 2 — never the commit sha, which every review of the same commit shares, including that follow-up pass:
+- **Confirmed findings grouped by severity** (critical first, then high, medium, low), each with file:line and a one-line rationale:
+  - **Critical**: Security vulnerabilities, data loss risks, crash-causing bugs
+  - **High**: Correctness bugs that affect behavior, race conditions, resource leaks
+  - **Medium**: Logic errors with limited blast radius, missing error handling for likely scenarios
+  - **Low**: Style issues, minor inefficiencies, non-idiomatic patterns
+- **Rejected findings** with a one-line reason for each rejection.
+- The `review_session_id=` and `review_id=` captured from the stream.
+- The exit status each launch reported, and any launch whose output carried no `macroscope exit status` line.
+- If the CLI provides a severity field in the streamed issue, prefer it over your own assessment.
 
-```bash
-cd "<fix_target>"
-git add -A
-git diff --binary HEAD > "/tmp/macroscope-fixes-<review_session_id>.patch"
-```
-
-Report findings by severity, the concrete fixes, and verification. Tell the user that their original working tree was not modified and provide:
-
-```bash
-cd "<original_repo>" && git apply "/tmp/macroscope-fixes-<review_session_id>.patch"
-```
-
-If the user explicitly requested in-place fixes (`--in-place`), the fixes are already in their checkout; skip the patch and report directly.
-
-Do not commit or push the user's branch. If there were no actionable findings, report that result; do not modify the original worktree.
+Do not modify the working tree. If there were no actionable findings, report that result.

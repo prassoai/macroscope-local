@@ -129,6 +129,16 @@ render_download_progress() {
   fi
 }
 
+# Every network call is bounded: a black-holed or half-open connection must
+# fail the install rather than wedge it forever. 15s to connect, 10 minutes
+# for the whole transfer (the plugin bundle is the largest asset).
+# The overrides exist so a stalled transfer can be exercised without waiting
+# ten minutes for it; the defaults are what every real run uses.
+CURL_TIMEOUT_ARGS=(
+  --connect-timeout "${MACROSCOPE_CURL_CONNECT_TIMEOUT:-15}"
+  --max-time "${MACROSCOPE_CURL_MAX_TIME:-600}"
+)
+
 # download_with_progress URL DESTINATION LABEL
 # Uses curl's native meter outside a terminal. In a terminal, a FIFO lets the
 # renderer consume curl's real-time percentages without hiding curl failures or
@@ -142,19 +152,19 @@ download_with_progress() {
   local curl_status=0
 
   if [ ! -t 2 ]; then
-    curl -fL --proto '=https' --proto-redir '=https' --progress-bar "$url" -o "$destination"
+    curl -fL --proto '=https' --proto-redir '=https' "${CURL_TIMEOUT_ARGS[@]}" --progress-bar "$url" -o "$destination"
     return
   fi
 
   progress_fifo="${TMP_DIR}/curl-progress-$$"
   if ! mkfifo "$progress_fifo"; then
-    curl -fL --proto '=https' --proto-redir '=https' --progress-bar "$url" -o "$destination"
+    curl -fL --proto '=https' --proto-redir '=https' "${CURL_TIMEOUT_ARGS[@]}" --progress-bar "$url" -o "$destination"
     return
   fi
 
   render_download_progress "$label" < "$progress_fifo" &
   renderer_pid=$!
-  if curl -fL --proto '=https' --proto-redir '=https' --progress-bar "$url" -o "$destination" 2> "$progress_fifo"; then
+  if curl -fL --proto '=https' --proto-redir '=https' "${CURL_TIMEOUT_ARGS[@]}" --progress-bar "$url" -o "$destination" 2> "$progress_fifo"; then
     curl_status=0
   else
     curl_status=$?
@@ -203,6 +213,10 @@ APPLY_STARTED=0
 APPLY_COMPLETE=0
 ROLLBACK_LOG=""
 SAVED_TTY_STATE=""
+ADOPTED_TOOLS=""
+HOST_INSTALL_FAILURES=""
+INTERRUPT_SIGNAL=""
+CREATED_DIRS_LOG=""
 
 # Integrity verification of downloaded release artifacts against the SHA-256
 # GitHub reports for each release asset.
@@ -296,6 +310,21 @@ parse_options() {
     error "--shell-config and --no-path cannot be used together"
     exit 2
   fi
+  # A directory can never be a shell configuration file: appending to it fails,
+  # and accepting one would hand a whole tree (up to $HOME) to the rollback
+  # snapshot as an install-owned target. Refuse it here, before anything runs.
+  if [ -n "$SHELL_CONFIG_OVERRIDE" ] && [ -d "$SHELL_CONFIG_OVERRIDE" ]; then
+    error "--shell-config must name a shell configuration file, not a directory: $SHELL_CONFIG_OVERRIDE"
+    exit 2
+  fi
+  # Neither can a FIFO, a socket or a device node. Reading one to check for the
+  # PATH line blocks until somebody writes to it, which on a FIFO with no writer
+  # is forever — after the binary is already installed, with no way out but a
+  # signal.
+  if [ -n "$SHELL_CONFIG_OVERRIDE" ] && [ -e "$SHELL_CONFIG_OVERRIDE" ] && [ ! -f "$SHELL_CONFIG_OVERRIDE" ]; then
+    error "--shell-config must name a regular file: $SHELL_CONFIG_OVERRIDE"
+    exit 2
+  fi
 }
 
 state_file_path() {
@@ -360,12 +389,10 @@ PY
 
 detect_installed_tools() {
   local detected=""
-  [ -d "$(get_claude_config_dir)/plugins/cache/macroscope-local" ] && detected="claude"
-  [ -d "$(get_codex_home)/plugins/cache/local-user-plugins/macroscope" ] || [ -d "$HOME/plugins/macroscope" ] && detected="${detected:+$detected,}codex"
-  [ -d "$HOME/.cursor/plugins/local/macroscope" ] && detected="${detected:+$detected,}cursor"
-  if [ -f "$(get_opencode_config_dir)/plugins/macroscope.js" ]; then
-    detected="${detected:+$detected,}opencode"
-  fi
+  local tool=""
+  for tool in claude codex cursor opencode; do
+    tool_installed "$tool" && detected="${detected:+$detected,}$tool"
+  done
   printf '%s' "$detected"
 }
 
@@ -430,10 +457,10 @@ selected_tools_plan_label() {
 
 tool_installed() {
   case "$1" in
-    claude) [ -d "$(get_claude_config_dir)/plugins/cache/macroscope-local" ] ;;
-    codex) [ -d "$HOME/plugins/macroscope" ] || find "$(get_codex_home)/plugins/cache" -type d -path '*/macroscope/local' -print -quit 2>/dev/null | grep -q . ;;
-    cursor) [ -d "$HOME/.cursor/plugins/local/macroscope" ] ;;
-    opencode) [ -f "$(get_opencode_config_dir)/plugins/macroscope.js" ] ;;
+    claude) install_state_records_tool claude || has_ownership_marker "$(get_claude_config_dir)/plugins/cache/macroscope-local" ;;
+    codex) install_state_records_tool codex || has_ownership_marker "$HOME/plugins/macroscope" || find "$(get_codex_home)/plugins/cache" -type f -name "$OWNERSHIP_MARKER_FILE" -path '*/macroscope/*/.macroscope-installed' -print -quit 2>/dev/null | grep -q . ;;
+    cursor) install_state_records_tool cursor || has_ownership_marker "$HOME/.cursor/plugins/local/macroscope" ;;
+    opencode) install_state_records_tool opencode || has_ownership_marker "$(get_opencode_config_dir)/skills/macroscope-codereview" ;;
     *) return 1 ;;
   esac
 }
@@ -915,8 +942,8 @@ PY
             _ccd_add 'plugins/macroscope.js'
             _ccd_add 'commands/macroscope-codereview.md'
             _ccd_add 'commands/macroscope-autoloop.md'
-            _ccd_add 'skills/codereview/'
-            _ccd_add 'skills/autoloop/'
+            _ccd_add 'skills/macroscope-codereview/'
+            _ccd_add 'skills/macroscope-autoloop/'
             ;;
         esac
       elif [ "$INSTALL_MODE" = "update" ] && tool_installed "$tool"; then
@@ -951,8 +978,8 @@ PY
             _ccd_remove 'plugins/macroscope.js'
             _ccd_remove 'commands/macroscope-codereview.md'
             _ccd_remove 'commands/macroscope-autoloop.md'
-            _ccd_remove 'skills/codereview/'
-            _ccd_remove 'skills/autoloop/'
+            _ccd_remove 'skills/macroscope-codereview/'
+            _ccd_remove 'skills/macroscope-autoloop/'
             ;;
         esac
       fi
@@ -1039,17 +1066,35 @@ get_opencode_config_dir() {
   fi
 }
 
+# Shell-side mirror of is_safe_marketplace_name: a single, ordinary path
+# component. Every marketplace name that reaches a filesystem path passes
+# through here before it is used, including names python already vetted.
+is_safe_marketplace_name() {
+  case "${1:-}" in
+    "" | "." | "..") return 1 ;;
+    *[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+  return 0
+}
+
+# The Codex marketplace name as a path component. An unusable name degrades to
+# the default the installer itself creates rather than propagating into a path.
 get_codex_marketplace_name() {
-  python3 - "$HOME/.agents/plugins/marketplace.json" <<'PY'
+  local name=""
+  name="$(python3 - "$HOME/.agents/plugins/marketplace.json" <<'PY'
 import json, os, sys
 name = "local-user-plugins"
 try:
     with open(sys.argv[1], encoding="utf-8") as f:
-        value = json.load(f).get("name")
+        data = json.load(f)
+    value = data.get("name") if isinstance(data, dict) else None
     if isinstance(value, str) and value.strip(): name = value.strip()
 except Exception: pass
 print(name)
 PY
+)"
+  is_safe_marketplace_name "$name" || name="local-user-plugins"
+  printf '%s' "$name"
 }
 
 codex_supports_plugins() {
@@ -1094,26 +1139,612 @@ is_managed_codex_shim() {
   grep -Fq "Macroscope-managed Codex shim" "$path"
 }
 
+# Shared python: which Codex marketplace entries this installer owns. It is
+# prepended to every python snippet that adds or removes marketplace entries so
+# install and cleanup cannot drift apart. Ownership is name AND source path: a
+# plugin named `macroscope` that another marketplace registered from its own
+# source belongs to that marketplace, and unregistering it by name alone would
+# silently break an unrelated install.
+PY_PLUGIN_OWNERSHIP='
+import re as _marketplace_re
+
+OWNED_PLUGIN_NAMES = {"macroscope", "macroscope-codereview"}
+# A marketplace name out of marketplace.json becomes a directory component of
+# the Codex plugin cache path, and that path is handed to routines that `rm
+# -rf` it. `../../victim` there would escape the cache root, so a name is only
+# usable as a path when it is a single, ordinary path component.
+SAFE_MARKETPLACE_NAME = _marketplace_re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def is_safe_marketplace_name(value):
+    if not isinstance(value, str):
+        return False
+    name = value.strip()
+    if not name or name in (".", ".."):
+        return False
+    return bool(SAFE_MARKETPLACE_NAME.match(name))
+OWNED_RELATIVE_PLUGIN_PATHS = {
+    "./plugins/macroscope",
+    "plugins/macroscope",
+    "./plugins/macroscope-codereview",
+    "plugins/macroscope-codereview",
+}
+
+
+def normalized_string(value):
+    if not isinstance(value, str):
+        return ""
+    return value.strip().lower()
+
+
+def is_owned_relative_plugin_path(value):
+    return normalized_string(value) in OWNED_RELATIVE_PLUGIN_PATHS
+
+
+def is_owned_marketplace_entry(item):
+    if not isinstance(item, dict):
+        return False
+    if normalized_string(item.get("name")) not in OWNED_PLUGIN_NAMES:
+        return False
+    source = item.get("source")
+    source_path = source.get("path") if isinstance(source, dict) else None
+    return is_owned_relative_plugin_path(source_path)
+'
+
+# Shared python: whether an install-state record is one this installer's
+# lineage wrote before it began recording `binaryPath`. Such a record is the
+# only evidence that the managed directory's `macroscope` (and the legacy
+# `macroscope-mcp` beside it) belongs to us when nothing names the path.
+#
+# Schema 1 and 2 predate `binaryPath` outright. Schema 3 was also shipped by a
+# release that recorded no `binaryPath`, so the schema number alone cannot
+# decide it; what proves the record is ours there is its shape — the complete
+# key set write_install_state has always emitted. A hand-written fragment
+# carrying only a schema number and a tool list proves nothing about a binary
+# sitting in the shared ~/.local/bin, and neither does a missing state file.
+PY_STATE_OWNERSHIP='
+def state_predates_binary_path(data):
+    if not isinstance(data, dict):
+        return False
+    recorded = data.get("binaryPath")
+    if isinstance(recorded, str) and recorded.strip():
+        return False
+    if not isinstance(data.get("tools"), list):
+        return False
+    try:
+        schema_version = int(data.get("schemaVersion"))
+    except (TypeError, ValueError):
+        schema_version = 0
+    if schema_version in (1, 2):
+        return True
+    return (
+        isinstance(data.get("version"), str)
+        and "pathFile" in data
+        and ("pathPolicy" in data or "permissionOwnership" in data)
+    )
+'
+
+# Shared python: which `macroscope-codereview` MCP registrations this installer
+# owns. The name alone is not ownership — a user is free to register a server
+# under it pointing at their own binary — so a registration is ours only when
+# its command (or one of its args) is a binary this installer wrote: the one in
+# the managed install directory, the path install state recorded, or the legacy
+# `macroscope-mcp` binary older releases registered. A bare command name with no
+# directory in it can only resolve through PATH to one of ours.
+PY_MCP_OWNERSHIP="$PY_STATE_OWNERSHIP"'
+import ast as _mcp_ast
+import json as _mcp_json
+import os as _mcp_os
+import re as _mcp_re
+import shutil as _mcp_shutil
+
+MACROSCOPE_MCP_SERVER_NAME = "macroscope-codereview"
+OWNED_MCP_COMMAND_NAMES = {"macroscope", "macroscope-mcp"}
+
+
+def _mcp_normalize(value):
+    return _mcp_os.path.normpath(_mcp_os.path.expanduser(value.strip()))
+
+
+def owned_mcp_binary_paths(home, managed_dir, install_state):
+    paths = set()
+    try:
+        with open(install_state, encoding="utf-8") as f:
+            state = _mcp_json.load(f)
+    except Exception:
+        state = None
+    if isinstance(state, dict):
+        recorded = state.get("binaryPath")
+        if isinstance(recorded, str) and recorded.strip():
+            paths.add(_mcp_normalize(recorded))
+        elif state_predates_binary_path(state):
+            for name in OWNED_MCP_COMMAND_NAMES:
+                paths.add(_mcp_normalize(_mcp_os.path.join(managed_dir, name)))
+                paths.add(_mcp_normalize(_mcp_os.path.join(home, ".local", "bin", name)))
+    return paths
+
+
+def is_owned_mcp_server(entry, owned_paths):
+    if not isinstance(entry, dict):
+        return False
+    values = []
+    command = entry.get("command")
+    if isinstance(command, str):
+        values.append(command)
+    args = entry.get("args")
+    if isinstance(args, list):
+        values.extend(item for item in args if isinstance(item, str))
+    for value in values:
+        candidate = value.strip()
+        if not candidate:
+            continue
+        if "/" not in candidate:
+            resolved = _mcp_shutil.which(candidate)
+            if candidate in OWNED_MCP_COMMAND_NAMES and resolved and _mcp_normalize(resolved) in owned_paths:
+                return True
+            continue
+        if _mcp_normalize(candidate) in owned_paths:
+            return True
+    return False
+
+
+def drop_owned_mcp_server(servers, owned_paths, where):
+    if not isinstance(servers, dict) or MACROSCOPE_MCP_SERVER_NAME not in servers:
+        return False
+    if not is_owned_mcp_server(servers[MACROSCOPE_MCP_SERVER_NAME], owned_paths):
+        print(
+            "Left the user-defined %s MCP server in %s (its command is not a Macroscope-installed binary)"
+            % (MACROSCOPE_MCP_SERVER_NAME, where)
+        )
+        return False
+    del servers[MACROSCOPE_MCP_SERVER_NAME]
+    return True
+
+
+def drop_owned_mcp_servers_in_projects(projects, owned_paths, where):
+    if not isinstance(projects, dict):
+        return False
+    changed = False
+    for project in projects.values():
+        if not isinstance(project, dict):
+            continue
+        if drop_owned_mcp_server(project.get("mcpServers"), owned_paths, where):
+            changed = True
+    return changed
+
+
+def drop_owned_codex_mcp_server(text, owned_paths, where):
+    table = _mcp_re.search(
+        r"""(?ms)^[ \t]*\[mcp_servers\.(?:macroscope-codereview|"macroscope-codereview")\][^\r\n]*(?:\r?\n|\Z).*?(?=^[ \t]*\[[^\]\r\n]+\][ \t]*(?:#.*)?\r?$|\Z)""",
+        text,
+    )
+    if table is None:
+        return text, False
+
+    entry = {}
+    for key in ("command", "args"):
+        match = _mcp_re.search(rf"""(?m)^[ \t]*{key}[ \t]*=[ \t]*(.+)$""", table.group(0))
+        if match is None:
+            continue
+        try:
+            entry[key] = _mcp_ast.literal_eval(match.group(1).strip())
+        except (SyntaxError, ValueError):
+            print("Left the user-defined %s MCP server in %s (its TOML could not be proven installer-owned)" % (MACROSCOPE_MCP_SERVER_NAME, where))
+            return text, False
+
+    if not is_owned_mcp_server(entry, owned_paths):
+        print("Left the user-defined %s MCP server in %s (its command is not a Macroscope-installed binary)" % (MACROSCOPE_MCP_SERVER_NAME, where))
+        return text, False
+    return text[: table.start()] + text[table.end() :], True
+'
+
 remove_file_if_present() {
   local path="$1"
   [ -f "$path" ] || return 1
-  if rm -f "$path" 2>/dev/null; then
-    success "Removed $path"
-    return 0
+  if ! rm -f "$path" 2>/dev/null; then
+    warn "Could not remove $path"
+    return 1
   fi
-  warn "Could not remove $path"
-  return 1
+  success "Removed $path"
 }
 
 remove_dir_if_present() {
   local path="$1"
   [ -d "$path" ] || return 1
-  if rm -rf "$path" 2>/dev/null; then
-    success "Removed $path"
+  if ! rm -rf "$path" 2>/dev/null; then
+    warn "Could not remove $path"
+    return 1
+  fi
+  success "Removed $path"
+}
+
+# Explicit ownership marker. Every skill and plugin directory this installer
+# writes gets one, and its presence — not a guess about the directory's
+# contents — is what authorizes removing or overwriting that directory later.
+# Contents: the release that wrote it and when.
+OWNERSHIP_MARKER_FILE=".macroscope-installed"
+
+write_ownership_marker() {
+  local dir="$1"
+  [ -d "$dir" ] || return 1
+  {
+    printf 'version=%s\n' "${INSTALLED_VERSION:-unknown}"
+    printf 'installedAt=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  } > "$dir/$OWNERSHIP_MARKER_FILE" 2>/dev/null || {
+    warn "Could not write the Macroscope ownership marker in $dir"
+    return 1
+  }
+  return 0
+}
+
+# The marker authorizes `rm -rf` of the directory holding it, so its content
+# is read, not merely its name: a file another tool happened to call
+# `.macroscope-installed`, or one restored from an unrelated backup, proves
+# nothing. Only the two lines write_ownership_marker emits count.
+has_ownership_marker() {
+  local marker="$1/$OWNERSHIP_MARKER_FILE"
+  [ -f "$marker" ] || return 1
+  grep -Eq '^version=.+$' "$marker" || return 1
+  ! grep -Evq '^([[:space:]]*|(version|installedAt)=.*)$' "$marker"
+}
+
+# Codex caches a plugin one level deeper than the rest — `<marketplace>/
+# <plugin>/<version>` — and the marker is written in the version directory. A
+# cache entry is ours when the entry itself or any version under it carries one.
+remove_owned_codex_cache_versions() {
+  local dir="$1"
+  local legacy_owned="$2"
+  local child=""
+  local removed=0
+  [ -d "$dir" ] || return 1
+  for child in "$dir"/*; do
+    [ -d "$child" ] || continue
+    if has_ownership_marker "$child" || { [ "$legacy_owned" -eq 1 ] && [ "$(basename "$child")" = local ]; }; then
+      remove_dir_if_present "$child" || true
+      removed=1
+    fi
+  done
+  [ "$removed" -eq 1 ] || info "Left $dir in place (no Macroscope ownership marker)"
+  rmdir "$dir" 2>/dev/null || true
+}
+
+# True when our own install state records that we installed the named tool.
+# The state file is the only durable record an older release left behind, so
+# it is the evidence legacy (pre-marker) cleanup relies on.
+install_state_records_tool() {
+  local tool="$1"
+  case ",$ADOPTED_TOOLS," in *",$tool,"*) return 0 ;; esac
+  local state_file="${STATE_FILE:-$(state_file_path)}"
+  [ -f "$state_file" ] || return 1
+  python3 - "$state_file" "$tool" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as f:
+        data = json.load(f)
+except Exception:
+    raise SystemExit(1)
+tools = data.get("tools") if isinstance(data, dict) else None
+raise SystemExit(0 if isinstance(tools, list) and sys.argv[2] in tools else 1)
+PY
+}
+
+# Install state is the durable record of what an earlier release installed, and
+# an install whose state file went missing or was truncated mid-write has lost
+# it. Without a replacement the update refuses its own artifacts as unowned and
+# strands the user on the old release.
+#
+# Recovery is by shape, never by name: a host integration is adopted only when
+# the artifacts on disk are the exact ones a Macroscope installer wrote — the
+# registration pointing at the installer's own directory, alongside the plugin
+# manifest that directory is supposed to contain. Anything that fails the shape
+# check stays unowned, and an install state that still parses is authoritative,
+# so adoption never overrides a real record.
+detect_adoptable_legacy_tools() {
+  {
+    printf '%s\n' "$PY_PLUGIN_OWNERSHIP"
+    cat <<'PY'
+import json
+import os
+import sys
+
+home, claude_config, opencode_config = sys.argv[1:4]
+adopted = []
+
+
+def load(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def manifest_named_macroscope(path):
+    data = load(path)
+    return isinstance(data, dict) and data.get("name") == "macroscope"
+
+
+def has_ownership_marker(path):
+    try:
+        with open(os.path.join(path, ".macroscope-installed"), encoding="utf-8") as f:
+            lines = f.read().splitlines()
+    except Exception:
+        return False
+    return any(line.startswith("version=") and len(line) > 8 for line in lines) and all(
+        not line.strip() or line.startswith(("version=", "installedAt=")) for line in lines
+    )
+
+
+def registers_marketplace_directory(data, root):
+    if not isinstance(data, dict):
+        return False
+    entry = data.get("macroscope-local")
+    if not isinstance(entry, dict):
+        return False
+    source = entry.get("source")
+    if not isinstance(source, dict):
+        return False
+    return source.get("source") == "directory" and source.get("path") == root
+
+
+marketplace_root = os.path.join(claude_config, "plugins", "marketplaces", "macroscope-local")
+claude_settings = load(os.path.join(claude_config, "settings.json"))
+registered = registers_marketplace_directory(
+    load(os.path.join(claude_config, "plugins", "known_marketplaces.json")), marketplace_root
+) or registers_marketplace_directory(
+    claude_settings.get("extraKnownMarketplaces") if isinstance(claude_settings, dict) else None,
+    marketplace_root,
+)
+if registered and manifest_named_macroscope(
+    os.path.join(marketplace_root, "plugins", "macroscope", ".claude-plugin", "plugin.json")
+):
+    adopted.append("claude")
+
+codex_marketplace = load(os.path.join(home, ".agents", "plugins", "marketplace.json"))
+codex_plugins = codex_marketplace.get("plugins") if isinstance(codex_marketplace, dict) else None
+if isinstance(codex_plugins, list) and any(is_owned_marketplace_entry(item) for item in codex_plugins):
+    if manifest_named_macroscope(
+        os.path.join(home, "plugins", "macroscope", ".codex-plugin", "plugin.json")
+    ):
+        adopted.append("codex")
+
+if manifest_named_macroscope(
+    os.path.join(home, ".cursor", "plugins", "local", "macroscope", ".cursor-plugin", "plugin.json")
+):
+    adopted.append("cursor")
+
+if os.path.isfile(os.path.join(opencode_config, "plugins", "macroscope.js")) and all(
+    os.path.isfile(os.path.join(opencode_config, "commands", name))
+    for name in ("macroscope-codereview.md", "macroscope-autoloop.md")
+) and all(
+    has_ownership_marker(os.path.join(opencode_config, "skills", name))
+    for name in ("macroscope-codereview", "macroscope-autoloop")
+):
+    adopted.append("opencode")
+
+print(",".join(adopted))
+PY
+  } | python3 - "$HOME" "$(get_claude_config_dir)" "$(get_opencode_config_dir)"
+}
+
+adopt_legacy_install() {
+  ADOPTED_TOOLS=""
+  [ "$STATE_LOADED" -eq 0 ] || return 0
+  ADOPTED_TOOLS="$(detect_adoptable_legacy_tools)"
+  [ -n "$ADOPTED_TOOLS" ] || return 0
+  warn "No usable Macroscope install state was found at $STATE_FILE."
+  info "Adopting the existing Macroscope $ADOPTED_TOOLS integration(s) found on disk and recording fresh state."
+}
+
+# Pre-marker heuristic, kept only as the second half of the legacy test below:
+# every skill the installer copied out of the plugin bundle both names
+# Macroscope and drives the `macroscope` CLI directly. It is not sufficient on
+# its own — a user's own notes on Macroscope can satisfy it.
+is_macroscope_owned_skill_dir() {
+  local path="$1"
+  [ -d "$path" ] || return 1
+  [ -f "$path/SKILL.md" ] || return 1
+  grep -qi 'macroscope' "$path/SKILL.md" || return 1
+  grep -Eq '(^|[^[:alnum:]_.-])macroscope +[a-z][a-z-]+' "$path/SKILL.md"
+}
+
+# What the bundle ships for a skill, one relative path per line. The bundle is
+# only staged during an install, so repair and uninstall fall back to the shape
+# every release has shipped: a lone SKILL.md.
+bundled_skill_entries() {
+  local skill="$1"
+  local src=""
+  [ -z "$CHECKOUT_DIR" ] || src="$CHECKOUT_DIR/plugins/macroscope/skills/$skill"
+  if [ -n "$src" ] && [ -d "$src" ]; then
+    ( cd "$src" && find . -mindepth 1 | sed 's|^\./||' | LC_ALL=C sort )
     return 0
   fi
-  warn "Could not remove $path"
-  return 1
+  printf 'SKILL.md\n'
+}
+
+# True when the directory holds nothing the bundle does not ship for that
+# skill. A `scripts/` or `references/` tree is a shape no release ever wrote,
+# so the directory is the user's however much its SKILL.md talks about
+# Macroscope — text alone is the weakest possible evidence, and it is exactly
+# what a user's own notes on Macroscope satisfy.
+skill_dir_matches_bundle_shape() {
+  local path="$1"
+  local skill="$2"
+  local shipped=""
+  local entry=""
+  shipped="$(bundled_skill_entries "$skill")"
+  while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
+    printf '%s\n' "$shipped" | grep -qxF -- "$entry" || return 1
+  done <<< "$( cd "$path" && find . -mindepth 1 ! -name "$OWNERSHIP_MARKER_FILE" | sed 's|^\./||' | LC_ALL=C sort )"
+  return 0
+}
+
+# The same evidence bar as a legacy skill directory, applied to the command
+# files beside it. Every command file any release has written is a two-line
+# body that hands off to the skill directory next to it, so that handoff — plus
+# naming Macroscope — is the shape. Prose about Macroscope is not: a user's own
+# `review-pr.md` describing how they run `macroscope codereview` satisfies a
+# text search and is still theirs.
+is_macroscope_owned_command_file() {
+  local path="$1"
+  [ -f "$path" ] || return 1
+  grep -qi 'macroscope' "$path" || return 1
+  grep -Eq '\.\./skills/[A-Za-z0-9._-]+/SKILL\.md' "$path"
+}
+
+# A directory at one of our prefixed paths is ours only when it carries the
+# marker. Anything else there was put there by the user.
+remove_marked_skill_dir() {
+  local path="$1"
+  [ -d "$path" ] || return 1
+  if ! has_ownership_marker "$path"; then
+    info "Left $path in place (no Macroscope ownership marker)"
+    return 1
+  fi
+  remove_dir_if_present "$path"
+}
+
+# OpenCode's skill namespace is flat, so the unprefixed directory names this
+# installer shipped before the `macroscope-` prefix (`codereview`, `autoloop`,
+# and the older `local-review`, `triage-pr-comments`,
+# `respond-to-pr-comments`, `review-pr`) are names an unrelated user skill can
+# legitimately own, and those releases wrote no marker. Removing one therefore
+# needs both halves of the circumstantial evidence: our install state must
+# record that we installed the OpenCode integration, and the directory must
+# still match the pre-marker heuristic. Either one missing and it stays.
+# REPORT_ONLY=1 runs every check and prints every explanation without touching
+# the directory, so the reasons can be reported when the OpenCode integration
+# is withdrawn before anything is written.
+remove_legacy_skill_dir() {
+  local path="$1"
+  local report_only="${2:-0}"
+  [ -d "$path" ] || return 1
+  if has_ownership_marker "$path"; then
+    [ "$report_only" -eq 0 ] || return 1
+    remove_dir_if_present "$path"
+    return
+  fi
+  if ! install_state_records_tool opencode; then
+    info "Left $path in place (no recorded Macroscope OpenCode install)"
+    return 1
+  fi
+  if ! is_macroscope_owned_skill_dir "$path"; then
+    info "Left $path in place (not a Macroscope skill)"
+    return 1
+  fi
+  if ! skill_dir_matches_bundle_shape "$path" "$(basename "$path")"; then
+    info "Left $path in place (it holds files the Macroscope skill bundle never ships)"
+    return 1
+  fi
+  [ "$report_only" -eq 0 ] || return 1
+  remove_dir_if_present "$path"
+}
+
+# Installs before the `macroscope-` skill prefix dropped these directories into
+# OpenCode's flat, user-wide skill namespace. Migrate ours away; a same-named
+# directory we cannot prove is ours belongs to the user and stays put.
+migrate_legacy_opencode_skills() {
+  local opencode_skills="$1"
+  local report_only="${2:-0}"
+  local legacy=""
+  for legacy in codereview autoloop local-review triage-pr-comments respond-to-pr-comments review-pr; do
+    [ -d "$opencode_skills/$legacy" ] || continue
+    if remove_legacy_skill_dir "$opencode_skills/$legacy" "$report_only"; then
+      info "Migrated the legacy OpenCode skill directory $legacy to a macroscope- prefixed name"
+    fi
+  done
+  return 0
+}
+
+# Pids of this script and every one of its ancestors, newline separated.
+# The Macroscope CLI spawns this script for `macroscope uninstall` and for
+# CLI-driven updates, so the invoking `macroscope` process is itself an
+# ancestor: killing it by name would abort the cleanup that is running.
+# POSIX `ps -o ppid=` only; no pstree, no GNU-only flags.
+process_ancestor_pids() {
+  local pid="$$"
+  local hops=0
+  while [ -n "$pid" ] && [ "$pid" -gt 1 ] 2>/dev/null && [ "$hops" -lt 64 ]; do
+    printf '%s\n' "$pid"
+    pid="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]')"
+    hops=$((hops + 1))
+  done
+  return 0
+}
+
+# Filter a newline-separated pid list on stdin, dropping any pid present in
+# the newline-separated list passed as $1.
+exclude_pids() {
+  local excluded="$1"
+  local pid=""
+  while IFS= read -r pid; do
+    [ -n "$pid" ] || continue
+    if ! printf '%s\n' "$excluded" | grep -qx -- "$pid"; then
+      printf '%s\n' "$pid"
+    fi
+  done
+  return 0
+}
+
+# Echo the still-running pids from the newline-separated list on stdin.
+# Filter pids on stdin to those STILL reported by `pgrep -x NAME` right now.
+# A pid alone is not an identity: between the TERM and the forced kill the
+# original process can exit and the kernel can hand its number to something
+# unrelated, so every later signal re-checks that the pid is still a process
+# of the name we matched. `kill -0` alone would pass the reused pid.
+process_is_owned() {
+  local pid="$1"
+  local owned="$2"
+  python3 - "$pid" "$owned" <<'PY'
+import ctypes
+import os
+import platform
+import sys
+
+pid = int(sys.argv[1])
+paths = {os.path.realpath(path) for path in sys.argv[2].splitlines() if path}
+
+try:
+    if platform.system() == "Linux":
+        executable = os.readlink(f"/proc/{pid}/exe")
+    elif platform.system() == "Darwin":
+        buffer = ctypes.create_string_buffer(4096)
+        if ctypes.CDLL("/usr/lib/libproc.dylib").proc_pidpath(pid, buffer, len(buffer)) <= 0:
+            raise OSError
+        executable = os.fsdecode(buffer.value)
+    else:
+        raise OSError
+except OSError:
+    raise SystemExit(1)
+
+raise SystemExit(0 if os.path.realpath(executable) in paths else 1)
+PY
+}
+
+owned_process_pids() {
+  local owned="$1"
+  local pid=""
+  while IFS= read -r pid; do
+    [ -n "$pid" ] || continue
+    process_is_owned "$pid" "$owned" && printf '%s\n' "$pid"
+  done
+  return 0
+}
+
+still_owned_named_pids() {
+  local name="$1"
+  local owned="$2"
+  local pid=""
+  local current=""
+  current="$(pgrep -x "$name" 2>/dev/null || true)"
+  while IFS= read -r pid; do
+    [ -n "$pid" ] || continue
+    if printf '%s\n' "$current" | grep -qx -- "$pid" && process_is_owned "$pid" "$owned"; then
+      printf '%s\n' "$pid"
+    fi
+  done
+  return 0
 }
 
 kill_running_processes() {
@@ -1121,30 +1752,49 @@ kill_running_processes() {
   local name=""
   local pids=""
   local pid=""
+  local remaining=""
+  local ancestors=""
   local deadline=""
+  local owned=""
 
   if ! command -v pgrep >/dev/null 2>&1; then
     info "pgrep not available; skipping process cleanup"
     return
   fi
 
+  ancestors="$(process_ancestor_pids)"
+  owned="$(recorded_binary_paths)"
+  if install_state_predates_binary_path; then
+    owned="${owned}${owned:+$'\n'}${INSTALL_DIR:-$HOME/.local/bin}/macroscope"
+    owned="${owned}"$'\n'"${INSTALL_DIR:-$HOME/.local/bin}/macroscope-mcp"
+  fi
+
   for name in macroscope macroscope-mcp; do
-    pids="$(pgrep -x "$name" 2>/dev/null || true)"
+    pids="$(pgrep -x "$name" 2>/dev/null | exclude_pids "$ancestors" | owned_process_pids "$owned" || true)"
     [ -n "$pids" ] || continue
     found=1
 
     while IFS= read -r pid; do
       [ -n "$pid" ] || continue
-      kill "$pid" 2>/dev/null || true
+      pid="$(still_owned_named_pids "$name" "$owned" <<< "$pid")"
+      [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
     done <<< "$pids"
 
     deadline=$((SECONDS + 3))
-    while pgrep -x "$name" >/dev/null 2>&1 && [ "$SECONDS" -lt "$deadline" ]; do
+    remaining="$(still_owned_named_pids "$name" "$owned" <<< "$pids")"
+    while [ -n "$remaining" ] && [ "$SECONDS" -lt "$deadline" ]; do
       sleep 0.1
+      remaining="$(still_owned_named_pids "$name" "$owned" <<< "$pids")"
     done
 
-    if pgrep -x "$name" >/dev/null 2>&1; then
-      pkill -9 -x "$name" 2>/dev/null || true
+    if [ -n "$remaining" ]; then
+      # Re-validate once more immediately before the forced kill: the wait
+      # loop's last read may be up to 100ms stale.
+      remaining="$(still_owned_named_pids "$name" "$owned" <<< "$remaining")"
+      while IFS= read -r pid; do
+        [ -n "$pid" ] || continue
+        kill -9 "$pid" 2>/dev/null || true
+      done <<< "$remaining"
       sleep 0.2
     fi
   done
@@ -1156,27 +1806,127 @@ kill_running_processes() {
   fi
 }
 
+# Binary paths the install state records, plus the `.old` rollback copy the
+# CLI writes beside each one during a self-update. One path per line; empty
+# when nothing was recorded (legacy install). Nothing else is derived: a
+# sibling name is a guess, not a record.
+recorded_binary_paths() {
+  local state_file="${STATE_FILE:-$(state_file_path)}"
+  [ -f "$state_file" ] || return 0
+  python3 - "$state_file" "$HOME" "${INSTALL_DIR:-$HOME/.local/bin}" "$(system_bin_dirs)" <<'PY'
+import json, os, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as f:
+        data = json.load(f)
+except Exception:
+    raise SystemExit(0)
+if not isinstance(data, dict):
+    raise SystemExit(0)
+value = data.get("binaryPath")
+if isinstance(value, str) and value.strip():
+    path = os.path.normpath(os.path.expanduser(value.strip()))
+    allowed_dirs = {os.path.normpath(sys.argv[3]), os.path.join(os.path.normpath(sys.argv[2]), ".local", "bin")}
+    allowed_dirs.update(os.path.normpath(path) for path in sys.argv[4].split(os.pathsep) if path)
+    if os.path.basename(path) not in ("macroscope", "macroscope-mcp") or os.path.dirname(path) not in allowed_dirs:
+        raise SystemExit(0)
+    print(path)
+    print(path + ".old")
+PY
+}
+
+# True when install state exists but records no binary path: an install this
+# installer wrote before it began recording `binaryPath`. That is the only
+# circumstance in which the managed directory's binary is ours without the
+# state naming it. No state file at all proves nothing and returns false.
+install_state_predates_binary_path() {
+  local state_file="${STATE_FILE:-$(state_file_path)}"
+  [ -f "$state_file" ] || return 1
+  {
+    printf '%s\n' "$PY_STATE_OWNERSHIP"
+    cat <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as f:
+        data = json.load(f)
+except Exception:
+    raise SystemExit(1)
+raise SystemExit(0 if state_predates_binary_path(data) else 1)
+PY
+  } | python3 - "$state_file"
+}
+
+remove_owned_plugin_dir() {
+  local dir="$1"
+  local tool="$2"
+  [ -d "$dir" ] || return 1
+  if ! has_ownership_marker "$dir" && ! install_state_records_tool "$tool"; then
+    info "Left $dir in place (no Macroscope ownership marker or install record)"
+    return 1
+  fi
+  remove_dir_if_present "$dir"
+}
+
+# Prefixes a `macroscope` binary can occupy without this installer having put
+# it there: Homebrew, a manual `go install`, a distro package. Colon separated,
+# overridable so tests can point the candidates inside their sandbox HOME
+# instead of probing the real host.
+system_bin_dirs() {
+  printf '%s' "${MACROSCOPE_SYSTEM_BIN_DIRS:-/usr/local/bin:/opt/homebrew/bin:$HOME/go/bin}"
+}
+
 cleanup_binaries() {
   local removed=0
   local path=""
+  local dir=""
+  local recorded=""
+  local managed_dir="${INSTALL_DIR:-$HOME/.local/bin}"
   local shim_path="$HOME/.local/bin/codex"
 
+  recorded="$(recorded_binary_paths)"
+
+  # ~/.local/bin is a shared user directory, not a directory this installer
+  # owns: a `macroscope` binary there can equally be a manual build somebody
+  # dropped in. Deleting one needs evidence. The state file recording the path
+  # is the strongest; a state file that records no binaryPath at all is a
+  # legacy install of ours, written before the path was recorded, and it is
+  # evidence that the managed directory's copy is the one we put there. With no
+  # install state, nothing proves the file is ours and it stays.
   for path in \
-    "$HOME/.local/bin/macroscope" \
-    "$HOME/.local/bin/macroscope.old" \
-    "$HOME/.local/bin/macroscope-mcp" \
-    "$HOME/go/bin/macroscope" \
-    "$HOME/go/bin/macroscope.old" \
-    "$HOME/go/bin/macroscope-mcp" \
-    "/usr/local/bin/macroscope" \
-    "/usr/local/bin/macroscope-mcp" \
-    "/opt/homebrew/bin/macroscope" \
-    "/opt/homebrew/bin/macroscope-mcp"
+    "$managed_dir/macroscope" \
+    "$managed_dir/macroscope.old" \
+    "$managed_dir/macroscope-mcp"
   do
+    [ -e "$path" ] || continue
+    if printf '%s\n' "$recorded" | grep -qxF -- "$path" || install_state_predates_binary_path; then
+      if remove_file_if_present "$path"; then
+        removed=1
+      fi
+    else
+      info "Left $path in place (not recorded as installed by Macroscope)"
+    fi
+  done
+
+  # Anything outside it needs an explicit record from install time.
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    case "$path" in "$managed_dir"/*) continue ;; esac
     if remove_file_if_present "$path"; then
       removed=1
     fi
-  done
+  done <<< "$recorded"
+
+  # A macroscope binary in a system prefix that our state does not name was put
+  # there by somebody else. Say so rather than deleting it by basename.
+  while IFS= read -r dir; do
+    [ -n "$dir" ] || continue
+    for path in "$dir/macroscope" "$dir/macroscope-mcp"; do
+      [ -e "$path" ] || continue
+      if printf '%s\n' "$recorded" | grep -qxF -- "$path"; then
+        continue
+      fi
+      info "Left $path in place (not recorded as installed by Macroscope)"
+    done
+  done <<< "$(system_bin_dirs | tr ':' '\n')"
 
   if is_managed_codex_shim "$shim_path"; then
     if remove_file_if_present "$shim_path"; then
@@ -1210,54 +1960,66 @@ remove_plugin_directories() {
     "$HOME/plugins/macroscope" \
     "$HOME/plugins/macroscope-codereview" \
     "$codex_home/plugins/macroscope" \
-    "$codex_home/plugins/macroscope-codereview" \
+    "$codex_home/plugins/macroscope-codereview"
+  do
+    if remove_owned_plugin_dir "$dir" codex; then removed=1; fi
+  done
+  for dir in \
     "$claude_config/plugins/marketplaces/macroscope-local" \
-    "$claude_config/plugins/cache/macroscope-local" \
+    "$claude_config/plugins/cache/macroscope-local"
+  do
+    if remove_owned_plugin_dir "$dir" claude; then removed=1; fi
+  done
+  for dir in \
     "$HOME/.cursor/plugins/local/macroscope" \
-    "$HOME/.cursor/plugins/local/macroscope-codereview" \
+    "$HOME/.cursor/plugins/local/macroscope-codereview"
+  do
+    if remove_owned_plugin_dir "$dir" cursor; then removed=1; fi
+  done
+
+  # OpenCode's skill namespace is flat and user-wide, so even a `macroscope-`
+  # prefixed directory there is only ours if it carries the ownership marker.
+  for dir in \
     "$opencode_config/skills/macroscope" \
-    "$opencode_config/skills/codereview" \
-    "$opencode_config/skills/autoloop" \
+    "$opencode_config/skills/macroscope-codereview" \
+    "$opencode_config/skills/macroscope-autoloop" \
     "$opencode_config/skills/macroscope-local-review" \
     "$opencode_config/skills/macroscope-triage-pr-comments" \
     "$opencode_config/skills/macroscope-respond-to-pr-comments" \
-    "$opencode_config/skills/macroscope-review-pr" \
+    "$opencode_config/skills/macroscope-review-pr"
+  do
+    if remove_marked_skill_dir "$dir"; then
+      removed=1
+    fi
+  done
+
+  # Unprefixed OpenCode skill names predate the marker: legacy evidence only.
+  for dir in \
+    "$opencode_config/skills/codereview" \
+    "$opencode_config/skills/autoloop" \
     "$opencode_config/skills/local-review" \
     "$opencode_config/skills/triage-pr-comments" \
     "$opencode_config/skills/respond-to-pr-comments" \
     "$opencode_config/skills/review-pr"
   do
-    if remove_dir_if_present "$dir"; then
+    if remove_legacy_skill_dir "$dir"; then
       removed=1
     fi
   done
 
   if [ -d "$codex_plugin_cache_root" ]; then
-    while IFS= read -r marketplace_name; do
-      [ -n "$marketplace_name" ] || continue
-      for dir in \
-        "$codex_plugin_cache_root/$marketplace_name/macroscope" \
-        "$codex_plugin_cache_root/$marketplace_name/macroscope-codereview"
-      do
-        if remove_dir_if_present "$dir"; then
-          removed=1
-        fi
-      done
-    done < <(
-      python3 - "$codex_marketplace_json" <<'PY'
+    local owned_marketplace_names=""
+    local candidate=""
+    owned_marketplace_names="$(
+      {
+        printf '%s\n' "$PY_PLUGIN_OWNERSHIP"
+        cat <<'PY'
 import json
 import os
 import sys
 
 path = sys.argv[1]
-names = {"local-user-plugins"}
-owned_names = {"macroscope", "macroscope-codereview"}
-owned_paths = {
-    "./plugins/macroscope",
-    "plugins/macroscope",
-    "./plugins/macroscope-codereview",
-    "plugins/macroscope-codereview",
-}
+names = set()
 
 if os.path.exists(path):
     try:
@@ -1268,25 +2030,45 @@ if os.path.exists(path):
     if isinstance(data, dict):
         marketplace_name = data.get("name")
         plugins = data.get("plugins")
-        if isinstance(marketplace_name, str) and isinstance(plugins, list):
-            for item in plugins:
-                if not isinstance(item, dict):
-                    continue
-                name = item.get("name")
-                source = item.get("source")
-                source_path = source.get("path") if isinstance(source, dict) else None
-                if name in owned_names and source_path in owned_paths:
-                    names.add(marketplace_name.strip())
-                    break
+        if isinstance(plugins, list) and is_safe_marketplace_name(marketplace_name):
+            if any(is_owned_marketplace_entry(item) for item in plugins):
+                names.add(marketplace_name.strip())
 
-for name in sorted(name for name in names if name):
+for name in sorted(names):
     print(name)
 PY
-    )
+      } | python3 - "$codex_marketplace_json"
+    )"
+    # The cache is scanned by walking the directories that actually exist, not
+    # by interpolating names out of marketplace.json: a name from that file can
+    # only ever match a real directory, never steer one. `local-user-plugins`
+    # is Codex's default marketplace, so a `macroscope` cache under it still
+    # needs evidence — an installer-owned marketplace entry, or our ownership
+    # marker inside the cached plugin — before it is deleted.
+    for candidate in "$codex_plugin_cache_root"/*; do
+      [ -d "$candidate" ] || continue
+      marketplace_name="$(basename "$candidate")"
+      is_safe_marketplace_name "$marketplace_name" || continue
+      for dir in \
+        "$candidate/macroscope" \
+        "$candidate/macroscope-codereview"
+      do
+        [ -d "$dir" ] || continue
+        local legacy_owned=0
+        printf '%s\n' "$owned_marketplace_names" | grep -qxF -- "$marketplace_name" && legacy_owned=1
+        remove_owned_codex_cache_versions "$dir" "$legacy_owned"
+      done
+    done
   fi
 
-  for file in \
-    "$opencode_config/plugins/macroscope.js" \
+  if install_state_records_tool opencode || has_ownership_marker "$opencode_config/skills/macroscope-codereview" || has_ownership_marker "$opencode_config/skills/macroscope-autoloop"; then
+    if remove_file_if_present "$opencode_config/plugins/macroscope.js"; then removed=1; fi
+    # Command files share OpenCode's flat, user-wide namespace under names a
+    # user can legitimately own, and no release ever wrote a marker beside one.
+    # Install state naming "opencode" says an integration exists, not that this
+    # particular file is part of it, so each file must still look like the
+    # command body the bundle ships.
+    for file in \
     "$opencode_config/commands/macroscope.md" \
     "$opencode_config/commands/macroscope-codereview.md" \
     "$opencode_config/commands/macroscope-autoloop.md" \
@@ -1297,13 +2079,19 @@ PY
     "$opencode_config/commands/local-review.md" \
     "$opencode_config/commands/triage-pr-comments.md" \
     "$opencode_config/commands/respond-to-pr-comments.md" \
-    "$opencode_config/commands/review-pr.md" \
-    "$claude_config/hooks/macroscope-bash-autoallow.sh"
-  do
-    if remove_file_if_present "$file"; then
-      removed=1
-    fi
-  done
+    "$opencode_config/commands/review-pr.md"
+    do
+      [ -f "$file" ] || continue
+      if ! is_macroscope_owned_command_file "$file"; then
+        info "Left $file in place (not a Macroscope command file)"
+        continue
+      fi
+      if remove_file_if_present "$file"; then removed=1; fi
+    done
+  fi
+  if install_state_records_tool claude || has_ownership_marker "$claude_config/plugins/marketplaces/macroscope-local"; then
+    remove_file_if_present "$claude_config/hooks/macroscope-bash-autoallow.sh" && removed=1 || true
+  fi
 
   if [ "$removed" -eq 0 ]; then
     info "No stale plugin directories or command files found"
@@ -1319,21 +2107,16 @@ clean_json_and_toml_state() {
   claude_config="$(get_claude_config_dir)"
   opencode_config="$(get_opencode_config_dir)/opencode.json"
 
-  python3 - \
-    "$HOME/.agents/plugins/marketplace.json" \
-    "$codex_home/config.toml" \
-    "$(get_claude_state_file)" \
-    "$claude_config/plugins/known_marketplaces.json" \
-    "$claude_config/plugins/installed_plugins.json" \
-    "$claude_config/settings.json" \
-    "$claude_config/settings.local.json" \
-    "$HOME/.cursor/mcp.json" \
-    "$STATE_FILE" \
-    "$opencode_config" <<'PY'
+  {
+    printf '%s\n' "$PY_PLUGIN_OWNERSHIP"
+    printf '%s\n' "$PY_MCP_OWNERSHIP"
+    cat <<'PY'
 import json
 import os
 import re
+import shlex
 import sys
+import tempfile
 
 (
     codex_marketplace,
@@ -1346,26 +2129,31 @@ import sys
     cursor_mcp_json,
     install_state,
     opencode_config,
-) = sys.argv[1:11]
+    home_dir,
+    managed_bin_dir,
+    installed_hook,
+) = sys.argv[1:14]
 
 
-OWNED_RELATIVE_PLUGIN_PATHS = {
-    "./plugins/macroscope",
-    "plugins/macroscope",
-    "./plugins/macroscope-codereview",
-    "plugins/macroscope-codereview",
-}
+def is_installed_hook_command(command):
+    """True only for a command that runs the hook file this installer wrote.
 
+    Matching the substring `macroscope-installer` anywhere in the command
+    deletes a user's own ~/bin/audit-macroscope-installer-runs.sh from their
+    settings, so the comparison is against the hook's path.
+    """
+    if not isinstance(command, str):
+        return False
+    text = command.strip()
+    if not text:
+        return False
+    try:
+        first = shlex.split(text)[0]
+    except ValueError:
+        first = text.split()[0]
+    return os.path.normpath(os.path.expanduser(first)) == os.path.normpath(installed_hook)
 
-def normalized_string(value):
-    if not isinstance(value, str):
-        return ""
-    return value.strip().lower()
-
-
-def is_owned_relative_plugin_path(value):
-    value = normalized_string(value)
-    return value in OWNED_RELATIVE_PLUGIN_PATHS
+owned_mcp_paths = owned_mcp_binary_paths(home_dir, managed_bin_dir, install_state)
 
 
 def get_owned_marketplace_names(data):
@@ -1378,15 +2166,8 @@ def get_owned_marketplace_names(data):
     if not marketplace_name or not isinstance(plugins, list):
         return names
 
-    for item in plugins:
-        if not isinstance(item, dict):
-            continue
-        name = normalized_string(item.get("name"))
-        source = item.get("source")
-        source_path = source.get("path") if isinstance(source, dict) else None
-        if name in {"macroscope", "macroscope-codereview"} and is_owned_relative_plugin_path(source_path):
-            names.add(marketplace_name)
-            break
+    if any(is_owned_marketplace_entry(item) for item in plugins):
+        names.add(marketplace_name)
 
     return names
 
@@ -1405,23 +2186,8 @@ def drop_owned_marketplace_plugins(entries):
     if not isinstance(entries, list):
         return entries, False
 
-    changed = False
-    filtered = []
-    for item in entries:
-        if not isinstance(item, dict):
-            filtered.append(item)
-            continue
-
-        name = normalized_string(item.get("name"))
-        source = item.get("source")
-        source_path = source.get("path") if isinstance(source, dict) else None
-        if name in {"macroscope", "macroscope-codereview"} and is_owned_relative_plugin_path(source_path):
-            changed = True
-            continue
-
-        filtered.append(item)
-
-    return filtered, changed
+    filtered = [item for item in entries if not is_owned_marketplace_entry(item)]
+    return filtered, filtered != entries
 
 
 def load_json(path):
@@ -1434,29 +2200,111 @@ def load_json(path):
         return None, None
 
 
+def atomic_write_text(path, text, mode):
+    """Replace path's contents with text, or leave the file untouched.
+
+    A truncating open would destroy a user's marketplace.json, settings.json
+    or config.toml if the process died, the disk filled, or the encode raised
+    between truncate and write. Writing a sibling temp file, flushing it to
+    disk, and renaming it over the target makes the replacement atomic: a
+    reader sees either the old file or the new one, never a truncated one.
+    """
+    if os.path.islink(path):
+        path = os.path.realpath(path)
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix=".macroscope-write-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        if mode is not None:
+            os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def write_json(path, data, mode):
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
-        f.write("\n")
-    if mode is not None:
-        os.chmod(path, mode)
+    atomic_write_text(path, json.dumps(data, indent=2) + "\n", mode)
+
+
+# State files at or above this schema version come from an installer that
+# writes no host permission rules at all. Their absent `permissionOwnership`
+# therefore means "this install owns nothing", not "this install predates
+# ownership tracking" — the distinction that keeps a user's own
+# `Bash(macroscope *)` rule from being swept up by repair/uninstall.
+OWNERSHIP_SCHEMA_VERSION = 3
+
+
+# The one release that ever inserted host permission rules recorded them under
+# schemaVersion 1. No release has written any other pre-3 schema, so a state
+# file carrying one is not a record this installer's lineage produced.
+GRANTING_SCHEMA_VERSION = 1
+
+
+def read_permission_ownership(state):
+    """Ownership map recorded by the install, or None for legacy state.
+
+    None means pre-ownership legacy state: the caller falls back to the
+    legacy rule set. A dict (possibly empty) means the install recorded its
+    ownership, so only the rules it names may be removed.
+    """
+    if not isinstance(state, dict):
+        # Missing or unparseable state proves nothing is ours: remove nothing.
+        return {}
+    recorded = state.get("permissionOwnership")
+    if isinstance(recorded, dict):
+        return recorded
+    if recorded is not None:
+        # Present but malformed: fail closed.
+        return {}
+    try:
+        schema_version = int(state.get("schemaVersion"))
+    except (TypeError, ValueError):
+        schema_version = 0
+    if schema_version >= OWNERSHIP_SCHEMA_VERSION:
+        return {}
+    return schema_version
 
 
 install_state_data, _ = load_json(install_state)
-if isinstance(install_state_data, dict) and "permissionOwnership" not in install_state_data:
-    permission_ownership = None
-elif isinstance(install_state_data, dict) and isinstance(install_state_data.get("permissionOwnership"), dict):
-    permission_ownership = install_state_data["permissionOwnership"]
-else:
-    permission_ownership = {}
+permission_ownership = read_permission_ownership(install_state_data)
 
 
-def owned_permission_rules(tool, legacy_rules):
-    if permission_ownership is None:
-        return set(legacy_rules)
-    tool_state = permission_ownership.get(tool, {})
-    inserted = tool_state.get("inserted", []) if isinstance(tool_state, dict) else []
-    return {rule for rule in inserted if isinstance(rule, str)} if isinstance(inserted, list) else set()
+def owned_permission_rules(tool, legacy_rules, present_rules):
+    """The rules this installation is entitled to remove for a host.
+
+    With a recorded ownership map, only the rules it names. Without one, the
+    legacy rule set — but that set is names, not proof: `Bash(macroscope *)` is
+    a rule a user is free to write by hand, and deleting theirs is silent
+    damage. State written by the release that actually granted rules is direct
+    evidence. Any other pre-ownership state is not something a release wrote,
+    so the rules must corroborate themselves: the grant always inserted its
+    mktemp rules alongside its macroscope ones, and a set that carries none of
+    them was written by somebody else.
+    """
+    if not isinstance(permission_ownership, int):
+        tool_state = permission_ownership.get(tool, {})
+        inserted = tool_state.get("inserted", []) if isinstance(tool_state, dict) else []
+        return {rule for rule in inserted if isinstance(rule, str)} if isinstance(inserted, list) else set()
+    legacy_rules = set(legacy_rules)
+    if permission_ownership == GRANTING_SCHEMA_VERSION:
+        return legacy_rules
+    corroborating = {rule for rule in legacy_rules if "mktemp" in rule}
+    if corroborating & set(present_rules):
+        return legacy_rules
+    return set()
+
+
+def report_removed_permission_rules(where, removed):
+    for rule in sorted(removed):
+        print("Removed the %s rule a Macroscope install inserted in %s" % (rule, where))
 
 
 marketplace_data, marketplace_mode = load_json(codex_marketplace)
@@ -1482,36 +2330,21 @@ if os.path.exists(codex_config):
             "",
             new_text,
         )
-    new_text = re.sub(r'(?ms)^\[mcp_servers\.macroscope-codereview\]\n.*?(?=^\[|\Z)', "", new_text)
+    new_text, _ = drop_owned_codex_mcp_server(new_text, owned_mcp_paths, codex_config)
     new_text = re.sub(r'(?m)^# Added by Macroscope installer\n?', "", new_text)
     new_text = re.sub(r'\n{3,}', '\n\n', new_text).strip()
     if new_text:
         new_text += "\n"
 
     if new_text != text:
-        with open(codex_config, "w", encoding="utf-8") as f:
-            f.write(new_text)
-        os.chmod(codex_config, mode)
+        atomic_write_text(codex_config, new_text, mode)
 
 
 claude_data, claude_mode = load_json(claude_json)
 if isinstance(claude_data, dict):
-    changed = False
-
-    servers = claude_data.get("mcpServers")
-    if isinstance(servers, dict) and "macroscope-codereview" in servers:
-        del servers["macroscope-codereview"]
+    changed = drop_owned_mcp_server(claude_data.get("mcpServers"), owned_mcp_paths, claude_json)
+    if drop_owned_mcp_servers_in_projects(claude_data.get("projects"), owned_mcp_paths, claude_json):
         changed = True
-
-    projects = claude_data.get("projects")
-    if isinstance(projects, dict):
-        for project in projects.values():
-            if not isinstance(project, dict):
-                continue
-            project_servers = project.get("mcpServers")
-            if isinstance(project_servers, dict) and "macroscope-codereview" in project_servers:
-                del project_servers["macroscope-codereview"]
-                changed = True
 
     if changed:
         write_json(claude_json, claude_data, claude_mode)
@@ -1555,33 +2388,48 @@ for path in (claude_settings, claude_settings_local):
     permissions = data.get("permissions") if path == claude_settings else None
     if isinstance(permissions, dict):
         allow = permissions.get("allow")
-        _owned = owned_permission_rules("claude", {"Bash(macroscope)", "Bash(macroscope *)", "Bash(macroscope:*)", "Bash(mktemp)", "Bash(mktemp *)", "Bash(mktemp:*)"})
+        _owned = owned_permission_rules("claude", {"Bash(macroscope *)", "Bash(macroscope:*)", "Bash(mktemp *)", "Bash(mktemp:*)"}, allow if isinstance(allow, list) else [])
         if isinstance(allow, list) and any(x in _owned for x in allow):
             permissions["allow"] = [x for x in allow if x not in _owned]
+            report_removed_permission_rules(path, [x for x in allow if x in _owned])
             changed = True
             if not permissions["allow"]:
                 del permissions["allow"]
             if not permissions:
                 data.pop("permissions", None)
 
-    # Remove the PreToolUse Bash hook we installed, preserving any other
-    # hooks the user configured. Only the macroscope-owned entry is dropped.
+    # Remove the PreToolUse Bash hook we installed, preserving any other hooks
+    # the user configured. A matcher entry can hold several hooks, so the
+    # nested list is filtered command by command: a user hook that happens to
+    # share an entry with ours survives, and the entry itself is dropped only
+    # once nothing is left in it.
     hooks_cfg = data.get("hooks")
     if isinstance(hooks_cfg, dict):
         pre_tool_use = hooks_cfg.get("PreToolUse")
         if isinstance(pre_tool_use, list):
             filtered = []
             for entry in pre_tool_use:
-                ours = False
-                if isinstance(entry, dict):
-                    for h in entry.get("hooks", []) or []:
-                        if isinstance(h, dict):
-                            cmd = h.get("command", "")
-                            if "macroscope-bash-autoallow" in cmd or "macroscope-installer" in cmd:
-                                ours = True
-                                break
-                if not ours:
+                if not isinstance(entry, dict):
                     filtered.append(entry)
+                    continue
+                nested = entry.get("hooks")
+                if not isinstance(nested, list):
+                    filtered.append(entry)
+                    continue
+                kept_hooks = [
+                    h
+                    for h in nested
+                    if not (isinstance(h, dict) and is_installed_hook_command(h.get("command")))
+                ]
+                if kept_hooks == nested:
+                    filtered.append(entry)
+                    continue
+                if not kept_hooks:
+                    # Every hook in the entry was ours: the entry goes too.
+                    continue
+                kept_entry = dict(entry)
+                kept_entry["hooks"] = kept_hooks
+                filtered.append(kept_entry)
             if filtered != pre_tool_use:
                 changed = True
                 if filtered:
@@ -1597,9 +2445,7 @@ for path in (claude_settings, claude_settings_local):
 
 cursor_data, cursor_mode = load_json(cursor_mcp_json)
 if isinstance(cursor_data, dict):
-    servers = cursor_data.get("mcpServers")
-    if isinstance(servers, dict) and "macroscope-codereview" in servers:
-        del servers["macroscope-codereview"]
+    if drop_owned_mcp_server(cursor_data.get("mcpServers"), owned_mcp_paths, cursor_mcp_json):
         write_json(cursor_mcp_json, cursor_data, cursor_mode)
 
 
@@ -1607,14 +2453,15 @@ cursor_cli_config = os.path.expanduser("~/.cursor/cli-config.json")
 cursor_cli_data, cursor_cli_mode = load_json(cursor_cli_config)
 if isinstance(cursor_cli_data, dict):
     changed = False
-    _owned_shell = owned_permission_rules("cursor", {"Shell(macroscope)", "Shell(macroscope *)", "Shell(mktemp)", "Shell(mktemp *)"})
     permissions = cursor_cli_data.get("permissions")
     if isinstance(permissions, dict):
         allow = permissions.get("allow")
+        _owned_shell = owned_permission_rules("cursor", {"Shell(macroscope)", "Shell(macroscope *)", "Shell(mktemp)", "Shell(mktemp *)"}, allow if isinstance(allow, list) else [])
         if isinstance(allow, list):
             filtered = [r for r in allow if r not in _owned_shell]
             if filtered != allow:
                 permissions["allow"] = filtered
+                report_removed_permission_rules(cursor_cli_config, [r for r in allow if r in _owned_shell])
                 changed = True
     if changed:
         write_json(cursor_cli_config, cursor_cli_data, cursor_cli_mode)
@@ -1627,9 +2474,10 @@ if isinstance(opencode_data, dict):
     if isinstance(permission, dict):
         bash = permission.get("bash")
         if isinstance(bash, dict):
-            for key in owned_permission_rules("opencode", {"macroscope", "macroscope *", "mktemp", "mktemp *"}):
+            for key in owned_permission_rules("opencode", {"macroscope", "macroscope *", "mktemp", "mktemp *"}, list(bash)):
                 if key in bash:
                     del bash[key]
+                    report_removed_permission_rules(opencode_config, [key])
                     changed = True
             if not bash:
                 del permission["bash"]
@@ -1638,32 +2486,106 @@ if isinstance(opencode_data, dict):
     if changed:
         write_json(opencode_config, opencode_data, opencode_mode)
 PY
+  } | python3 - \
+    "$HOME/.agents/plugins/marketplace.json" \
+    "$codex_home/config.toml" \
+    "$(get_claude_state_file)" \
+    "$claude_config/plugins/known_marketplaces.json" \
+    "$claude_config/plugins/installed_plugins.json" \
+    "$claude_config/settings.json" \
+    "$claude_config/settings.local.json" \
+    "$HOME/.cursor/mcp.json" \
+    "$STATE_FILE" \
+    "$opencode_config" \
+    "$HOME" \
+    "${INSTALL_DIR:-$HOME/.local/bin}" \
+    "$claude_config/hooks/macroscope-bash-autoallow.sh"
 }
 
+# run_bounded SECONDS COMMAND [ARGS...]
+# Runs COMMAND with its output discarded and gives up after SECONDS, returning
+# the command's own exit status or 124 on expiry. macOS ships no `timeout`
+# binary, so the bound is a background job plus a poll loop.
+run_bounded() {
+  local limit="$1"
+  shift
+  local status=0
+
+  python3 - "$limit" "$@" <<'PY' || status=$?
+import os
+import signal
+import subprocess
+import sys
+import time
+
+try:
+    process = subprocess.Popen(
+        sys.argv[2:],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+except FileNotFoundError:
+    raise SystemExit(127)
+except PermissionError:
+    raise SystemExit(126)
+
+try:
+    raise SystemExit(process.wait(timeout=float(sys.argv[1])))
+except subprocess.TimeoutExpired:
+    # Signal the whole group the child leads, falling back to the child alone:
+    # on macOS killpg can fail with EPERM for a group this process may signal
+    # member by member, and a timeout that then escapes as a traceback exits 1,
+    # never reports itself, and leaves the hung child running.
+    def stop(sig):
+        try:
+            os.killpg(process.pid, sig)
+        except (ProcessLookupError, PermissionError):
+            try:
+                os.kill(process.pid, sig)
+            except ProcessLookupError:
+                pass
+    stop(signal.SIGTERM)
+    time.sleep(0.2)
+    stop(signal.SIGKILL)
+    process.wait()
+    raise SystemExit(124)
+PY
+  if [ "$status" -eq 124 ]; then
+    warn "Timed out after ${limit}s: $*"
+  fi
+  return "$status"
+}
+
+# Seconds any single `claude`/`gemini` CLI cleanup call may take. Matches the
+# per-call timeout the Go uninstaller (the primary uninstall path) uses; the
+# override exists so tests can exercise expiry without waiting on it.
+CLI_CLEANUP_TIMEOUT="${MACROSCOPE_CLI_CLEANUP_TIMEOUT:-10}"
+
 cleanup_cli_registrations() {
-  if command -v claude >/dev/null 2>&1; then
-    if claude mcp remove macroscope-codereview -s user >/dev/null 2>&1; then
+  local claude_config="$(get_claude_config_dir)"
+  if { install_state_records_tool claude || has_ownership_marker "$claude_config/plugins/marketplaces/macroscope-local"; } && command -v claude >/dev/null 2>&1; then
+    if run_bounded "$CLI_CLEANUP_TIMEOUT" claude mcp remove macroscope-codereview -s user; then
       success "Removed legacy Claude Code MCP registration"
     fi
     # Claude Code maintains internal plugin state beyond the JSON config files
-    # on disk — disable + uninstall via CLI to reach that internal state.
-    # No timeout wrapper: macOS lacks `timeout` in base install; the Go
-    # uninstaller (primary path) already uses 10s timeouts per call.
+    # on disk — disable + uninstall via CLI to reach that internal state. Each
+    # call is bounded so a hung or prompting CLI cannot stall the uninstall.
     local _plugin_removed=0
     for plugin_id in macroscope@macroscope-local macroscope-codereview@macroscope-local; do
-      claude plugins disable "$plugin_id" >/dev/null 2>&1 || true
-      if claude plugins uninstall "$plugin_id" >/dev/null 2>&1; then
+      run_bounded "$CLI_CLEANUP_TIMEOUT" claude plugins disable "$plugin_id" || true
+      if run_bounded "$CLI_CLEANUP_TIMEOUT" claude plugins uninstall "$plugin_id"; then
         _plugin_removed=1
       fi
     done
-    if claude plugins marketplace remove macroscope-local >/dev/null 2>&1; then
+    if run_bounded "$CLI_CLEANUP_TIMEOUT" claude plugins marketplace remove macroscope-local; then
       _plugin_removed=1
     fi
     [ "$_plugin_removed" -eq 1 ] && success "Removed plugin from Claude Code CLI"
   fi
 
-  if command -v gemini >/dev/null 2>&1; then
-    if gemini mcp remove macroscope-codereview >/dev/null 2>&1; then
+  if { [ -n "$(recorded_binary_paths)" ] || install_state_predates_binary_path; } && command -v gemini >/dev/null 2>&1; then
+    if run_bounded "$CLI_CLEANUP_TIMEOUT" gemini mcp remove macroscope-codereview; then
       success "Removed legacy Gemini MCP registration"
     fi
   fi
@@ -1745,8 +2667,21 @@ prepare_tmp_dir() {
   trap 'handle_exit $?' EXIT
 }
 
+# The resolved version is interpolated straight into a release URL, so it is
+# trimmed of surrounding whitespace and then refused outright if anything is
+# left that cannot appear in a release tag.
 resolve_version() {
-  INSTALL_VERSION="${MACROSCOPE_VERSION:-${INSTALL_VERSION:-latest}}"
+  local requested="${MACROSCOPE_VERSION:-${INSTALL_VERSION:-latest}}"
+  requested="${requested#"${requested%%[![:space:]]*}"}"
+  requested="${requested%"${requested##*[![:space:]]}"}"
+  [ -n "$requested" ] || requested="latest"
+  case "$requested" in
+    *[[:space:][:cntrl:]]* | */* | *'?'* | *'#'* | *'%'*)
+      error "Invalid version: whitespace and URL metacharacters are not part of a release tag."
+      exit 2
+      ;;
+  esac
+  INSTALL_VERSION="$requested"
   if [ "$INSTALL_VERSION" != "latest" ]; then
     info "Requested version: ${BOLD}${INSTALL_VERSION}${RESET}"
   fi
@@ -1793,9 +2728,9 @@ sha256_of() {
 ensure_release_metadata() {
   [ -z "$RELEASE_METADATA_STATE" ] || return 0
   local dest="$TMP_DIR/release.json"
-  if curl -fsSL --proto '=https' --proto-redir '=https' \
+  if curl -fsSL --proto '=https' --proto-redir '=https' "${CURL_TIMEOUT_ARGS[@]}" \
       -H 'Accept: application/vnd.github+json' \
-      "$(release_api_url)" -o "$dest" 2>/dev/null; then
+      "$(release_api_url)" -o "$dest" 2>/dev/null && release_metadata_is_usable "$dest"; then
     RELEASE_METADATA="$dest"
     RELEASE_METADATA_STATE="ok"
   else
@@ -1803,22 +2738,87 @@ ensure_release_metadata() {
   fi
 }
 
-# asset_sha256 ASSET_NAME -> lowercase hex SHA-256 GitHub reports for the asset,
-# or empty when the release metadata is unavailable or carries no sha256 digest.
-asset_sha256() {
-  python3 - "$RELEASE_METADATA" "$1" <<'PY'
+# A 200 carrying an HTML error page, an empty body or a truncated response is a
+# failed fetch, not a release that reports no checksums: conflating the two is
+# what turns any interception of the metadata call into an unverified install.
+release_metadata_is_usable() {
+  python3 - "$1" <<'PY'
 import json, sys
 try:
     with open(sys.argv[1], encoding="utf-8") as f:
         data = json.load(f)
 except (OSError, ValueError):
+    raise SystemExit(1)
+raise SystemExit(0 if isinstance(data, dict) and isinstance(data.get("assets"), list) else 1)
+PY
+}
+
+# asset_sha256 ASSET_NAME -> lowercase hex SHA-256 GitHub reports for the asset,
+# or empty when the release metadata is unavailable or carries no sha256 digest.
+asset_sha256() {
+  python3 - "$RELEASE_METADATA" "$1" <<'PY'
+import json, re, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as f:
+        data = json.load(f)
+except (OSError, ValueError):
+    sys.exit(0)
+if not isinstance(data, dict):
     sys.exit(0)
 for asset in data.get("assets", []):
-    if asset.get("name") == sys.argv[2]:
-        digest = asset.get("digest") or ""
+    if isinstance(asset, dict) and asset.get("name") == sys.argv[2]:
+        digest = (asset.get("digest") or "").strip()
         if digest.startswith("sha256:"):
             print(digest[len("sha256:"):].strip().lower())
+        elif re.fullmatch(r"[0-9a-fA-F]{64}", digest):
+            # GitHub reports `sha256:<hex>`; a release published by another
+            # tool can report the same hash bare. A 64-hex string is a SHA-256
+            # and nothing else, so it is honoured rather than discarded into
+            # the unverified-install path.
+            print(digest.lower())
         break
+PY
+}
+
+# asset_digest_state ASSET_NAME -> missing | mismatch | none | ok | unknown
+# The cases a caller must tell apart: the release lists nothing resembling the
+# asset (an old release, or a platform it never published — the transitional
+# grace), it lists the asset under a name differing only in case (the digest is
+# right there and the exact-name lookup would silently skip it), it lists one
+# with no digest at all (grace again), it reports a SHA-256, or it reports
+# something in a format this installer does not understand.
+asset_digest_state() {
+  python3 - "$RELEASE_METADATA" "$1" <<'PY'
+import json, re, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as f:
+        data = json.load(f)
+except (OSError, ValueError):
+    print("missing"); raise SystemExit(0)
+assets = data.get("assets") if isinstance(data, dict) else None
+if not isinstance(assets, list):
+    print("missing"); raise SystemExit(0)
+wanted = sys.argv[2]
+for asset in assets:
+    if not isinstance(asset, dict):
+        continue
+    name = asset.get("name")
+    if name != wanted:
+        continue
+    digest = asset.get("digest")
+    digest = digest.strip() if isinstance(digest, str) else ""
+    if not digest:
+        print("none")
+    elif re.fullmatch(r"sha256:[0-9a-fA-F]+", digest) or re.fullmatch(r"[0-9a-fA-F]{64}", digest):
+        print("ok")
+    else:
+        print("unknown")
+    break
+else:
+    spellings = {name.lower() for name in
+                 (asset.get("name") for asset in assets if isinstance(asset, dict))
+                 if isinstance(name, str)}
+    print("mismatch" if wanted.lower() in spellings else "missing")
 PY
 }
 
@@ -1844,8 +2844,20 @@ verify_downloaded_artifact() {
     error "Refusing to install unverified ${label}; please retry."
     return 1
   fi
-  local expected
-  expected="$(asset_sha256 "$name")"
+  local state
+  state="$(asset_digest_state "$name")"
+  if [ "$state" = "mismatch" ]; then
+    error "GitHub's release metadata for '${INSTALL_VERSION}' spells ${name} differently, so its digest cannot be matched to this download."
+    error "Refusing to install unverified ${label}."
+    return 1
+  fi
+  if [ "$state" = "unknown" ]; then
+    error "GitHub reports a digest for ${name} in a format this installer does not recognise."
+    error "Refusing to install unverified ${label}."
+    return 1
+  fi
+  local expected=""
+  [ "$state" = "missing" ] || expected="$(asset_sha256 "$name")"
   if [ -z "$expected" ]; then
     if [ "$REQUIRE_CHECKSUM" = "1" ]; then
       error "GitHub reports no SHA-256 for ${name} on release '${INSTALL_VERSION}' and MACROSCOPE_REQUIRE_CHECKSUM=1 is set."
@@ -1929,17 +2941,46 @@ stage_binary() {
   success "Downloaded and staged the CLI"
 }
 
+# The binary is swapped in with `mv -f`, and `mv -f` onto an existing directory
+# moves the staged file INSIDE it and reports success — the install would then
+# announce a binary that is really a directory, and record that directory as
+# the path uninstall is entitled to delete. Anything at the install path that
+# is not (or does not resolve to) a regular file is refused before the apply
+# begins, while nothing has been written. A symlink to a regular file is a
+# shape the installer has always replaced and still does.
+check_binary_target() {
+  local target="$INSTALL_DIR/macroscope"
+  if [ -e "$INSTALL_DIR" ] && [ ! -d "$INSTALL_DIR" ]; then
+    error "Cannot install into $INSTALL_DIR: it exists and is not a directory."
+    error "Move or remove it and rerun."
+    return 1
+  fi
+  if [ -e "$target" ] && [ ! -f "$target" ]; then
+    error "Refusing to install over $target: it is not a regular file."
+    error "Move or remove it and rerun."
+    return 1
+  fi
+  return 0
+}
+
 apply_binary() {
   step "Installing binary..."
   if [ ! -d "$INSTALL_DIR" ]; then
-    mkdir -p "$INSTALL_DIR"
+    track_mkdir "$INSTALL_DIR"
     chmod 755 "$INSTALL_DIR"
   fi
   local target="$INSTALL_DIR/macroscope"
-  local candidate="$TMP_DIR/macroscope"
+  local previous="$INSTALL_DIR/macroscope.old"
   local next="$INSTALL_DIR/.macroscope.new.$$"
-  cp "$candidate" "$next"
+  cp "$TMP_DIR/macroscope" "$next"
   chmod +x "$next"
+  # The copy the cleanup paths and `recorded_binary_paths` already treat as
+  # install-owned: the binary being replaced, kept beside its successor so a
+  # bad release can be backed out by hand. Only a binary that actually changes
+  # leaves one, so reinstalling the same release stays a no-op.
+  if [ -f "$target" ] && [ ! -L "$target" ] && ! cmp -s "$target" "$TMP_DIR/macroscope"; then
+    cp -p "$target" "$next.old" && mv -f "$next.old" "$previous" || warn "Could not keep a copy of the previous binary at $previous"
+  fi
   mv -f "$next" "$target"
   INSTALLED_BINARY="$target"
   success "Installed CLI to ${BOLD}${INSTALLED_BINARY}${RESET}"
@@ -1972,7 +3013,90 @@ validate_staged_artifacts() {
       fi
     done
   done
+  local claude_config="$(get_claude_config_dir)"
+  if tool_selected claude && ! python3 - \
+      "$claude_config/plugins/known_marketplaces.json" \
+      "$claude_config/settings.json" \
+      "$claude_config/plugins/installed_plugins.json" \
+      "$({ install_state_records_tool claude || has_ownership_marker "$claude_config/plugins/marketplaces/macroscope-local/plugins/macroscope"; } && printf 1 || printf 0)" <<'PY'
+import json, os, sys
+
+def load(path):
+    if not os.path.exists(path):
+        return {}
+    with open(path, encoding="utf-8") as f:
+        try:
+            value = json.load(f)
+        except json.JSONDecodeError as error:
+            # A bare decoder message names a line and column in a file the user
+            # is never told the name of.
+            raise ValueError(f"{path}: is not valid JSON ({error}); fix or remove this file and rerun")
+    if not isinstance(value, dict):
+        raise ValueError(f"{path}: expected a JSON object at the top level")
+    return value
+
+try:
+    known = load(sys.argv[1])
+    settings = load(sys.argv[2])
+    owned = sys.argv[4] == "1"
+    if not owned and "macroscope-local" in known:
+        raise ValueError(f"{sys.argv[1]}: macroscope-local is not owned by this installation")
+    for field in ("extraKnownMarketplaces", "enabledPlugins"):
+        if field in settings and not isinstance(settings[field], dict):
+            raise ValueError(f"{sys.argv[2]}: expected {field} to be a JSON object")
+    if not owned and ("macroscope-local" in settings.get("extraKnownMarketplaces", {}) or
+                      "macroscope@macroscope-local" in settings.get("enabledPlugins", {})):
+        raise ValueError(f"{sys.argv[2]}: Macroscope registration keys are not owned by this installation")
+    installed = load(sys.argv[3])
+    plugins = installed.get("plugins", {})
+    if not isinstance(plugins, dict):
+        raise ValueError(f"{sys.argv[3]}: expected plugins to be a JSON object")
+    entries = plugins.get("macroscope@macroscope-local", [])
+    if not isinstance(entries, list) or any(not isinstance(entry, dict) for entry in entries):
+        raise ValueError(f"{sys.argv[3]}: expected the Macroscope plugin entry to be a list of JSON objects")
+except (OSError, json.JSONDecodeError, ValueError) as error:
+    print(error, file=sys.stderr)
+    raise SystemExit(1)
+PY
+  then
+    error "Claude Code configuration is not safe to update; fix the reported file and rerun"
+    return 1
+  fi
   success "Staged binary and plugin bundle are valid"
+}
+
+# The plugin bundle is a handful of markdown files and manifests — under 10 KB
+# compressed, a little over 100 KB expanded. These ceilings sit hundreds of
+# times above that, so only an archive that is not the plugin bundle at all can
+# reach them, and nothing unpacks a decompression bomb into the user's home
+# before anyone notices.
+BUNDLE_MAX_MEMBERS="${MACROSCOPE_MAX_BUNDLE_MEMBERS:-2000}"
+BUNDLE_MAX_BYTES="${MACROSCOPE_MAX_BUNDLE_BYTES:-52428800}"
+
+# Prints why the archive is out of bounds and fails; prints nothing and
+# succeeds when it is within them.
+bundle_archive_exceeds_bounds() {
+  python3 - "$1" "$BUNDLE_MAX_MEMBERS" "$BUNDLE_MAX_BYTES" <<'PY'
+import sys, tarfile
+
+archive, max_members, max_bytes = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+members = 0
+total = 0
+try:
+    with tarfile.open(archive, "r:gz") as tar:
+        for member in tar:
+            members += 1
+            total += max(member.size, 0)
+            if members > max_members:
+                print("holds more than %d members" % max_members)
+                raise SystemExit(1)
+            if total > max_bytes:
+                print("expands to more than %d bytes" % max_bytes)
+                raise SystemExit(1)
+except tarfile.TarError as error:
+    print("is not a readable gzip archive (%s)" % error)
+    raise SystemExit(1)
+PY
 }
 
 fetch_plugin_bundle() {
@@ -2018,6 +3142,11 @@ fetch_plugin_bundle() {
     mkdir -p "$CHECKOUT_DIR"
     if download_with_progress "$bundle_url" "$bundle_archive" "Plugin bundle"; then
       verify_downloaded_artifact "$bundle_archive" "$bundle_asset" "Macroscope plugin bundle" || exit 1
+      local bundle_refusal=""
+      if ! bundle_refusal="$(bundle_archive_exceeds_bounds "$bundle_archive")"; then
+        error "Refusing to extract the plugin bundle: it $bundle_refusal."
+        exit 1
+      fi
       tar -xzf "$bundle_archive" -C "$CHECKOUT_DIR"
       success "Fetched plugin bundle from ${BOLD}${INSTALL_VERSION}${RESET}"
     else
@@ -2033,12 +3162,61 @@ fetch_plugin_bundle() {
     exit 1
   fi
 
-  PLUGIN_VERSION="$(python3 - "$CHECKOUT_DIR/plugins/macroscope/.claude-plugin/plugin.json" <<'PY'
-import json, sys
+  if ! PLUGIN_VERSION="$(python3 - "$CHECKOUT_DIR/plugins/macroscope/.claude-plugin/plugin.json" <<'PY'
+import json
+import re
+import sys
+
 with open(sys.argv[1], "r", encoding="utf-8") as f:
-    print(json.load(f).get("version", "unknown"))
+    version = json.load(f).get("version")
+if not isinstance(version, str) or not re.fullmatch(
+    r"[0-9]+(?:\.[0-9]+){2}(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?",
+    version,
+):
+    raise SystemExit(1)
+print(version)
 PY
-)"
+)"; then
+    error "Fetched plugin bundle has an invalid plugin version."
+    return 1
+  fi
+}
+
+# `mkdir -p`, recording every directory level it actually brings into
+# existence. A rollback restores the files it snapshotted, but an apply that
+# was interrupted part way also leaves behind the host directory scaffolding it
+# created to hold them — empty `~/.agents/plugins`, `~/.local/bin`, a Codex
+# plugin cache root — on a machine that never had Macroscope. The record is what
+# lets rollback take those back out again.
+track_mkdir() {
+  local dir=""
+  local probe=""
+  local pending=""
+  for dir in "$@"; do
+    [ -n "$dir" ] || continue
+    probe="$dir"
+    while [ -n "$probe" ] && [ "$probe" != "/" ] && [ "$probe" != "." ] && [ ! -d "$probe" ]; do
+      pending="${pending}${probe}"$'\n'
+      probe="$(dirname "$probe")"
+    done
+  done
+  if [ -n "$pending" ] && [ -n "$CREATED_DIRS_LOG" ]; then
+    printf '%s' "$pending" >> "$CREATED_DIRS_LOG"
+  fi
+  mkdir -p "$@"
+}
+
+# Remove the directories this run created, deepest first, and only while they
+# are still empty: a directory that now holds something the user owns is no
+# longer ours to take away.
+remove_created_directories() {
+  [ -n "$CREATED_DIRS_LOG" ] && [ -s "$CREATED_DIRS_LOG" ] || return 0
+  local dir=""
+  while IFS= read -r dir; do
+    [ -n "$dir" ] || continue
+    [ -d "$dir" ] || continue
+    rmdir "$dir" 2>/dev/null || true
+  done <<< "$(awk '{ print length($0) "\t" $0 }' "$CREATED_DIRS_LOG" | sort -rn -k1,1 | cut -f2-)"
 }
 
 copy_tree() {
@@ -2046,7 +3224,7 @@ copy_tree() {
   local dst="$2"
 
   rm -rf "$dst"
-  mkdir -p "$(dirname "$dst")"
+  track_mkdir "$(dirname "$dst")"
   cp -R "$src" "$dst"
 }
 
@@ -2061,6 +3239,82 @@ copy_claude_plugin_tree() {
 strip_host_overlays() {
   local dst="$1"
   rm -rf "$dst/host-overlays"
+}
+
+# OpenCode commands resolve skills through the native registry. The installed
+# skill and command names use the flat namespace macroscope- prefix.
+install_opencode_command() {
+  local src="$1"
+  local dst="$2"
+
+  sed -e 's|\.\./skills/codereview/|../skills/macroscope-codereview/|g' \
+      -e 's|\.\./skills/autoloop/|../skills/macroscope-autoloop/|g' \
+      -e 's|`/codereview|`/macroscope-codereview|g' \
+      -e 's|`/autoloop|`/macroscope-autoloop|g' \
+      -e 's|name: "codereview"|name: "macroscope-codereview"|g' \
+      -e 's|name: "autoloop"|name: "macroscope-autoloop"|g' \
+      "$src" > "$dst"
+}
+
+# A skill destination is the installer's to write only when it is absent, or a
+# real directory (not a symlink to one) carrying the ownership marker. A
+# regular file there is a user's notes, and copy_tree would `rm -rf` it.
+opencode_skill_destination_is_ours() {
+  local dst="$1"
+  { [ -e "$dst" ] || [ -L "$dst" ]; } || return 0
+  { [ -d "$dst" ] && [ ! -L "$dst" ] && has_ownership_marker "$dst"; }
+}
+
+# Copy one bundled skill into OpenCode's flat skill namespace under its
+# prefixed name. A directory already there that does not carry our ownership
+# marker belongs to the user: warn and skip rather than clobber it.
+install_opencode_skill() {
+  local src="$1"
+  local dst="$2"
+  local skill_name=""
+
+  skill_name="$(basename "$dst")"
+  if ! opencode_skill_destination_is_ours "$dst"; then
+    warn "Left $dst in place (no Macroscope ownership marker); skipped installing the $skill_name skill"
+    return 1
+  fi
+
+  copy_tree "$src" "$dst"
+  rewrite_opencode_skill_copy "$dst/SKILL.md" "$skill_name"
+  write_ownership_marker "$dst"
+}
+
+# OpenCode resolves a skill by its directory name and rejects a SKILL.md whose
+# frontmatter `name` disagrees with it, so the prefixed copy is rewritten to
+# match. Slash-command references are prefixed for the same reason the
+# commands are.
+rewrite_opencode_skill_copy() {
+  local skill_file="$1"
+  local skill_name="$2"
+
+  [ -f "$skill_file" ] || return 1
+  python3 - "$skill_file" "$skill_name" <<'PY'
+import sys
+
+path, name = sys.argv[1], sys.argv[2]
+with open(path, encoding="utf-8") as handle:
+    lines = handle.read().split("\n")
+
+if lines and lines[0] == "---":
+    for index in range(1, len(lines)):
+        if lines[index] == "---":
+            break
+        if lines[index].startswith("name:"):
+            lines[index] = "name: " + name
+            break
+
+text = "\n".join(lines)
+text = text.replace("`/codereview", "`/macroscope-codereview")
+text = text.replace("`/autoloop", "`/macroscope-autoloop")
+
+with open(path, "w", encoding="utf-8") as handle:
+    handle.write(text)
+PY
 }
 
 apply_claude_overlay() {
@@ -2109,7 +3363,7 @@ seed_local_build_config_if_needed() {
       ;;
   esac
 
-  mkdir -p "$config_dir"
+  track_mkdir "$config_dir"
   cat > "$config_path" <<EOF
 env: $default_env
 envs: {}
@@ -2130,14 +3384,21 @@ update_shell_config() {
   local marker="# Added by Macroscope installer"
   local line=""
   line="$(shell_config_line)"
-  mkdir -p "$(dirname "$PATH_TARGET")"
-  touch "$PATH_TARGET"
+  track_mkdir "$(dirname "$PATH_TARGET")"
+  touch "$PATH_TARGET" 2>/dev/null || true
   if ! grep -Fq "$line" "$PATH_TARGET" 2>/dev/null; then
-    {
-      echo ""
-      echo "$marker"
-      echo "$line"
-    } >> "$PATH_TARGET"
+    # An unwritable rc file is a failure, not a silent skip: reporting "Updated"
+    # over a file that never received the line sends the user away believing
+    # their PATH is configured.
+    # One simple command, not a group: bash reports a failed redirection on a
+    # compound command but still hands back its zero status, which is how an
+    # unwritable rc file came to be announced as updated.
+    if ! printf '\n%s\n%s\n' "$marker" "$line" >> "$PATH_TARGET" 2>/dev/null ||
+        ! grep -Fq "$line" "$PATH_TARGET" 2>/dev/null; then
+      error "Could not add $HOME/.local/bin to PATH in $PATH_TARGET (the file is not writable)."
+      error "Add this line by hand, or rerun with --no-path: $line"
+      return 1
+    fi
     success "Updated $PATH_TARGET"
   else
     info "PATH already configured in $PATH_TARGET"
@@ -2148,7 +3409,7 @@ update_shell_config() {
 install_codex_cli_shim() {
   step "Checking Codex CLI..."
 
-  local current_codex="" quoted_bundled_binary=""
+  local current_codex=""
   local shim_path="$HOME/.local/bin/codex"
 
   CODEX_SHIM_PATH="$shim_path"
@@ -2170,24 +3431,38 @@ install_codex_cli_shim() {
     return
   fi
 
-  if [ -f "$shim_path" ] && ! is_managed_codex_shim "$shim_path"; then
-    CODEX_PLUGIN_HOST_WARNING="Existing ${shim_path} was left untouched, so the current Codex CLI may still be too old for plugins."
-    warn "$CODEX_PLUGIN_HOST_WARNING"
-    return
+  if [ -e "$shim_path" ] || [ -L "$shim_path" ]; then
+    if [ -L "$shim_path" ] || [ ! -f "$shim_path" ] || ! is_managed_codex_shim "$shim_path"; then
+      CODEX_PLUGIN_HOST_WARNING="Existing ${shim_path} was left untouched, so the current Codex CLI may still be too old for plugins."
+      warn "$CODEX_PLUGIN_HOST_WARNING"
+      return
+    fi
   fi
 
-  quoted_bundled_binary="$(python3 - "$CODEX_BUNDLED_BINARY" <<'PY'
-import shlex, sys
-print(shlex.quote(sys.argv[1]))
+  if ! python3 - "$shim_path" "$CODEX_BUNDLED_BINARY" <<'PY'
+import os
+import shlex
+import sys
+import tempfile
+
+path, bundled = sys.argv[1:3]
+fd, temporary = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".macroscope-codex-shim-")
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write("#!/bin/bash\nset -euo pipefail\n# Macroscope-managed Codex shim\nexec %s \"$@\"\n" % shlex.quote(bundled))
+    os.chmod(temporary, 0o755)
+    os.replace(temporary, path)
+except Exception:
+    try:
+        os.unlink(temporary)
+    except OSError:
+        pass
+    raise
 PY
-)"
-  cat > "$shim_path" <<EOF
-#!/bin/bash
-set -euo pipefail
-# Macroscope-managed Codex shim
-exec ${quoted_bundled_binary} "\$@"
-EOF
-  chmod +x "$shim_path"
+  then
+    error "Could not install the Codex CLI shim at $shim_path"
+    return 1
+  fi
   CODEX_SHIM_INSTALLED=1
 
   if [ -n "$current_codex" ] && [ "$current_codex" != "$shim_path" ]; then
@@ -2216,15 +3491,25 @@ install_codex_plugin() {
   codex_cache_root="$codex_home/plugins/cache"
   codex_config="$codex_home/config.toml"
 
-  mkdir -p "$HOME/plugins" "$HOME/.agents/plugins" "$codex_cache_root"
+  if { [ -e "$plugin_dst" ] || [ -L "$plugin_dst" ]; } && \
+      { [ ! -d "$plugin_dst" ] || [ -L "$plugin_dst" ] || { ! has_ownership_marker "$plugin_dst" && ! install_state_records_tool codex; }; }; then
+    error "Refusing to overwrite unowned Codex plugin at $plugin_dst"
+    return 1
+  fi
+  track_mkdir "$HOME/plugins" "$HOME/.agents/plugins" "$codex_cache_root"
   copy_tree "$plugin_src" "$plugin_dst"
 
-  marketplace_name="$(python3 - "$marketplace_dst" <<'PY'
+  if ! marketplace_name="$({
+    printf '%s\n' "$PY_PLUGIN_OWNERSHIP"
+    cat <<'PY'
 import json
 import os
 import sys
+import tempfile
 
 path = sys.argv[1]
+if os.path.islink(path):
+    path = os.path.realpath(path)
 
 if os.path.exists(path):
     with open(path, "r", encoding="utf-8") as f:
@@ -2236,10 +3521,25 @@ else:
         "plugins": [],
     }
 
+# A marketplace file whose root is not an object is not something this
+# installer can merge an entry into, and overwriting it would destroy whatever
+# the user keeps there. Report it instead of guessing.
+if not isinstance(data, dict):
+    raise SystemExit(4)
+
 data.setdefault("name", "local-user-plugins")
+# The name becomes a Codex cache directory component below. Refuse to write
+# anything at all when it cannot be one.
+if not is_safe_marketplace_name(data.get("name")):
+    raise SystemExit(3)
 data.setdefault("interface", {})
 data["interface"].setdefault("displayName", "Local Plugins")
-plugins = [p for p in data.get("plugins", []) if p.get("name") != "macroscope"]
+# Replace only the entry this installer owns. A `macroscope` entry another
+# marketplace registered from its own source stays registered.
+plugins = data.get("plugins", [])
+if not isinstance(plugins, list):
+    raise SystemExit(4)
+plugins = [p for p in plugins if not is_owned_marketplace_entry(p)]
 plugins.append(
     {
         "name": "macroscope",
@@ -2253,75 +3553,202 @@ plugins.append(
 )
 data["plugins"] = plugins
 
-with open(path, "w", encoding="utf-8") as f:
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".macroscope-marketplace-")
+with os.fdopen(fd, "w", encoding="utf-8") as f:
     json.dump(data, f, indent=2)
     f.write("\n")
+os.chmod(tmp, os.stat(path).st_mode if os.path.exists(path) else 0o644)
+os.replace(tmp, path)
 
 print(data["name"])
 PY
-)"
+  } | python3 - "$marketplace_dst")"; then
+    error "Cannot use the Codex marketplace at $marketplace_dst"
+    error "Its \"name\" must be a single directory name ([A-Za-z0-9._-]) and its root a JSON object."
+    error "Fix or remove that file and rerun; the Codex plugin cache was left untouched."
+    return 1
+  fi
+
+  # Second gate, in the shell that builds the path: the name python printed is
+  # the one interpolated into an `rm -rf` target, so it is checked where it is
+  # used and not only where it was read.
+  if ! is_safe_marketplace_name "$marketplace_name"; then
+    error "Refusing to build a Codex plugin cache path from marketplace name: $marketplace_name"
+    return 1
+  fi
 
   codex_cache_dst="$codex_cache_root/$marketplace_name/macroscope/$CODEX_LOCAL_PLUGIN_VERSION"
   plugin_key="macroscope@$marketplace_name"
+  if [ -d "$codex_cache_dst" ] && ! has_ownership_marker "$codex_cache_dst" && ! install_state_records_tool codex; then
+    error "Refusing to overwrite unowned Codex plugin cache at $codex_cache_dst"
+    return 1
+  fi
   copy_tree "$plugin_src" "$codex_cache_dst"
   apply_codex_overlay "$plugin_src" "$plugin_dst"
   apply_codex_overlay "$plugin_src" "$codex_cache_dst"
+  write_ownership_marker "$plugin_dst"
+  write_ownership_marker "$codex_cache_dst"
 
-  python3 - "$codex_config" "$plugin_key" <<'PY'
+  if ! python3 - "$codex_config" "$plugin_key" <<'PY'
 import os
 import re
 import sys
+import tempfile
+
+# Stock macOS still ships Python 3.9, which has no tomllib. Where it exists the
+# edit is proven by parsing the result back; where it does not, the structural
+# checks below are all the assurance available, so the edit stays conservative
+# either way.
+try:
+    import tomllib
+except ImportError:
+    tomllib = None
 
 path, plugin_key = sys.argv[1:3]
+if os.path.islink(path):
+    path = os.path.realpath(path)
 
+original = ""
 if os.path.exists(path):
     with open(path, "r", encoding="utf-8") as f:
-        text = f.read()
-else:
-    text = ""
+        original = f.read()
 
-if text and not text.endswith("\n"):
-    text += "\n"
+# A byte-order mark is not part of a TOML document; every parser rejects one.
+# Dropping it is the only way an edit can be written back and read again.
+text = original[1:] if original.startswith("﻿") else original
 
-def ensure_section_value(payload: str, section: str, key: str, value: str) -> str:
-    header = f"[{section}]"
-    pattern = re.compile(
-        rf"(?ms)^(\[{re.escape(section)}\]\n)(.*?)(?=^\[|\Z)"
-    )
-    match = pattern.search(payload)
-    desired_line = f'{key} = {value}'
 
-    if match:
-        body = match.group(2)
-        key_pattern = re.compile(rf"(?m)^{re.escape(key)}\s*=")
-        lines = body.splitlines()
-        replaced = False
-        for idx, line in enumerate(lines):
-            if key_pattern.match(line):
-                lines[idx] = desired_line
-                replaced = True
-                break
-        if not replaced:
-            if lines and lines[-1] != "":
-                lines.append(desired_line)
-            else:
-                lines.insert(len(lines) - 1 if lines else 0, desired_line)
-        new_body = "\n".join(lines)
-        if new_body and not new_body.endswith("\n"):
-            new_body += "\n"
-        return payload[: match.start()] + match.group(1) + new_body + payload[match.end() :]
+def refuse(reason):
+    sys.stderr.write("%s: %s\n" % (path, reason))
+    raise SystemExit(3)
 
-    if payload and not payload.endswith("\n\n"):
-        payload = payload.rstrip("\n") + "\n\n"
-    return payload + header + "\n" + desired_line + "\n"
 
-text = ensure_section_value(text, "features", "plugins", "true")
-text = ensure_section_value(text, f'plugins."{plugin_key}"', "enabled", "true")
+def parse(payload):
+    if tomllib is None:
+        return {}
+    try:
+        return tomllib.loads(payload)
+    except tomllib.TOMLDecodeError:
+        return None
+
+
+if text.strip() and parse(text) is None:
+    refuse("not valid TOML; fix or remove this file and rerun")
+
+SEGMENT = r'"[^"\n]*"|\'[^\'\n]*\'|[A-Za-z0-9_-]+'
+KEY_PATH = r'(?:%s)(?:[ \t]*\.[ \t]*(?:%s))*' % (SEGMENT, SEGMENT)
+TABLE_HEADER = re.compile(r'^[ \t]*\[[ \t]*(%s)[ \t]*\][ \t\r]*(?:#[^\n]*)?$' % KEY_PATH)
+ARRAY_HEADER = re.compile(r'^[ \t]*\[\[')
+ASSIGNMENT = re.compile(r'^([ \t]*)(%s)[ \t]*=' % KEY_PATH)
+BARE_SEGMENT = re.compile(r'^[A-Za-z0-9_-]+$')
+# A path no table header can produce, so scanning inside an array of tables
+# never mistakes one of its keys for a key of the table being edited.
+OPAQUE_TABLE = ("\0",)
+
+
+def split_key_path(raw):
+    parts = []
+    for segment in re.findall(SEGMENT, raw):
+        if segment[:1] in ('"', "'"):
+            parts.append(segment[1:-1])
+        else:
+            parts.append(segment)
+    return tuple(parts)
+
+
+def render_key(name):
+    return name if BARE_SEGMENT.match(name) else '"%s"' % name
+
+
+def render_path(names):
+    return ".".join(render_key(name) for name in names)
+
+
+def lookup(document, names):
+    value = document
+    for name in names:
+        if not isinstance(value, dict) or name not in value:
+            return None
+        value = value[name]
+    return value
+
+
+def set_value(payload, table, key, literal):
+    """Give table.key the literal value, editing as little as possible.
+
+    An existing assignment is rewritten in place wherever it lives — inside the
+    table's own header, or as a dotted key one level up — so a document that
+    already declares the key never gains a second declaration of it.
+    """
+    table = tuple(table)
+    wanted = table + (key,)
+    lines = payload.split("\n")
+    current = ()
+    header_index = None
+
+    for index, line in enumerate(lines):
+        if ARRAY_HEADER.match(line):
+            current = OPAQUE_TABLE
+            continue
+        header = TABLE_HEADER.match(line)
+        if header:
+            current = split_key_path(header.group(1))
+            if current == table and header_index is None:
+                header_index = index
+            continue
+        assignment = ASSIGNMENT.match(line)
+        if assignment is None or current == OPAQUE_TABLE:
+            continue
+        if current + split_key_path(assignment.group(2)) == wanted:
+            replacement = "%s%s = %s" % (assignment.group(1), assignment.group(2), literal)
+            lines[index] = replacement + "\r" if line.endswith("\r") else replacement
+            return "\n".join(lines)
+
+    if header_index is not None:
+        lines.insert(header_index + 1, "%s = %s" % (render_key(key), literal))
+        return "\n".join(lines)
+
+    tail = payload
+    if tail.strip():
+        tail = tail.rstrip("\n") + "\n\n"
+    return "%s[%s]\n%s = %s\n" % (tail, render_path(table), render_key(key), literal)
+
+
+edits = ((("features",), "plugins", "true"), (("plugins", plugin_key), "enabled", "true"))
+for table, key, literal in edits:
+    text = set_value(text, table, key, literal)
+
+# Nothing is written that cannot be read back: a document this edit could not
+# express is left exactly as the user had it, with the path named.
+document = parse(text)
+if document is None:
+    refuse("this installer's edit would not parse as TOML; enable the Macroscope plugin by hand and rerun")
+for table, key, literal in edits:
+    if tomllib is not None and lookup(document, table + (key,)) is not True:
+        refuse("could not set %s = %s; enable the Macroscope plugin by hand and rerun" % (render_path(table + (key,)), literal))
+    # Without a parser, the one thing that can still be checked is that the
+    # edit did not leave a second declaration of the table behind.
+    if tomllib is None and sum(
+        1 for line in text.split("\n")
+        if TABLE_HEADER.match(line) and split_key_path(TABLE_HEADER.match(line).group(1)) == table
+    ) > 1:
+        refuse("holds more than one [%s] table; enable the Macroscope plugin by hand and rerun" % render_path(table))
+
+if text == original:
+    raise SystemExit(0)
 
 os.makedirs(os.path.dirname(path), exist_ok=True)
-with open(path, "w", encoding="utf-8") as f:
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".macroscope-codex-")
+with os.fdopen(fd, "w", encoding="utf-8") as f:
     f.write(text)
+os.chmod(tmp, os.stat(path).st_mode if os.path.exists(path) else 0o644)
+os.replace(tmp, path)
 PY
+  then
+    error "Could not enable the Macroscope plugin in $codex_config"
+    error "Fix the reported problem in that file and rerun; it was left untouched."
+    return 1
+  fi
 
   success "Installed Codex plugin source to ${BOLD}${plugin_dst}${RESET}"
   success "Installed Codex plugin cache to ${BOLD}${codex_cache_dst}${RESET}"
@@ -2338,20 +3765,34 @@ install_claude_plugin() {
   local known_marketplaces="$claude_config/plugins/known_marketplaces.json"
   local installed_plugins="$claude_config/plugins/installed_plugins.json"
   local claude_settings="$claude_config/settings.json"
+  local cache_root="$claude_config/plugins/cache/macroscope-local/macroscope"
   local now=""
 
-  mkdir -p "$claude_config/plugins/marketplaces" "$claude_config/plugins/cache/macroscope-local"
-  rm -rf "$claude_config/plugins/cache/macroscope-local/macroscope"
-  mkdir -p "$claude_config/plugins/cache/macroscope-local/macroscope"
+  if { [ -e "$marketplace_root" ] || [ -L "$marketplace_root" ]; } && \
+      { [ ! -d "$marketplace_root" ] || [ -L "$marketplace_root" ] || { ! has_ownership_marker "$marketplace_root/plugins/macroscope" && ! install_state_records_tool claude; }; }; then
+    error "Refusing to overwrite unowned Claude marketplace at $marketplace_root"
+    return 1
+  fi
+  if { [ -e "$cache_root" ] || [ -L "$cache_root" ]; } && \
+      { [ ! -d "$cache_root" ] || [ -L "$cache_root" ] || { ! find "$cache_root" -type f -name "$OWNERSHIP_MARKER_FILE" -print -quit 2>/dev/null | grep -q . && ! install_state_records_tool claude; }; }; then
+    error "Refusing to overwrite unowned Claude plugin cache at $cache_root"
+    return 1
+  fi
+
+  track_mkdir "$claude_config/plugins/marketplaces" "$claude_config/plugins/cache/macroscope-local"
+  rm -rf "$cache_root"
+  track_mkdir "$cache_root"
 
   rm -rf "$marketplace_root"
-  mkdir -p "$marketplace_root"
+  track_mkdir "$marketplace_root"
   copy_tree "$marketplace_src" "$marketplace_root/.claude-plugin"
-  mkdir -p "$marketplace_root/plugins"
+  track_mkdir "$marketplace_root/plugins"
   copy_claude_plugin_tree "$plugin_src" "$marketplace_root/plugins/macroscope"
   copy_claude_plugin_tree "$plugin_src" "$cache_dst"
   apply_claude_overlay "$plugin_src" "$marketplace_root/plugins/macroscope"
   apply_claude_overlay "$plugin_src" "$cache_dst"
+  write_ownership_marker "$marketplace_root/plugins/macroscope"
+  write_ownership_marker "$cache_dst"
 
   now="$(python3 - <<'PY'
 from datetime import datetime, timezone
@@ -2363,14 +3804,23 @@ PY
 import json
 import os
 import sys
+import tempfile
 
 path, marketplace_root, now = sys.argv[1:4]
+if os.path.islink(path):
+    path = os.path.realpath(path)
 
 if os.path.exists(path):
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
 else:
     data = {}
+
+# Every one of these host files belongs to the user; a root that is not an object
+# is not something this installer can merge into, and replacing it wholesale
+# would destroy their data. Fail with the path instead of a traceback.
+if not isinstance(data, dict):
+    raise SystemExit("%s: expected a JSON object at the top level; fix or remove this file and rerun" % path)
 
 data["macroscope-local"] = {
     "source": {"source": "directory", "path": marketplace_root},
@@ -2378,23 +3828,32 @@ data["macroscope-local"] = {
     "lastUpdated": now,
 }
 
-with open(path, "w", encoding="utf-8") as f:
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".macroscope-claude-")
+with os.fdopen(fd, "w", encoding="utf-8") as f:
     json.dump(data, f, indent=2)
     f.write("\n")
+os.chmod(tmp, os.stat(path).st_mode if os.path.exists(path) else 0o644)
+os.replace(tmp, path)
 PY
 
   python3 - "$claude_settings" "$marketplace_root" <<'PY'
 import json
 import os
 import sys
+import tempfile
 
 path, marketplace_root = sys.argv[1:3]
+if os.path.islink(path):
+    path = os.path.realpath(path)
 
 if os.path.exists(path):
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
 else:
     data = {}
+
+if not isinstance(data, dict):
+    raise SystemExit("%s: expected a JSON object at the top level; fix or remove this file and rerun" % path)
 
 extra = data.setdefault("extraKnownMarketplaces", {})
 extra["macroscope-local"] = {
@@ -2404,17 +3863,23 @@ extra["macroscope-local"] = {
 enabled = data.setdefault("enabledPlugins", {})
 enabled["macroscope@macroscope-local"] = True
 
-with open(path, "w", encoding="utf-8") as f:
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".macroscope-claude-")
+with os.fdopen(fd, "w", encoding="utf-8") as f:
     json.dump(data, f, indent=2)
     f.write("\n")
+os.chmod(tmp, os.stat(path).st_mode if os.path.exists(path) else 0o644)
+os.replace(tmp, path)
 PY
 
   python3 - "$installed_plugins" "$cache_dst" "$PLUGIN_VERSION" "$now" <<'PY'
 import json
 import os
 import sys
+import tempfile
 
 path, install_path, version, now = sys.argv[1:5]
+if os.path.islink(path):
+    path = os.path.realpath(path)
 key = "macroscope@macroscope-local"
 
 if os.path.exists(path):
@@ -2422,6 +3887,9 @@ if os.path.exists(path):
         data = json.load(f)
 else:
     data = {"version": 2, "plugins": {}}
+
+if not isinstance(data, dict):
+    raise SystemExit("%s: expected a JSON object at the top level; fix or remove this file and rerun" % path)
 
 data.setdefault("version", 2)
 plugins = data.setdefault("plugins", {})
@@ -2437,9 +3905,12 @@ plugins[key] = [
     }
 ]
 
-with open(path, "w", encoding="utf-8") as f:
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".macroscope-claude-")
+with os.fdopen(fd, "w", encoding="utf-8") as f:
     json.dump(data, f, indent=2)
     f.write("\n")
+os.chmod(tmp, os.stat(path).st_mode if os.path.exists(path) else 0o644)
+os.replace(tmp, path)
 PY
 
   success "Installed Claude Code plugin to ${BOLD}${cache_dst}${RESET}"
@@ -2450,7 +3921,9 @@ clean_tool_state() {
   local remove_plugin="$2"
   local codex_home="$(get_codex_home)"
   local claude_config="$(get_claude_config_dir)"
-  python3 - "$tool" "$remove_plugin" "$HOME" "$codex_home" "$claude_config" <<'PY'
+  {
+    printf '%s\n' "$PY_PLUGIN_OWNERSHIP"
+    cat <<'PY'
 import json, os, re, sys, tempfile
 tool, remove_plugin, home, codex_home, claude_config = sys.argv[1:6]
 remove_plugin = remove_plugin == "1"
@@ -2500,7 +3973,7 @@ elif tool == "codex" and remove_plugin:
         names.add(str(data.get("name", "local-user-plugins")))
         plugins = data.get("plugins")
         if isinstance(plugins, list):
-            filtered = [p for p in plugins if not (isinstance(p, dict) and p.get("name") in ("macroscope", "macroscope-codereview"))]
+            filtered = [p for p in plugins if not is_owned_marketplace_entry(p)]
             if filtered != plugins: data["plugins"] = filtered; save(marketplace, data, mode)
     config = os.path.join(codex_home, "config.toml")
     if os.path.exists(config):
@@ -2516,13 +3989,15 @@ elif tool == "codex" and remove_plugin:
             os.chmod(tmp, mode); os.replace(tmp, config)
 
 PY
+  } | python3 - "$tool" "$remove_plugin" "$HOME" "$codex_home" "$claude_config"
 }
 
 clean_legacy_mcp_state() {
   [ "$INSTALL_MODE" = "update" ] || return 0
   step "Cleaning legacy MCP artifacts..."
   local legacy_mcp="$HOME/.local/bin/macroscope-mcp"
-  if command -v pgrep >/dev/null 2>&1; then
+  local recorded="$(recorded_binary_paths)"
+  if { printf '%s\n' "$recorded" | grep -qxF -- "$legacy_mcp" || install_state_predates_binary_path; } && command -v pgrep >/dev/null 2>&1; then
     local legacy_pattern="" legacy_pids=""
     legacy_pattern="$(python3 - "$legacy_mcp" <<'PY'
 import re, sys
@@ -2536,24 +4011,28 @@ PY
       done <<< "$legacy_pids"
     fi
   fi
-  rm -f "$legacy_mcp"
+  if printf '%s\n' "$recorded" | grep -qxF -- "$legacy_mcp" || install_state_predates_binary_path; then
+    rm -f "$legacy_mcp"
+  fi
   local codex_home="$(get_codex_home)"
-  python3 - "$(get_claude_state_file)" "$HOME/.cursor/mcp.json" "$codex_home/config.toml" <<'PY'
+  {
+    printf '%s\n' "$PY_MCP_OWNERSHIP"
+    cat <<'PY'
 import json, os, re, sys, tempfile
+owned_mcp_paths = owned_mcp_binary_paths(sys.argv[4], sys.argv[5], sys.argv[6])
 for path in sys.argv[1:3]:
     if not os.path.exists(path): continue
     if os.path.islink(path): path = os.path.realpath(path)
     try:
         with open(path, encoding="utf-8") as f: data = json.load(f)
     except Exception: continue
+    # A user config whose root is a list or a scalar holds no mcpServers map to
+    # clean. Skipping it leaves the file byte-identical; calling .get() on it
+    # would raise and abort the whole update into rollback.
+    if not isinstance(data, dict): continue
     mode = os.stat(path).st_mode; changed = False
-    servers = data.get("mcpServers")
-    if isinstance(servers, dict) and servers.pop("macroscope-codereview", None) is not None: changed = True
-    projects = data.get("projects")
-    if isinstance(projects, dict):
-        for project in projects.values():
-            servers = project.get("mcpServers") if isinstance(project, dict) else None
-            if isinstance(servers, dict) and servers.pop("macroscope-codereview", None) is not None: changed = True
+    if drop_owned_mcp_server(data.get("mcpServers"), owned_mcp_paths, path): changed = True
+    if drop_owned_mcp_servers_in_projects(data.get("projects"), owned_mcp_paths, path): changed = True
     if changed:
         fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".macroscope-mcp-")
         with os.fdopen(fd, "w", encoding="utf-8") as f: json.dump(data, f, indent=2); f.write("\n")
@@ -2563,12 +4042,19 @@ if os.path.exists(path):
     if os.path.islink(path): path = os.path.realpath(path)
     mode = os.stat(path).st_mode
     with open(path, encoding="utf-8") as f: text = f.read()
-    cleaned = re.sub(r'(?ms)^\[mcp_servers\.macroscope-codereview\]\n.*?(?=^\[|\Z)', '', text)
+    cleaned, _ = drop_owned_codex_mcp_server(text, owned_mcp_paths, path)
     if cleaned != text:
         fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".macroscope-mcp-")
         with os.fdopen(fd, "w", encoding="utf-8") as f: f.write(cleaned)
         os.chmod(tmp, mode); os.replace(tmp, path)
 PY
+  } | python3 - \
+    "$(get_claude_state_file)" \
+    "$HOME/.cursor/mcp.json" \
+    "$codex_home/config.toml" \
+    "$HOME" \
+    "${INSTALL_DIR:-$HOME/.local/bin}" \
+    "${STATE_FILE:-$(state_file_path)}"
   success "Legacy MCP artifacts cleaned"
 }
 
@@ -2577,17 +4063,26 @@ remove_tool_integration() {
   step "Removing deselected $tool integration..."
   case "$tool" in
     claude)
-      rm -rf "$(get_claude_config_dir)/plugins/marketplaces/macroscope-local" "$(get_claude_config_dir)/plugins/cache/macroscope-local"
+      remove_owned_plugin_dir "$(get_claude_config_dir)/plugins/marketplaces/macroscope-local" claude || true
+      remove_owned_plugin_dir "$(get_claude_config_dir)/plugins/cache/macroscope-local" claude || true
       ;;
     codex)
-      rm -rf "$HOME/plugins/macroscope"
-      find "$(get_codex_home)/plugins/cache" -type d -path '*/macroscope/local' -prune -exec rm -rf {} + 2>/dev/null || true
+      remove_owned_plugin_dir "$HOME/plugins/macroscope" codex || true
+      local cache=""
+      for cache in "$(get_codex_home)/plugins/cache"/*/macroscope; do
+        [ -d "$cache" ] || continue
+        remove_owned_codex_cache_versions "$cache" "$(install_state_records_tool codex && printf 1 || printf 0)"
+      done
       if is_managed_codex_shim "$HOME/.local/bin/codex"; then rm -f "$HOME/.local/bin/codex"; fi
       ;;
-    cursor) rm -rf "$HOME/.cursor/plugins/local/macroscope" ;;
+    cursor) remove_owned_plugin_dir "$HOME/.cursor/plugins/local/macroscope" cursor || true ;;
     opencode)
-      rm -f "$(get_opencode_config_dir)/plugins/macroscope.js" "$(get_opencode_config_dir)/commands/macroscope-codereview.md" "$(get_opencode_config_dir)/commands/macroscope-autoloop.md"
-      rm -rf "$(get_opencode_config_dir)/skills/codereview" "$(get_opencode_config_dir)/skills/autoloop"
+      if install_state_records_tool opencode; then
+        rm -f "$(get_opencode_config_dir)/plugins/macroscope.js" "$(get_opencode_config_dir)/commands/macroscope-codereview.md" "$(get_opencode_config_dir)/commands/macroscope-autoloop.md"
+      fi
+      remove_marked_skill_dir "$(get_opencode_config_dir)/skills/macroscope-codereview" || true
+      remove_marked_skill_dir "$(get_opencode_config_dir)/skills/macroscope-autoloop" || true
+      migrate_legacy_opencode_skills "$(get_opencode_config_dir)/skills"
       ;;
   esac
   clean_tool_state "$tool" 1
@@ -2597,12 +4092,32 @@ remove_tool_integration() {
 write_install_state() {
   local path_file="$STATE_PATH_FILE"
   [ "$PATH_ACTION" = "modify" ] && path_file="$PATH_TARGET"
-  python3 - "$STATE_FILE" "$SELECTED_TOOLS" "$path_file" "$PATH_POLICY" "$INSTALLED_VERSION" <<'PY'
+  python3 - "$STATE_FILE" "$SELECTED_TOOLS" "$path_file" "$PATH_POLICY" "$INSTALLED_VERSION" "$INSTALLED_BINARY" <<'PY'
 import json, os, sys, tempfile
-path, tools_csv, path_file, path_policy, version = sys.argv[1:6]
+path, tools_csv, path_file, path_policy, version, binary_path = sys.argv[1:7]
 selected = [x for x in tools_csv.split(",") if x]
+# binaryPath is the ownership record uninstall relies on: it is the only proof
+# that a macroscope binary outside the managed directory is ours to delete.
 data = {"schemaVersion": 3, "version": version, "tools": selected,
-        "pathFile": path_file or None, "pathPolicy": path_policy}
+        "pathFile": path_file or None, "pathPolicy": path_policy,
+        "binaryPath": binary_path or None}
+
+# The release that inserted host permission rules recorded which ones it had
+# inserted, under schemaVersion 1. This installer inserts none and so has
+# nothing of its own to record — but dropping that record on the first update
+# would strand those rules forever: with nothing naming them, uninstall can no
+# longer tell an inserted rule from one the user wrote, and must leave every
+# one of them behind. So the record is carried across every rewrite.
+try:
+    with open(path, encoding="utf-8") as f:
+        previous = json.load(f)
+except Exception:
+    previous = None
+if isinstance(previous, dict) and previous.get("schemaVersion") == 1:
+    carried = previous.get("permissionOwnership")
+    if isinstance(carried, dict) and any(carried.values()):
+        data["permissionOwnership"] = carried
+
 os.makedirs(os.path.dirname(path), exist_ok=True)
 fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".macroscope-state-")
 with os.fdopen(fd, "w", encoding="utf-8") as f: json.dump(data, f, indent=2); f.write("\n")
@@ -2618,6 +4133,7 @@ rollback_targets() {
   local opencode_config="$(get_opencode_config_dir)"
   printf '%s\0' \
     "$HOME/.local/bin/macroscope" \
+    "$HOME/.local/bin/macroscope.old" \
     "$HOME/.local/bin/macroscope-mcp" \
     "$HOME/.local/bin/codex" \
     "$HOME/plugins/macroscope" \
@@ -2637,19 +4153,30 @@ rollback_targets() {
     "$opencode_config/plugins/macroscope.js" \
     "$opencode_config/commands/macroscope-codereview.md" \
     "$opencode_config/commands/macroscope-autoloop.md" \
+    "$opencode_config/skills/macroscope-codereview" \
+    "$opencode_config/skills/macroscope-autoloop" \
     "$opencode_config/skills/codereview" \
     "$opencode_config/skills/autoloop" \
     "$opencode_config/opencode.json" \
     "$HOME/.macroscope/config.yaml" \
     "$STATE_FILE"
-  [ -z "$PATH_TARGET" ] || printf '%s\0' "$PATH_TARGET"
+  # The shell configuration file, but only as a file. Rollback restores every
+  # target by `rm -rf` plus a copy, so emitting a directory here would delete a
+  # whole tree — `--shell-config "$HOME"` would put $HOME on that list. A path
+  # we would create, or a regular file we would append a PATH line to, is the
+  # only shape this entry can safely take.
+  if [ -n "$PATH_TARGET" ] && { [ ! -e "$PATH_TARGET" ] || [ -f "$PATH_TARGET" ]; }; then
+    printf '%s\0' "$PATH_TARGET"
+  fi
 }
 
 snapshot_for_rollback() {
   local backup_root="$TMP_DIR/rollback"
   ROLLBACK_LOG="$TMP_DIR/rollback.log"
+  CREATED_DIRS_LOG="$TMP_DIR/created-dirs.log"
   mkdir -p "$backup_root"
   : > "$ROLLBACK_LOG"
+  : > "$CREATED_DIRS_LOG"
   local path="" index=0 backup=""
   while IFS= read -r -d '' path; do
     [ -n "$path" ] || continue
@@ -2681,6 +4208,40 @@ PY
   done < <(rollback_targets)
 }
 
+# The shell configuration file is the one rollback target the installer appends
+# to rather than owns, and it is the one a user is most likely to have open in
+# an editor while the install runs. Restoring the whole snapshot over it would
+# silently discard whatever they saved in the meantime, so its rollback removes
+# only the block this installer would have added and leaves everything else as
+# the user last wrote it.
+rollback_shell_config() {
+  local path="$1"
+  local backup="$2"
+  [ -f "$path" ] && [ -f "$backup" ] || return 1
+  cmp -s "$path" "$backup" && return 0
+  python3 - "$path" "$(shell_config_line)" <<'PY'
+import sys
+
+path, line = sys.argv[1:3]
+marker = "# Added by Macroscope installer"
+with open(path, encoding="utf-8") as handle:
+    lines = handle.read().split("\n")
+for index in range(len(lines) - 1):
+    if lines[index] == marker and lines[index + 1] == line:
+        start = index - 1 if index and lines[index - 1] == "" else index
+        del lines[start:index + 2]
+        break
+else:
+    raise SystemExit(0)
+with open(path, "w", encoding="utf-8") as handle:
+    handle.write("\n".join(lines))
+PY
+  if ! cmp -s "$path" "$backup"; then
+    warn "Kept your changes to $path; only the Macroscope PATH line was removed."
+  fi
+  return 0
+}
+
 rollback_install() {
   [ -f "$ROLLBACK_LOG" ] || return 0
   warn "Installation failed; restoring the previous install-owned state"
@@ -2689,12 +4250,36 @@ rollback_install() {
         IFS= read -r -d '' path &&
         IFS= read -r -d '' backup; do
     [ -n "$path" ] || continue
+    if [ -n "$PATH_TARGET" ] && [ "$path" = "$PATH_TARGET" ] && [ "$status" = "present" ] &&
+        rollback_shell_config "$path" "$backup"; then
+      continue
+    fi
     rm -rf "$path"
     if [ "$status" = "present" ]; then
       mkdir -p "$(dirname "$path")"
       cp -a "$backup" "$path"
     fi
   done < "$ROLLBACK_LOG"
+  remove_created_directories
+}
+
+# SIGINT and SIGTERM are handled explicitly. An untrapped signal tears the
+# shell down without giving the EXIT trap a non-zero `$?` to react to, which
+# would let a Ctrl-C or a `kill` delivered mid-apply skip rollback entirely and
+# leave the new binary beside the old configuration. The handler records the
+# signal and exits with the conventional 128+N status so handle_exit takes the
+# same rollback path a mid-apply error takes.
+handle_signal() {
+  local name="$1"
+  local number="$2"
+  INTERRUPT_SIGNAL="$name"
+  trap - INT TERM
+  exit $((128 + number))
+}
+
+install_signal_traps() {
+  trap 'handle_signal INT 2' INT
+  trap 'handle_signal TERM 15' TERM
 }
 
 handle_exit() {
@@ -2704,7 +4289,11 @@ handle_exit() {
     stty "$SAVED_TTY_STATE" < /dev/tty 2>/dev/null || true
     SAVED_TTY_STATE=""
   fi
-  if [ "$status" -ne 0 ] && [ "$APPLY_STARTED" -eq 1 ] && [ "$APPLY_COMPLETE" -eq 0 ]; then
+  if [ -n "$INTERRUPT_SIGNAL" ]; then
+    printf '\n'
+    warn "Interrupted by SIG${INTERRUPT_SIGNAL}."
+  fi
+  if { [ "$status" -ne 0 ] || [ -n "$INTERRUPT_SIGNAL" ]; } && [ "$APPLY_STARTED" -eq 1 ] && [ "$APPLY_COMPLETE" -eq 0 ]; then
     rollback_install || true
   fi
   [ -z "$TMP_DIR" ] || rm -rf "$TMP_DIR"
@@ -2716,14 +4305,21 @@ install_cursor_plugin() {
   local plugin_src="$CHECKOUT_DIR/plugins/macroscope"
   local cursor_dst="$HOME/.cursor/plugins/local/macroscope"
 
+  if { [ -e "$cursor_dst" ] || [ -L "$cursor_dst" ]; } && \
+      { [ ! -d "$cursor_dst" ] || [ -L "$cursor_dst" ] || { ! has_ownership_marker "$cursor_dst" && ! install_state_records_tool cursor; }; }; then
+    error "Refusing to overwrite unowned Cursor plugin at $cursor_dst"
+    return 1
+  fi
+
   if [ ! -f "$plugin_src/.cursor-plugin/plugin.json" ]; then
     warn "Cursor manifest not found in the plugin bundle; skipping Cursor installation."
     return
   fi
 
-  mkdir -p "$HOME/.cursor/plugins/local"
+  track_mkdir "$HOME/.cursor/plugins/local"
   copy_tree "$plugin_src" "$cursor_dst"
   strip_host_overlays "$cursor_dst"
+  write_ownership_marker "$cursor_dst"
 
   success "Installed Cursor plugin to ${BOLD}${cursor_dst}${RESET}"
 }
@@ -2741,28 +4337,61 @@ install_opencode_support() {
   local opencode_plugins="$opencode_root/plugins"
   local command_name=""
   local skill_name=""
+  local refusal=""
 
   if [ ! -d "$commands_src" ] || [ ! -d "$skills_src" ] || [ ! -f "$plugin_file" ]; then
     warn "OpenCode plugin, command, or skill files were not found in the plugin bundle; skipping OpenCode installation."
     return
   fi
 
-  mkdir -p "$opencode_commands" "$opencode_skills" "$opencode_plugins"
+  # Every destination is checked before anything is written. A command file
+  # must never end up pointing at a skill directory the installer then refuses
+  # to replace, so an unowned destination withdraws the whole OpenCode
+  # integration rather than leaving half of it on disk — and, because the other
+  # hosts are unaffected by it, it withdraws only that one. The run is reported
+  # as failed at the end.
+  for skill_name in codereview autoloop; do
+    if ! opencode_skill_destination_is_ours "$opencode_skills/macroscope-$skill_name"; then
+      warn "Left $opencode_skills/macroscope-$skill_name in place (no Macroscope ownership marker); skipped installing the macroscope-$skill_name skill"
+      refusal=1
+    fi
+  done
+  for path in "$opencode_plugins/macroscope.js" "$opencode_commands/macroscope-codereview.md" "$opencode_commands/macroscope-autoloop.md"; do
+    if { [ -e "$path" ] || [ -L "$path" ]; } && { [ -L "$path" ] || ! install_state_records_tool opencode; }; then
+      warn "Left $path in place (not recorded as installed by Macroscope)"
+      refusal=1
+    fi
+  done
+  if [ -n "$refusal" ]; then
+    migrate_legacy_opencode_skills "$opencode_skills" 1
+    error "Refusing to overwrite the OpenCode files named above."
+    warn "Installed no OpenCode integration; every other selected integration was installed."
+    HOST_INSTALL_FAILURES="${HOST_INSTALL_FAILURES:+$HOST_INSTALL_FAILURES, }opencode"
+    SELECTED_TOOLS="$(printf '%s' "$SELECTED_TOOLS" | tr ',' '\n' | sed '/^opencode$/d' | paste -sd, -)"
+    return 0
+  fi
+
+  track_mkdir "$opencode_commands" "$opencode_skills" "$opencode_plugins"
 
   cp "$plugin_file" "$opencode_plugins/macroscope.js"
 
-  # OpenCode uses flat namespaces for both skills and commands. We avoid
-  # the earlier `review`/`loop` collision risk by naming the skills
-  # `codereview` and `autoloop` at the source — distinctive enough that
-  # no rewrite or per-host prefix is needed. Commands live as
-  # `macroscope-codereview` and `macroscope-autoloop` so typing `/macro`
-  # surfaces both in the OpenCode command palette.
-  cp "$commands_src/macroscope-codereview.md" "$opencode_commands/macroscope-codereview.md"
-  if [ -f "$commands_src/macroscope-autoloop.md" ]; then
-    cp "$commands_src/macroscope-autoloop.md" "$opencode_commands/macroscope-autoloop.md"
-  fi
-  copy_tree "$skills_src/codereview" "$opencode_skills/codereview"
-  copy_tree "$skills_src/autoloop" "$opencode_skills/autoloop"
+  # OpenCode uses flat, user-wide namespaces for both skills and commands, so
+  # everything we drop into them is prefixed: `codereview` and `autoloop` are
+  # names a user's own skill can legitimately own, and the other hosts
+  # namespace skills per plugin so the bundle ships them unprefixed. The
+  # OpenCode copy is therefore rewritten — OpenCode requires a skill's
+  # frontmatter `name` to equal its directory name — and the command files are
+  # repointed at the prefixed skill paths they open.
+  for command_name in macroscope-codereview macroscope-autoloop; do
+    [ -f "$commands_src/$command_name.md" ] || continue
+    install_opencode_command "$commands_src/$command_name.md" "$opencode_commands/$command_name.md"
+  done
+
+  migrate_legacy_opencode_skills "$opencode_skills"
+
+  for skill_name in codereview autoloop; do
+    install_opencode_skill "$skills_src/$skill_name" "$opencode_skills/macroscope-$skill_name"
+  done
 
   success "Installed OpenCode plugin to ${BOLD}${opencode_plugins}/macroscope.js${RESET}"
   success "Installed OpenCode commands to ${BOLD}${opencode_commands}${RESET}"
@@ -2846,7 +4475,8 @@ verify_install() {
   if [ -n "$INSTALLED_BINARY" ] && [ -x "$INSTALLED_BINARY" ]; then
     success "Binary exists at: ${BOLD}${INSTALLED_BINARY}${RESET}"
   else
-    warn "Installed binary path not found/executable: ${INSTALLED_BINARY}"
+    error "Installed binary path not found/executable: ${INSTALLED_BINARY}"
+    return 1
   fi
 
   if command -v macroscope >/dev/null 2>&1; then
@@ -2867,21 +4497,7 @@ verify_install() {
 
   codex_home="$(get_codex_home)"
   codex_source="$HOME/plugins/macroscope"
-  codex_marketplace_name="$(python3 - <<'PY'
-import json
-import os
-
-path = os.path.expanduser("~/.agents/plugins/marketplace.json")
-name = "local-user-plugins"
-
-if os.path.exists(path):
-    with open(path, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    name = data.get("name", name)
-
-print(name)
-PY
-)"
+  codex_marketplace_name="$(get_codex_marketplace_name)"
   codex_cache="$codex_home/plugins/cache/$codex_marketplace_name/macroscope/$CODEX_LOCAL_PLUGIN_VERSION"
 
   if tool_selected codex && [ -f "$codex_source/.codex-plugin/plugin.json" ]; then
@@ -2915,7 +4531,7 @@ PY
   fi
 
   local opencode_root="$(get_opencode_config_dir)"
-  if tool_selected opencode && [ -f "$opencode_root/plugins/macroscope.js" ] && [ -f "$opencode_root/commands/macroscope-codereview.md" ] && [ -f "$opencode_root/skills/codereview/SKILL.md" ]; then
+  if tool_selected opencode && [ -f "$opencode_root/plugins/macroscope.js" ] && [ -f "$opencode_root/commands/macroscope-codereview.md" ] && [ -f "$opencode_root/skills/macroscope-codereview/SKILL.md" ]; then
     success "OpenCode plugin, commands, and skills installed"
   elif tool_selected opencode; then
     warn "OpenCode install did not produce the expected plugin, command, and skill files"
@@ -3034,6 +4650,7 @@ launch_wizard() {
 
 main() {
   trap 'handle_exit $?' EXIT
+  install_signal_traps
   parse_options "$@"
   if [ "$OUTPUT_FORMAT" = "json" ]; then
     exec 3>&1
@@ -3052,6 +4669,7 @@ main() {
   fi
 
   load_install_state
+  adopt_legacy_install
   resolve_lifecycle
   resolve_saved_auto_update
 
@@ -3091,6 +4709,7 @@ main() {
 
   confirm_plan || return $?
 
+  check_binary_target
   prepare_tmp_dir
   stage_binary
   if [ -n "$SELECTED_TOOLS" ]; then fetch_plugin_bundle; fi
@@ -3127,6 +4746,20 @@ main() {
   APPLY_COMPLETE=1
   verify_install
   launch_wizard
+  if [ -n "$HOST_INSTALL_FAILURES" ]; then
+    error "Macroscope is installed, but the $HOST_INSTALL_FAILURES integration was not: files there are not this installation's to replace."
+    error "Move or remove the files named above and rerun to add it."
+    if [ "$OUTPUT_FORMAT" = "json" ]; then
+      printf '{"success":false,"dryRun":false,"mode":"%s","tools":"%s","failedIntegrations":"%s"}\n' \
+        "$INSTALL_MODE" "$SELECTED_TOOLS" "$HOST_INSTALL_FAILURES" >&3
+    fi
+    # Exit 4: the CLI is installed and usable, one or more integrations were
+    # declined. Distinct from 1 (nothing usable was installed) so a caller that
+    # drives this script, the macroscope CLI's own update path in particular,
+    # can report an update that succeeded with a skipped integration instead
+    # of a failed update.
+    return 4
+  fi
   print_installation_completion
   if [ "$OUTPUT_FORMAT" = "json" ]; then
     printf '{"success":true,"dryRun":false,"mode":"%s","tools":"%s"}\n' "$INSTALL_MODE" "$SELECTED_TOOLS" >&3
