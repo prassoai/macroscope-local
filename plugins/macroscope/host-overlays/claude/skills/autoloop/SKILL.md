@@ -95,6 +95,7 @@ cd '<isolate_worktree>' && { macroscope codereview --raw --auto-update --isolate
   issue_event={"issue_id":"...","sequence":1,"path":"file.go","line":42,"severity":"medium","category":"REVIEW_TYPE_CORRECTNESS","body":"..."}
   ```
 - Capture `review_id=` when it appears.
+- Capture `review_coverage=<json>` if it appears. It is optional, emitted once just before the terminal `issue_status` on a successful review, and reports how much was actually checked: `{"status":"complete|partial|unknown","total_code_objects":N,"fully_checked_code_objects":N,"incomplete_code_objects":N,"incomplete_by_reason":{"deadline":N}}`. `status=partial` means some code objects were not fully reviewed (e.g. a detection agent hit its time limit); `status=unknown` means the server did not report coverage. Absent on failed reviews. Record it for each iteration and state it in that iteration's summary; it governs whether the branch may be called clean (section 5) and must appear in the final report (section 6).
 - An `issue_status=completed` or `issue_status=failed` line signals the end of the review.
 - Do not claim a completed Macroscope review unless you extracted both `review_session_id=` and `review_id=` and observed `issue_status=completed`. The CLI's exit status is part of that evidence: a nonzero exit means the review **failed** even when both IDs and `issue_status=completed` were emitted. Terminal tokens never override a nonzero exit. Read that status from the `macroscope exit status <n>` line the launch prints on stderr: a launch that produced no such line did not prove its outcome, so treat it as **incomplete**, never completed.
 - After handling each available issue batch, wait on the same task with `TaskOutput {block: true, timeout: 600000}`. If that call times out while the task is still running and no terminal status appeared, immediately call it again with the same blocking timeout.
@@ -185,6 +186,14 @@ Stop the loop when any of these occurs:
 2. A completed review did not change code (no valid issues found or all rejected).
 3. The iteration cap is reached.
 
+**The branch may be called clean only when the final review completed, changed no code, and reported `review_coverage` status `complete`.** When a completed review changed no code, coverage decides what you may claim:
+
+- `complete`: the branch is clean — every code object was fully reviewed and none needed a fix.
+- `partial`: do not report the branch clean. Report "no issues found in the checked code, but N of M code objects were not fully checked (reason)", drawing N, M, and the reason from `incomplete_code_objects`, `total_code_objects`, and `incomplete_by_reason`. Then stop: a partial result is usually a deadline that re-running will not necessarily clear, so do not start extra iterations solely because coverage was partial.
+- `unknown`, or `review_coverage` absent on a completed review: report that coverage could not be verified and do not claim the branch is clean or exhaustively reviewed.
+
+This changes only what a no-change review may claim; it does not add an iteration. The iteration logic above is unchanged — a completed review that changed code still starts the next iteration until the cap.
+
 In isolate mode, keep the worktree only until the loop stops. If fixes exist, create the final patch and complete `git apply --check` before cleanup. If unresolved fixes cannot be preserved in a verified patch, retain their worktree and report its path instead of discarding them. Otherwise, remove the retained worktree and its branch while preserving the patch:
 
 ```bash
@@ -209,6 +218,7 @@ Those two guards are all that separates this `--force` from a checkout of the us
 When the loop stops, report:
 
 - The stop reason and review outcome: **failed**, **incomplete**, **iteration cap reached**, or **completed**. Include the observed session/review IDs and terminal status; identify missing tokens explicitly. Report a failed or incomplete review separately from successful local tests or an applicable partial patch.
+- The coverage of the final completed review: `review_coverage` status and N of M code objects fully checked, with the `incomplete_by_reason` breakdown when the status is `partial`. If coverage was `unknown` or absent, say so and do not describe the branch as exhaustively reviewed.
 - The iteration count: the exact number of `macroscope codereview` launches, including any relaunch after a misdirected or misfired review, and the directory each ran in when they differed.
 - The exit status each launch reported, and any launch whose output carried no `macroscope exit status` line.
 - **Group issues by severity** (critical first, then high, medium, low):
