@@ -182,16 +182,14 @@ CHECKOUT_DIR=""
 PLUGIN_VERSION=""
 INSTALL_DIR=""
 CONFIG_SEEDED=0
-CODEX_SHIM_INSTALLED=0
-CODEX_PLUGIN_HOST_WARNING=""
 
 CODEX_LOCAL_PLUGIN_VERSION="local"
-CODEX_BUNDLED_BINARY=""
-CODEX_SHIM_PATH=""
 
 DRY_RUN=0
 ASSUME_YES=0
 TOOLS_SPEC=""
+TOOLS_EXPLICIT=0
+PRESENT_TOOLS=""
 SELECTED_TOOLS=""
 SKIP_PATH=0
 SHELL_CONFIG_OVERRIDE=""
@@ -261,7 +259,7 @@ parse_options() {
           exit 2
         fi
         case "$1" in
-          --tools) TOOLS_SPEC="$2" ;;
+          --tools) TOOLS_SPEC="$2"; TOOLS_EXPLICIT=1 ;;
           # Accepted as a no-op so older CLI binaries can still hand off to
           # this installer during their mandatory update.
           --host-permissions) ;;
@@ -273,7 +271,7 @@ parse_options() {
         ;;
       --tools=*|--host-permissions=*|--shell-config=*|--format=*|--mode=*)
         case "$1" in
-          --tools=*) TOOLS_SPEC="${1#*=}" ;;
+          --tools=*) TOOLS_SPEC="${1#*=}"; TOOLS_EXPLICIT=1 ;;
           --host-permissions=*) ;;
           --shell-config=*) SHELL_CONFIG_OVERRIDE="${1#*=}" ;;
           --format=*) OUTPUT_FORMAT="${1#*=}" ;;
@@ -392,6 +390,38 @@ detect_installed_tools() {
   local tool=""
   for tool in claude codex cursor opencode; do
     tool_installed "$tool" && detected="${detected:+$detected,}$tool"
+  done
+  printf '%s' "$detected"
+}
+
+# The macOS applications directory, overridable so presence detection can be
+# pointed at a sandbox instead of the host's real /Applications.
+applications_dir() {
+  printf '%s' "${MACROSCOPE_APPLICATIONS_DIR:-/Applications}"
+}
+
+# Whether a coding agent appears to be present on this machine at all. This is
+# distinct from tool_installed, which reports only whether Macroscope has already
+# written integration files for the tool. Detection is cheap and conservative: a
+# binary on PATH, a configuration directory the tool itself created, or a macOS
+# application bundle for a desktop-only install.
+tool_present() {
+  local apps=""
+  apps="$(applications_dir)"
+  case "$1" in
+    claude) command -v claude >/dev/null 2>&1 || [ -d "$(get_claude_config_dir)" ] || [ -d "$apps/Claude.app" ] ;;
+    codex) command -v codex >/dev/null 2>&1 || [ -d "$(get_codex_home)" ] || [ -d "$apps/Codex.app" ] ;;
+    cursor) command -v cursor >/dev/null 2>&1 || command -v cursor-agent >/dev/null 2>&1 || [ -d "$HOME/.cursor" ] || [ -d "$apps/Cursor.app" ] ;;
+    opencode) command -v opencode >/dev/null 2>&1 || [ -d "$(get_opencode_config_dir)" ] ;;
+    *) return 1 ;;
+  esac
+}
+
+detect_present_tools() {
+  local detected=""
+  local tool=""
+  for tool in claude codex cursor opencode; do
+    tool_present "$tool" && detected="${detected:+$detected,}$tool"
   done
   printf '%s' "$detected"
 }
@@ -657,7 +687,8 @@ select_tools() {
       if [ -z "$prompt_default" ]; then
         printf '\n%s!%s %sNo Macroscope host integrations are currently selected.%s\n' "$YELLOW" "$RESET" "$BOLD" "$RESET" > /dev/tty
         printf '%s  Select integrations now so a CLI-only install is not preserved accidentally.%s\n' "$DIM" "$RESET" > /dev/tty
-        prompt_default="claude,codex,cursor,opencode"
+        prompt_default="$(detect_present_tools)"
+        [ -n "$prompt_default" ] || prompt_default="claude,codex,cursor,opencode"
       else
         printf '\n%s•%s Current integrations are selected below.\n' "$CYAN" "$RESET" > /dev/tty
       fi
@@ -666,7 +697,8 @@ select_tools() {
     fi
     normalized="$(normalize_tools "${TOOLS_SPEC:-${prompt_default:-none}}")"
   else
-    default_tools="claude,codex,cursor,opencode"
+    default_tools="$(detect_present_tools)"
+    [ -n "$default_tools" ] || default_tools="claude,codex,cursor,opencode"
     if has_interactive_tty && [ "$ASSUME_YES" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
       prompt_tools "$default_tools"
       TOOLS_SPEC="$TUI_RESULT"
@@ -813,10 +845,6 @@ print_plan() {
       tool_selected "$tool" && printf '   (%s)\n' "$(tool_install_plan_path "$tool")"
     done
     index=$((index + 1))
-    if tool_selected codex && codex_shim_will_install; then
-      printf '%d. Install or update the managed Codex CLI wrapper at %s/.local/bin/codex\n' "$index" "$HOME"
-      index=$((index + 1))
-    fi
   fi
   for tool in claude codex cursor opencode; do
     if ! tool_selected "$tool" && [ "$INSTALL_MODE" = "update" ] && tool_installed "$tool"; then
@@ -843,7 +871,6 @@ print_change_details() {
   local codex_marketplace=""
   local codex_plugin_key=""
   local opencode_config=""
-  local quoted_codex_binary=""
   local default_env="${MACROSCOPE_DEFAULT_ENV:-prod}"
   [ "$INSTALL_MODE" = "update" ] && binary_action="Replace"
   claude_config="$(get_claude_config_dir)"
@@ -852,14 +879,6 @@ print_change_details() {
   codex_plugin_key="macroscope@$codex_marketplace"
   opencode_config="$(get_opencode_config_dir)"
   case "$default_env" in prod|nonprod|local) ;; *) default_env="prod" ;; esac
-
-  if tool_selected codex && codex_shim_will_install; then
-    quoted_codex_binary="$(python3 - "$CODEX_BUNDLED_BINARY" <<'PY'
-import shlex, sys
-print(shlex.quote(sys.argv[1]))
-PY
-)"
-  fi
 
   _ccd_file() { printf '\n  %s%s%s%s\n' "$BOLD" "$CYAN" "$1" "$RESET"; }
   _ccd_key() { printf '    %s:\n' "$1"; }
@@ -925,13 +944,6 @@ PY
             _ccd_add 'Macroscope plugin source'
             _ccd_file "$codex_home/plugins/cache/$codex_marketplace/macroscope/$CODEX_LOCAL_PLUGIN_VERSION/"
             _ccd_add 'Macroscope plugin cache'
-            if [ -n "$quoted_codex_binary" ]; then
-              _ccd_file "$HOME/.local/bin/codex"
-              _ccd_add '#!/bin/bash'
-              _ccd_add 'set -euo pipefail'
-              _ccd_add '# Macroscope-managed Codex shim'
-              _ccd_add "exec $quoted_codex_binary \"\$@\""
-            fi
             ;;
           cursor)
             _ccd_file "$HOME/.cursor/plugins/local/macroscope/"
@@ -1097,45 +1109,50 @@ PY
   printf '%s' "$name"
 }
 
-codex_supports_plugins() {
+# The first Codex release whose feature registry carries the `plugins` feature
+# this installer configures (config.toml `[features] plugins = true`). Earlier
+# CLIs expose the `app-server` command without any plugin support, so the
+# `app-server` help string is necessary but not sufficient — capability is a
+# version floor.
+CODEX_MIN_PLUGIN_VERSION="0.108.0"
+
+codex_version_string() {
   local codex_bin="$1"
   [ -x "$codex_bin" ] || return 1
-  "$codex_bin" --help 2>/dev/null | grep -q "app-server"
+  "$codex_bin" --version 2>/dev/null | head -n 1
 }
 
-resolve_codex_bundled_binary() {
-  if [ -n "${MACROSCOPE_CODEX_BUNDLED_BINARY:-}" ]; then
-    CODEX_BUNDLED_BINARY="$MACROSCOPE_CODEX_BUNDLED_BINARY"
-    return
-  fi
-
-  local candidate=""
-  local candidates=(
-    "${MACROSCOPE_CODEX_APP_BINARY:-/Applications/Codex.app/Contents/Resources/codex}"
-    "${MACROSCOPE_CHATGPT_APP_BINARY:-/Applications/ChatGPT.app/Contents/Resources/codex}"
-  )
-  CODEX_BUNDLED_BINARY="${candidates[0]}"
-  for candidate in "${candidates[@]}"; do
-    if codex_supports_plugins "$candidate"; then
-      CODEX_BUNDLED_BINARY="$candidate"
-      return
-    fi
-  done
+# version_at_least HAVE WANT — true when dotted version HAVE >= WANT, compared
+# field by field as major.minor.patch. Missing fields count as 0.
+version_at_least() {
+  local h1 h2 h3 w1 w2 w3
+  IFS=. read -r h1 h2 h3 <<< "$1"
+  IFS=. read -r w1 w2 w3 <<< "$2"
+  h1=${h1:-0} h2=${h2:-0} h3=${h3:-0}
+  w1=${w1:-0} w2=${w2:-0} w3=${w3:-0}
+  if [ "$h1" -ne "$w1" ]; then [ "$h1" -gt "$w1" ]; return; fi
+  if [ "$h2" -ne "$w2" ]; then [ "$h2" -gt "$w2" ]; return; fi
+  [ "$h3" -ge "$w3" ]
 }
 
-codex_shim_will_install() {
-  local current_codex=""
-  current_codex="$(command -v codex || true)"
-  if [ -n "$current_codex" ] && [ "$current_codex" = "$CODEX_BUNDLED_BINARY" ] && codex_supports_plugins "$current_codex"; then
-    return 1
-  fi
-  [ -x "$CODEX_BUNDLED_BINARY" ] && codex_supports_plugins "$CODEX_BUNDLED_BINARY" || return 1
-  [ ! -f "$HOME/.local/bin/codex" ] || is_managed_codex_shim "$HOME/.local/bin/codex"
+# codex_version_supports_plugins VERSION_STRING — true when the dotted version in
+# VERSION_STRING is at least CODEX_MIN_PLUGIN_VERSION. An empty or unparseable
+# string is treated as unsupported so the upgrade guidance is shown rather than
+# silently suppressed. Takes the already-captured `codex --version` output so the
+# caller reads the CLI once and displays the same version it checked.
+codex_version_supports_plugins() {
+  local version=""
+  version="$(printf '%s' "$1" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)"
+  [ -n "$version" ] || return 1
+  version_at_least "$version" "$CODEX_MIN_PLUGIN_VERSION"
 }
 
+# Whether a file is a Codex shim an old installer wrote: a regular file (never a
+# symlink, never a directory) carrying our exact marker. Nothing else at that
+# path is ours to touch.
 is_managed_codex_shim() {
   local path="$1"
-  [ -f "$path" ] || return 1
+  [ -f "$path" ] && [ ! -L "$path" ] || return 1
   grep -Fq "Macroscope-managed Codex shim" "$path"
 }
 
@@ -2632,6 +2649,14 @@ check_dependencies() {
     echo "Install Go first, or unset MACROSCOPE_LOCAL_BACK_REPO to use a released binary."
     exit 1
   fi
+
+  # ripgrep is optional, not required: the CLI's working-tree search prefers it but
+  # falls back to git grep when it is absent. Warn so the fuller, faster engine can be
+  # installed, and never fail the install over it.
+  if ! repair_only_requested && ! command -v rg >/dev/null 2>&1; then
+    warn "ripgrep (rg) not found on PATH; code review will search the working tree with git grep instead."
+    step "Install ripgrep for faster, fuller search: 'brew install ripgrep' (macOS) or 'apt-get install ripgrep' (Debian/Ubuntu)."
+  fi
 }
 
 detect_platform() {
@@ -3406,72 +3431,29 @@ update_shell_config() {
   export PATH="$HOME/.local/bin:$PATH"
 }
 
-install_codex_cli_shim() {
-  step "Checking Codex CLI..."
-
-  local current_codex=""
+# Old installers wrote ~/.local/bin/codex as a managed shim redirecting the
+# `codex` command at a desktop-app binary. The shim concept is gone, and a stale
+# one now points at a path recent Codex releases no longer ship. Remove ours — a
+# regular file carrying our exact marker — on both install and update. The
+# rollback snapshot already covers this path, so a failed apply restores it.
+remove_legacy_codex_shim() {
   local shim_path="$HOME/.local/bin/codex"
-
-  CODEX_SHIM_PATH="$shim_path"
-  current_codex="$(command -v codex || true)"
-
-  if [ -n "$current_codex" ] && [ "$current_codex" = "$CODEX_BUNDLED_BINARY" ] && codex_supports_plugins "$current_codex"; then
-    success "Codex CLI already uses the bundled Codex desktop binary: ${BOLD}${current_codex}${RESET}"
+  is_managed_codex_shim "$shim_path" || return 0
+  if ! rm -f "$shim_path" 2>/dev/null; then
+    warn "Could not remove $shim_path"
     return
   fi
+  success "Removed the obsolete Macroscope-managed codex shim at $shim_path"
+}
 
-  if [ ! -x "$CODEX_BUNDLED_BINARY" ] || ! codex_supports_plugins "$CODEX_BUNDLED_BINARY"; then
-    if [ -n "$current_codex" ]; then
-      CODEX_PLUGIN_HOST_WARNING="Codex CLI at ${current_codex} does not support local plugins. Install or update the Codex desktop app to use \$macroscope:codereview from the CLI."
-      warn "$CODEX_PLUGIN_HOST_WARNING"
-    else
-      CODEX_PLUGIN_HOST_WARNING="Codex CLI is not installed. Install the Codex desktop app to use \$macroscope:codereview from the CLI."
-      warn "$CODEX_PLUGIN_HOST_WARNING"
-    fi
-    return
-  fi
-
-  if [ -e "$shim_path" ] || [ -L "$shim_path" ]; then
-    if [ -L "$shim_path" ] || [ ! -f "$shim_path" ] || ! is_managed_codex_shim "$shim_path"; then
-      CODEX_PLUGIN_HOST_WARNING="Existing ${shim_path} was left untouched, so the current Codex CLI may still be too old for plugins."
-      warn "$CODEX_PLUGIN_HOST_WARNING"
-      return
-    fi
-  fi
-
-  if ! python3 - "$shim_path" "$CODEX_BUNDLED_BINARY" <<'PY'
-import os
-import shlex
-import sys
-import tempfile
-
-path, bundled = sys.argv[1:3]
-fd, temporary = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".macroscope-codex-shim-")
-try:
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        f.write("#!/bin/bash\nset -euo pipefail\n# Macroscope-managed Codex shim\nexec %s \"$@\"\n" % shlex.quote(bundled))
-    os.chmod(temporary, 0o755)
-    os.replace(temporary, path)
-except Exception:
-    try:
-        os.unlink(temporary)
-    except OSError:
-        pass
-    raise
-PY
-  then
-    error "Could not install the Codex CLI shim at $shim_path"
-    return 1
-  fi
-  CODEX_SHIM_INSTALLED=1
-
-  if [ -n "$current_codex" ] && [ "$current_codex" != "$shim_path" ]; then
-    success "Installed Codex CLI shim at ${BOLD}${shim_path}${RESET}"
-    info "${BOLD}codex${RESET} will now use the bundled Codex desktop binary instead of ${current_codex}."
-  else
-    success "Installed Codex CLI shim at ${BOLD}${shim_path}${RESET}"
-    info "${BOLD}codex${RESET} is now available via the bundled Codex desktop binary."
-  fi
+# A tool the user named with --tools that is not on the machine: the plugin files
+# are installed anyway, for when they do install it. Say so once, neutrally — no
+# warning. A tool that was only preselected by detection gets no line at all.
+maybe_note_absent_tool() {
+  local tool="$1"
+  [ "$TOOLS_EXPLICIT" -eq 1 ] || return 0
+  case ",$PRESENT_TOOLS," in *",$tool,"*) return 0 ;; esac
+  info "$tool not found; Macroscope plugin files installed for when you install it."
 }
 
 install_codex_plugin() {
@@ -4073,7 +4055,6 @@ remove_tool_integration() {
         [ -d "$cache" ] || continue
         remove_owned_codex_cache_versions "$cache" "$(install_state_records_tool codex && printf 1 || printf 0)"
       done
-      if is_managed_codex_shim "$HOME/.local/bin/codex"; then rm -f "$HOME/.local/bin/codex"; fi
       ;;
     cursor) remove_owned_plugin_dir "$HOME/.cursor/plugins/local/macroscope" cursor || true ;;
     opencode)
@@ -4135,7 +4116,6 @@ rollback_targets() {
     "$HOME/.local/bin/macroscope" \
     "$HOME/.local/bin/macroscope.old" \
     "$HOME/.local/bin/macroscope-mcp" \
-    "$HOME/.local/bin/codex" \
     "$HOME/plugins/macroscope" \
     "$HOME/.agents/plugins/marketplace.json" \
     "$codex_home/plugins/cache/$codex_marketplace/macroscope" \
@@ -4160,6 +4140,14 @@ rollback_targets() {
     "$opencode_config/opencode.json" \
     "$HOME/.macroscope/config.yaml" \
     "$STATE_FILE"
+  # The Codex path, but only when it is an owned managed shim this run will
+  # remove. Rollback restores a target by `rm -rf` plus a copy — and
+  # snapshot_for_rollback additionally records a symlink's resolved target — so
+  # listing an unmanaged file or symlink here would overwrite, or restore the
+  # target of, a file this installer promised never to touch.
+  if is_managed_codex_shim "$HOME/.local/bin/codex"; then
+    printf '%s\0' "$HOME/.local/bin/codex"
+  fi
   # The shell configuration file, but only as a file. Rollback restores every
   # target by `rm -rf` plus a copy, so emitting a directory here would delete a
   # whole tree — `--shell-config "$HOME"` would put $HOME on that list. A path
@@ -4537,13 +4525,22 @@ verify_install() {
     warn "OpenCode install did not produce the expected plugin, command, and skill files"
   fi
 
+  # Codex gained plugin support in recent releases. A codex on PATH that is too
+  # old gets exactly one line — the found version and how to upgrade. There is
+  # nothing to redirect or wrap; the plugin files are written regardless. An
+  # absent codex says nothing here (maybe_note_absent_tool already spoke if it
+  # was named with --tools).
   codex_cli="$(command -v codex || true)"
-  if tool_selected codex && [ -n "$codex_cli" ] && codex_supports_plugins "$codex_cli"; then
-    success "Codex CLI supports plugins: ${BOLD}${codex_cli}${RESET}"
-  elif tool_selected codex && [ -n "$CODEX_PLUGIN_HOST_WARNING" ]; then
-    warn "$CODEX_PLUGIN_HOST_WARNING"
-  elif tool_selected codex; then
-    warn "Codex CLI is not available for plugin verification in this shell"
+  if ! tool_selected codex || [ -z "$codex_cli" ]; then
+    :
+  else
+    local codex_version=""
+    codex_version="$(codex_version_string "$codex_cli" || true)"
+    if codex_version_supports_plugins "$codex_version"; then
+      success "Codex CLI supports plugins: ${BOLD}${codex_cli}${RESET}"
+    else
+      warn "Codex CLI at ${codex_cli}${codex_version:+ ($codex_version)} does not support plugins; upgrade with 'brew upgrade codex' or 'npm i -g @openai/codex@latest'."
+    fi
   fi
 }
 
@@ -4571,11 +4568,6 @@ print_installation_completion() {
   printf "${BOLD}Notes:${RESET}\n"
   printf "  Restart Codex, Claude Code, Cursor, or OpenCode if they were already open.\n"
   printf "  Claude Code launches reviews in a background worker.\n"
-  if [ "$CODEX_SHIM_INSTALLED" = "1" ]; then
-    printf "  ${BOLD}codex${RESET} now points at the bundled Codex desktop CLI so plugins work from the terminal.\n"
-  elif [ -n "$CODEX_PLUGIN_HOST_WARNING" ]; then
-    printf "  ${YELLOW}%s${RESET}\n" "$CODEX_PLUGIN_HOST_WARNING"
-  fi
   echo ""
   printf "${BOLD}Need help?${RESET}\n"
   printf "  Documentation: ${BLUE}https://docs.macroscope.com/cli${RESET}\n"
@@ -4681,7 +4673,6 @@ main() {
 
   detect_platform
   determine_install_dir
-  resolve_codex_bundled_binary
   resolve_path_action
   resolve_version
 
@@ -4723,15 +4714,20 @@ main() {
     return 70
   fi
   update_shell_config
+  remove_legacy_codex_shim
+  # Snapshot presence before any plugin install creates a tool's config directory,
+  # so maybe_note_absent_tool reports on the machine as the user found it.
+  PRESENT_TOOLS="$(detect_present_tools)"
   local tool=""
   for tool in claude codex cursor opencode; do
     if tool_selected "$tool"; then
       case "$tool" in
         claude) install_claude_plugin ;;
-        codex) install_codex_cli_shim; install_codex_plugin ;;
+        codex) install_codex_plugin ;;
         cursor) install_cursor_plugin ;;
         opencode) install_opencode_support ;;
       esac
+      maybe_note_absent_tool "$tool"
     elif [ "$INSTALL_MODE" = "update" ] && tool_installed "$tool"; then
       remove_tool_integration "$tool"
     fi
