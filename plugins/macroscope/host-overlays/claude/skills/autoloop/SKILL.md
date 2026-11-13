@@ -85,11 +85,14 @@ Carry that directory in the command itself, as shown, substituting the absolute 
 cd '<isolate_worktree>' && { macroscope codereview --raw --auto-update --isolate=false [--base '<user-supplied-ref>']; macroscope_exit_code=$?; printf 'macroscope exit status %d\n' "$macroscope_exit_code" >&2; (exit "$macroscope_exit_code"); }
 ```
 
-- Read streamed output via `TaskOutput` with the background task ID and look for a line containing `review_session_id=`. Capture that stable UUID.
-- Poll `TaskOutput` with `block: false` while the review is starting.
+**Reading the stream.** This host has no `TaskOutput` tool. A background launch gives you a task ID and the path of the file its output is written to, and the host notifies you when that task exits. Read that file with the `Read` tool. It numbers the lines, so a later read resumes where the last one ended, and every finding carries an `issue_id`, so a line you see twice is one you have already triaged.
+
+**Nothing may outlive the launch.** Do not start anything that keeps running after the review does: no `Monitor`, no background watcher, no `tail -f`, no `tail -F`, no `while true` follower, nothing that does not stop by itself. Such a watcher runs on past the review's exit — through the next iteration, up to its own timeout — which is exactly the defect this rule prevents. Reading a file costs one tool call and leaves nothing behind to stop or clean up.
+
+- Look for a line containing `review_session_id=` in that output. Capture that stable UUID.
 - If no `review_session_id=` appears after a reasonable wait, inspect the stream, surface the failure, and stop.
 - Do not wait for `review_id=` before processing issues. That identifies the terminal server attempt and is emitted near the end of the run.
-- Issues stream on stderr as `issue_event=<json>` lines. Read them via `TaskOutput` with the background task ID.
+- Issues stream on stderr as `issue_event=<json>` lines. They appear in that output file as the review writes them.
 - Each `issue_event=` line contains a JSON object:
   ```
   issue_event={"issue_id":"...","sequence":1,"path":"file.go","line":42,"severity":"medium","category":"REVIEW_TYPE_CORRECTNESS","body":"..."}
@@ -98,8 +101,11 @@ cd '<isolate_worktree>' && { macroscope codereview --raw --auto-update --isolate
 - Capture `review_coverage=<json>` if it appears. It is optional, emitted once just before the terminal `issue_status` on a successful review, and reports how much was actually checked: `{"status":"complete|partial|unknown","total_code_objects":N,"fully_checked_code_objects":N,"incomplete_code_objects":N,"incomplete_by_reason":{"deadline":N}}`. `status=partial` means some code objects were not fully reviewed (e.g. a detection agent hit its time limit); `status=unknown` means the server did not report coverage. Absent on failed reviews. Record it for each iteration and state it in that iteration's summary; it governs whether the branch may be called clean (section 5) and must appear in the final report (section 6).
 - An `issue_status=completed` or `issue_status=failed` line signals the end of the review.
 - Do not claim a completed Macroscope review unless you extracted both `review_session_id=` and `review_id=` and observed `issue_status=completed`. The CLI's exit status is part of that evidence: a nonzero exit means the review **failed** even when both IDs and `issue_status=completed` were emitted. Terminal tokens never override a nonzero exit. Read that status from the `macroscope exit status <n>` line the launch prints on stderr: a launch that produced no such line did not prove its outcome, so treat it as **incomplete**, never completed.
-- After handling each available issue batch, wait on the same task with `TaskOutput {block: true, timeout: 600000}`. If that call times out while the task is still running and no terminal status appeared, immediately call it again with the same blocking timeout.
-- **Stay attached.** Long silent gaps after the last issue are normal. Keep blocking on `TaskOutput` during this same turn. Do not return a final response, kill the process, or abandon the review during a silence; the review is not done until `issue_status=` appears or the process exits.
+- After handling each batch of issues, read the file again. A silence is normal; the answer to one is another read, never something that follows the file for you.
+- **This iteration is not over until the host reports that its task exited.** When that notification arrives, read once more — an exited task writes nothing more, so that read is the last one this iteration needs. Only then may the next iteration launch.
+- Judge the outcome from everything you have read across all of those reads, never from the last read alone. The terminal `review_coverage=`, `review_id=`, `issue_status=` and `macroscope exit status` lines usually arrive well before the task exits, so the read after the exit notification is often unchanged — that is a launch that finished, not one that failed to report.
+- Only when **no** read of this launch's output has shown a terminal `issue_status=` or a `macroscope exit status` line did the launch end without proving its outcome — a failed `cd` into the preserved worktree does exactly this. Report that **incomplete**, name the launch and whatever it did print, and stop.
+- **Stay attached.** Long silent gaps after the last issue are normal. Keep reading the output file during this same turn. Do not return a final response, kill the process, or abandon the review during a silence; the review is not done until `issue_status=` appears or the task exits.
 
 ## 3. Handle streamed issues one at a time
 
@@ -133,7 +139,7 @@ Once the review reaches its final batch:
 1. Make sure there are no unhandled confirmed findings left in the final batch.
 2. Re-run the most relevant verification for the files you changed.
 3. Do not start an uncounted follow-up review here. Re-reviews are full iterations handled below and count toward the five-iteration cap.
-4. Keep blocking on `TaskOutput` for the attached `codereview` process until `issue_status=` appears or the process exits. Never stop it merely because all currently streamed issues are handled.
+4. Keep reading the attached launch's output file until `issue_status=` appears or the host reports the task exited. Never stop reading merely because all currently streamed issues are handled.
 
 ## 4. After the local review phase
 
