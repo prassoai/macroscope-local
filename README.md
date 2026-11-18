@@ -63,7 +63,7 @@ curl -sSL https://raw.githubusercontent.com/prassoai/macroscope-local/main/insta
 
 Integrations honor `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `OPENCODE_CONFIG_DIR`, `PI_CODING_AGENT_DIR`, `HERMES_HOME`, and Cursor's `~/.cursor` locations when set. Pi, Hermes Agent, and the OpenHands CLI get two skills in `~/.pi/agent/skills`, `~/.hermes/skills`, and `~/.openhands/skills` by default. A custom Pi directory should be an absolute path; the installer records it for updates and uninstall, but Pi loads the skills only while `PI_CODING_AGENT_DIR` names it.
 
-To change integrations on an existing install, pass `--tools` to `macroscope update`. The list replaces the saved selection, so name every agent to keep, for example `macroscope update --yes --tools claude,pi`. A plain `macroscope update` keeps the saved selection and does not add newly supported agents.
+To change integrations on an existing install, pass `--tools <list>` to `macroscope update`. The list replaces the saved selection, so name every agent to keep, for example `macroscope update --yes --tools claude,pi`. A plain `macroscope update` keeps the saved selection and does not add newly supported agents.
 
 ### Managed machines
 
@@ -74,7 +74,7 @@ curl -fsSL https://macroscope.com/install.sh |
   bash -s -- --yes --tools pi --no-wizard --no-path
 ```
 
-Your provisioning tooling puts `~/.local/bin` on PATH and configures Pi and its model provider. Each developer then runs `macroscope setup` to sign in with their own GitHub account and choose a workspace, and `macroscope me` confirms it. Sign-in cannot be pre-provisioned or shared.
+Your provisioning tooling puts `~/.local/bin` on PATH and configures Pi and its model provider. The installer doesn't sign anyone in. Each developer runs `macroscope setup` to sign in with their own GitHub account and choose a workspace; `macroscope me` confirms it worked. Unattended organization-wide enrollment and shared CLI credentials aren't supported.
 
 ## Uninstall
 
