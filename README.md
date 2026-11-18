@@ -28,34 +28,53 @@ macroscope
 
 Run a review from your editor:
 
-| Editor      | Review                   | Autopilot                |
-| ----------- | ------------------------ | ------------------------ |
-| Claude Code | `/macroscope:codereview` | `/macroscope:autoloop`   |
-| Codex       | `$macroscope:codereview` | `$macroscope:autoloop`   |
-| Cursor      | `/codereview`            | `/autoloop`              |
-| OpenCode    | `/macroscope-codereview` | `/macroscope-autoloop`   |
+| Agent         | Review                                          | Autopilot                                     |
+| ------------- | ----------------------------------------------- | --------------------------------------------- |
+| Claude Code   | `/macroscope:codereview`                        | `/macroscope:autoloop`                        |
+| Codex         | `$macroscope:codereview`                        | `$macroscope:autoloop`                        |
+| Cursor        | `/codereview`                                   | `/autoloop`                                   |
+| OpenCode      | `/macroscope-codereview`                        | `/macroscope-autoloop`                        |
+| Pi            | `/skill:macroscope-codereview`                  | `/skill:macroscope-autoloop`                  |
+| Hermes Agent  | `/macroscope-codereview`                        | `/macroscope-autoloop`                        |
+| OpenHands CLI | Ask it to use the `macroscope-codereview` skill | Ask it to use the `macroscope-autoloop` skill |
 
-- **Review** runs the local CLI review and validates each issue before acting.
-- **Autopilot** runs the full review → fix → re-review cycle.
+- **Review** runs a Macroscope review and reports validated issues without editing files.
+- **Autopilot** runs the full review → fix → commit → re-review cycle. Add `--isolate` to work in a separate worktree, for example `/skill:macroscope-autoloop --isolate` in Pi.
+
+Integrations call the `macroscope` CLI, which talks to Macroscope's hosted service; no local MCP server is needed. Restart an agent that was open during installation. In Pi, run `/reload` instead; Hermes picks up new skills with its next message, and OpenHands in a new conversation. The OpenHands integration is for the OpenHands CLI, not hosted OpenHands.
 
 ## Install options
 
-Preview without writing, or install only the editors you use:
+Preview without writing, or install only the agents you use:
 
 ```bash
 curl -sSL https://raw.githubusercontent.com/prassoai/macroscope-local/main/install.sh |
   bash -s -- --dry-run --tools claude,codex --no-path
 ```
 
-| Flag                    | Description                                                                    |
-| ----------------------- | ------------------------------------------------------------------------------ |
-| `--dry-run`             | Show the plan without making persistent writes                                 |
-| `--tools <list>`        | Comma-separated editors to integrate (`claude`, `codex`, `cursor`, `opencode`) |
-| `--no-path`             | Make no shell or PATH edits                                                    |
-| `--shell-config <path>` | Write PATH changes to a specific dotfile                                       |
-| `--yes`                 | Confirm the displayed plan non-interactively                                   |
+| Flag                    | Description                                                                                                                    |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| `--dry-run`             | Show the plan without making persistent writes                                                                                 |
+| `--tools <list>`        | Comma-separated agents to integrate (`claude`, `codex`, `cursor`, `opencode`, `pi`, `hermes`, `openhands`), or `all` or `none` |
+| `--no-path`             | Make no shell or PATH edits                                                                                                    |
+| `--shell-config <path>` | Write PATH changes to a specific dotfile                                                                                       |
+| `--yes`                 | Confirm the displayed plan non-interactively                                                                                   |
+| `--no-wizard`           | Skip sign-in and workspace selection after installing                                                                          |
 
-Integrations honor `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `OPENCODE_CONFIG_DIR`, and Cursor's `~/.cursor` locations when set.
+Integrations honor `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `OPENCODE_CONFIG_DIR`, `PI_CODING_AGENT_DIR`, `HERMES_HOME`, and Cursor's `~/.cursor` locations when set. Pi, Hermes Agent, and the OpenHands CLI get two skills in `~/.pi/agent/skills`, `~/.hermes/skills`, and `~/.openhands/skills` by default. A custom Pi directory should be an absolute path; the installer records it for updates and uninstall, but Pi loads the skills only while `PI_CODING_AGENT_DIR` names it.
+
+To change integrations on an existing install, pass `--tools` to `macroscope update`. The list replaces the saved selection, so name every agent to keep, for example `macroscope update --yes --tools claude,pi`. A plain `macroscope update` keeps the saved selection and does not add newly supported agents.
+
+### Managed machines
+
+Run the installer as each developer's own user, not as root:
+
+```bash
+curl -fsSL https://macroscope.com/install.sh |
+  bash -s -- --yes --tools pi --no-wizard --no-path
+```
+
+Your provisioning tooling puts `~/.local/bin` on PATH and configures Pi and its model provider. Each developer then runs `macroscope setup` to sign in with their own GitHub account and choose a workspace, and `macroscope me` confirms it. Sign-in cannot be pre-provisioned or shared.
 
 ## Uninstall
 
