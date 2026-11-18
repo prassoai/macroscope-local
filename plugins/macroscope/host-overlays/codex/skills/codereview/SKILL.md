@@ -16,6 +16,7 @@ This skill is **report-only**. It validates findings and reports them by severit
 Before the first review, run this standalone preflight and wait for success. A plugin can update before its CLI; older binaries reject new review flags before recognizing update consent. Use their compatible standalone updater first:
 
 ```bash
+(
 macroscope_status() {
   printf 'macroscope exit status %d\n' "$macroscope_exit_code" >&2
   return "$macroscope_exit_code"
@@ -34,9 +35,10 @@ if ! printf '%s\n' "$macroscope_help" | grep -q -- '--isolate'; then
     exit 1
   fi
 fi
+)
 ```
 
-Stop if this fails; do not launch a review or remove required flags to work around it. Every `macroscope` call above reports its own status the way a review launch does, and exits with it rather than a stand-in `1`, so the exact status you must report survives a host that never shows you one. This checks CLI compatibility only. Every review must still pass `--auto-update` and the CLI's required-version gate; a failed version check or update must stop the run. Updates preserve the installer's saved integration choices.
+Run the block exactly as written, parentheses included: they run it in a subshell, so its `exit` ends only the preflight and never a persistent shell such as OpenHands's `terminal`. Stop if this fails; do not launch a review or remove required flags to work around it. Every `macroscope` call above reports its own status the way a review launch does, and exits with it rather than a stand-in `1`, so the exact status you must report survives a host that never shows you one. This checks CLI compatibility only. Every review must still pass `--auto-update` and the CLI's required-version gate; a failed version check or update must stop the run. Updates preserve the installer's saved integration choices.
 
 **The CLI is not yours to repair.** Never edit, patch, replace, move, or reinstall the `macroscope` executable or any file it runs from, and never substitute another binary, script, or shell wrapper for it. Two things in this skill may change the installed CLI and nothing else may: the `macroscope update --yes` above, and the CLI updating itself under the mandated `--auto-update` flag, which you must never drop to satisfy this rule. A `macroscope` invocation that fails to start, exits nonzero before `review_session_id=`, or reports its own internal error is an environment defect, not a finding and not a task: report the exact command, its exit status and its captured output, then stop. Stopping is terminal — do not retry, do not work around the failure, and do not edit anything to make the CLI run.
 

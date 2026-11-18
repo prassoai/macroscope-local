@@ -1,6 +1,6 @@
 # macroscope plugin
 
-Public Macroscope plugin files for Codex, Claude Code, Cursor, and OpenCode.
+Public Macroscope plugin files for Codex, Claude Code, Cursor, OpenCode, Pi, Hermes Agent, and the OpenHands CLI.
 
 This directory is the source of truth for the shipped Macroscope plugin bundle. The `macroscope-local` release pipeline packages it and publishes it for installation.
 
@@ -11,6 +11,9 @@ Claude Code: /macroscope:codereview   /macroscope:autoloop
 Codex:       $macroscope:codereview   $macroscope:autoloop
 Cursor:      /codereview              /autoloop
 OpenCode:    /macroscope-codereview   /macroscope-autoloop
+Pi:          /skill:macroscope-codereview   /skill:macroscope-autoloop
+Hermes:      /macroscope-codereview   /macroscope-autoloop
+OpenHands:   ask for the macroscope-codereview or macroscope-autoloop skill
 ```
 
 The `codereview` skill runs a one-shot local review:
@@ -30,7 +33,7 @@ The `autoloop` skill is the autopilot path:
 - Repeat until there is nothing left to address (up to 5 iterations).
 - Supports `--isolate` to run the entire loop in a disposable worktree.
 
-The installer in the repo root installs both the CLI and these packaged workflows for supported local Codex, Claude Code, Cursor, and OpenCode setups:
+The installer in the repo root installs both the CLI and these packaged workflows for supported local Codex, Claude Code, Cursor, OpenCode, Pi, Hermes Agent, and the OpenHands CLI setups:
 
 ```bash
 curl -sSL https://raw.githubusercontent.com/prassoai/macroscope-local/main/install.sh | bash

@@ -203,6 +203,8 @@ STATE_CONFIGURED=0
 STATE_TOOLS=""
 STATE_PATH_FILE=""
 STATE_PATH_POLICY=""
+PI_RECORDED_AGENT_DIR=""
+HERMES_RECORDED_HOME=""
 SAVED_AUTO_UPDATE=0
 PATH_ACTION="skip"
 PATH_TARGET=""
@@ -213,8 +215,14 @@ ROLLBACK_LOG=""
 SAVED_TTY_STATE=""
 ADOPTED_TOOLS=""
 HOST_INSTALL_FAILURES=""
+# Owned paths a repair failed to remove; while any remain, the repair fails
+# and keeps the install state that lets a rerun find them.
+REPAIR_FAILURES=""
 INTERRUPT_SIGNAL=""
 CREATED_DIRS_LOG=""
+# The skill host directories claim_skill_dir_for_rollback has recorded, one
+# per line between newlines.
+CLAIMED_SKILL_DIRS=""
 
 # Integrity verification of downloaded release artifacts against the SHA-256
 # GitHub reports for each release asset.
@@ -222,6 +230,10 @@ CREATED_DIRS_LOG=""
 #   Default (0) applies a loud, transitional grace in that case; a reported
 #   SHA-256 that does NOT match is always fatal regardless of this setting.
 REQUIRE_CHECKSUM="${MACROSCOPE_REQUIRE_CHECKSUM:-0}"
+
+# Every host integration, in display, selection and saved-state order. Adding
+# a host starts here; each `case "$tool"` below then needs its branch.
+ALL_TOOLS=(claude codex cursor opencode pi hermes openhands)
 RELEASE_METADATA=""
 RELEASE_METADATA_STATE=""
 
@@ -231,7 +243,7 @@ Usage: install.sh [version] [options]
 
 Options:
   --dry-run                         Print the complete plan without changing files
-  --tools claude,codex,cursor,opencode|all|none
+  --tools claude,codex,cursor,opencode,pi,hermes,openhands|all|none
                                     Select host integrations
   --no-path                         Never edit shell configuration (remembered for updates)
   --shell-config PATH               Edit exactly this shell configuration file
@@ -337,7 +349,7 @@ load_install_state() {
   STATE_FILE="$(state_file_path)"
   [ -f "$STATE_FILE" ] || return 0
   local values=""
-  values="$(python3 - "$STATE_FILE" <<'PY'
+  values="$(python3 - "$STATE_FILE" "${ALL_TOOLS[@]}" <<'PY'
 import json, sys
 try:
     with open(sys.argv[1], encoding="utf-8") as f:
@@ -350,7 +362,7 @@ try:
     configured = (
         "tools" in data
         and "pathPolicy" in data
-        and all(tool in ("claude", "codex", "cursor", "opencode") for tool in tools)
+        and all(tool in sys.argv[2:] for tool in tools)
         and path_policy in ("auto", "managed", "skip")
     )
     if not isinstance(tools, list) or not all(isinstance(tool, str) for tool in tools):
@@ -382,13 +394,58 @@ PY
   STATE_PATH_POLICY="$(printf '%s\n' "$values" | sed -n '3p')"
   [ "$(printf '%s\n' "$values" | sed -n '4p')" = "valid" ] && STATE_LOADED=1
   [ "$(printf '%s\n' "$values" | sed -n '5p')" = "configured" ] && STATE_CONFIGURED=1
+  load_recorded_skill_homes
   return 0
+}
+
+# The key under which the install state records a skill host's home. OpenHands
+# has none: only HOME moves its home.
+skill_home_state_key() {
+  case "$1" in
+    pi) printf 'agentDir' ;;
+    hermes) printf 'home' ;;
+  esac
+}
+
+# The home the last successful install wrote a skill host's skills into, read
+# from the install state, or nothing when the state predates the record or the
+# record is not a plain absolute path: UTF-8 without U+FFFD or a control
+# character, and free of `.` and `..` segments, the checks every resolved home
+# passed before it was recorded. The record is read literally, never as an
+# override, so a home resolved from HERMES_DATA_DIR_SUFFIX is maintained as it
+# was written. It is ownership history for maintenance; it does not configure
+# where the host itself reads skills.
+read_recorded_skill_home() {
+  local host="$1"
+  local key=""
+  key="$(skill_home_state_key "$host")"
+  [ -n "$key" ] && [ -f "$STATE_FILE" ] || return 0
+  # Validated here, before command substitution could drop a trailing newline
+  # or a NUL and turn a corrupt record into a different path. A lone surrogate
+  # escape cannot be encoded and is rejected too.
+  python3 - "$STATE_FILE" "$host" "$key" <<'PY' || true
+import json, re, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as f:
+        home = json.load(f)[sys.argv[2]][sys.argv[3]]
+    if isinstance(home, str) and home.startswith("/") and not re.search(r"[\x00-\x1f\x7f\ufffd]", home) \
+            and not {".", ".."} & set(home.split("/")):
+        sys.stdout.buffer.write(home.encode("utf-8"))
+except Exception:
+    pass
+PY
+}
+
+# Loads every recorded skill host home.
+load_recorded_skill_homes() {
+  PI_RECORDED_AGENT_DIR="$(read_recorded_skill_home pi)"
+  HERMES_RECORDED_HOME="$(read_recorded_skill_home hermes)"
 }
 
 detect_installed_tools() {
   local detected=""
   local tool=""
-  for tool in claude codex cursor opencode; do
+  for tool in "${ALL_TOOLS[@]}"; do
     tool_installed "$tool" && detected="${detected:+$detected,}$tool"
   done
   printf '%s' "$detected"
@@ -412,6 +469,7 @@ tool_present() {
     claude) command -v claude >/dev/null 2>&1 || [ -d "$(get_claude_config_dir)" ] || [ -d "$apps/Claude.app" ] ;;
     codex) command -v codex >/dev/null 2>&1 || [ -d "$(get_codex_home)" ] || [ -d "$apps/Codex.app" ] ;;
     cursor) command -v cursor >/dev/null 2>&1 || command -v cursor-agent >/dev/null 2>&1 || [ -d "$HOME/.cursor" ] || [ -d "$apps/Cursor.app" ] ;;
+    pi|hermes|openhands) command -v "$1" >/dev/null 2>&1 || { skill_home_usable "$1" && [ -d "$(get_skill_home "$1")" ]; } ;;
     opencode) command -v opencode >/dev/null 2>&1 || [ -d "$(get_opencode_config_dir)" ] ;;
     *) return 1 ;;
   esac
@@ -420,22 +478,27 @@ tool_present() {
 detect_present_tools() {
   local detected=""
   local tool=""
-  for tool in claude codex cursor opencode; do
+  for tool in "${ALL_TOOLS[@]}"; do
     tool_present "$tool" && detected="${detected:+$detected,}$tool"
   done
   printf '%s' "$detected"
+}
+
+all_tools_csv() {
+  local IFS=,
+  printf '%s' "${ALL_TOOLS[*]}"
 }
 
 normalize_tools() {
   local value="${1// /}"
   value="$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]')"
   case "$value" in
-    all|'') printf 'claude,codex,cursor,opencode'; return ;;
+    all|'') all_tools_csv; return ;;
     none) printf ''; return ;;
   esac
-  python3 - "$value" <<'PY'
+  python3 - "$value" "${ALL_TOOLS[@]}" <<'PY'
 import sys
-allowed = ["claude", "codex", "cursor", "opencode"]
+allowed = sys.argv[2:]
 requested = [x for x in sys.argv[1].split(",") if x]
 unknown = sorted(set(requested) - set(allowed))
 if unknown:
@@ -454,6 +517,7 @@ tool_plan_path() {
     claude) printf '%s/plugins/cache/macroscope-local/ and plugin registration in %s/settings.json' "$(get_claude_config_dir)" "$(get_claude_config_dir)" ;;
     codex) printf '%s/plugins/macroscope, %s/plugins/cache/, and %s/config.toml' "$HOME" "$(get_codex_home)" "$(get_codex_home)" ;;
     cursor) printf '%s/.cursor/plugins/local/macroscope/' "$HOME" ;;
+    pi|hermes|openhands) printf '%s/skills/macroscope-{codereview,autoloop}/' "$(get_skill_home "$1")" ;;
     opencode) printf '%s/' "$(get_opencode_config_dir)" ;;
   esac
 }
@@ -470,7 +534,7 @@ selected_tools_plan_label() {
   local tool=""
   local index=0
   local last=0
-  for tool in claude codex cursor opencode; do
+  for tool in "${ALL_TOOLS[@]}"; do
     tool_selected "$tool" && tools+=("$tool")
   done
   last=$((${#tools[@]} - 1))
@@ -490,6 +554,7 @@ tool_installed() {
     claude) install_state_records_tool claude || has_ownership_marker "$(get_claude_config_dir)/plugins/cache/macroscope-local" ;;
     codex) install_state_records_tool codex || has_ownership_marker "$HOME/plugins/macroscope" || find "$(get_codex_home)/plugins/cache" -type f -name "$OWNERSHIP_MARKER_FILE" -path '*/macroscope/*/.macroscope-installed' -print -quit 2>/dev/null | grep -q . ;;
     cursor) install_state_records_tool cursor || has_ownership_marker "$HOME/.cursor/plugins/local/macroscope" ;;
+    pi|hermes|openhands) install_state_records_tool "$1" || host_owned_skills_present "$1" ;;
     opencode) install_state_records_tool opencode || has_ownership_marker "$(get_opencode_config_dir)/skills/macroscope-codereview" ;;
     *) return 1 ;;
   esac
@@ -601,18 +666,36 @@ prompt_menu() {
   TUI_RESULT="$selected"
 }
 
+tool_label() {
+  case "$1" in
+    claude) printf 'Claude Code' ;;
+    codex) printf 'Codex' ;;
+    cursor) printf 'Cursor' ;;
+    opencode) printf 'OpenCode' ;;
+    pi) printf 'Pi' ;;
+    hermes) printf 'Hermes' ;;
+    openhands) printf 'OpenHands' ;;
+  esac
+}
+
 prompt_tools() {
   local default_tools="$1"
-  local tools=(claude codex cursor opencode)
-  local labels=("Claude Code" "Codex" "Cursor" "OpenCode")
-  local checked=(0 0 0 0)
+  local tools=("${ALL_TOOLS[@]}")
+  local labels=()
+  local checked=()
+  local count=${#tools[@]}
   local selected=0
   local first_render=1
   local index=0
   local result=""
   local mark=""
 
-  for index in 0 1 2 3; do
+  # Labels are computed once: a command substitution in the render loop
+  # would be running whenever Ctrl-C arrives, and bash then fails to parse
+  # the INT trap.
+  for index in "${!tools[@]}"; do
+    labels[$index]="$(tool_label "${tools[$index]}")"
+    checked[$index]=0
     case ",$default_tools," in
       *",${tools[$index]},"*) checked[$index]=1 ;;
     esac
@@ -624,10 +707,10 @@ prompt_tools() {
 
   while true; do
     if [ "$first_render" -eq 0 ]; then
-      printf '\033[4A' > /dev/tty
+      printf '\033[%dA' "$count" > /dev/tty
     fi
     first_render=0
-    for index in 0 1 2 3; do
+    for index in "${!tools[@]}"; do
       printf '\r\033[2K' > /dev/tty
       mark=' '
       [ "${checked[$index]}" -eq 0 ] || mark='x'
@@ -649,15 +732,15 @@ prompt_tools() {
       return 1
     fi
     case "$TUI_KEY" in
-      up|k|K) selected=$(((selected + 3) % 4)) ;;
-      down|j|J) selected=$(((selected + 1) % 4)) ;;
+      up|k|K) selected=$(((selected + count - 1) % count)) ;;
+      down|j|J) selected=$(((selected + 1) % count)) ;;
       space) checked[$selected]=$((1 - checked[$selected])) ;;
       enter) break ;;
     esac
   done
 
   tui_stop
-  for index in 0 1 2 3; do
+  for index in "${!tools[@]}"; do
     if [ "${checked[$index]}" -eq 1 ]; then
       result="${result:+$result,}${tools[$index]}"
     fi
@@ -688,7 +771,7 @@ select_tools() {
         printf '\n%s!%s %sNo Macroscope host integrations are currently selected.%s\n' "$YELLOW" "$RESET" "$BOLD" "$RESET" > /dev/tty
         printf '%s  Select integrations now so a CLI-only install is not preserved accidentally.%s\n' "$DIM" "$RESET" > /dev/tty
         prompt_default="$(detect_present_tools)"
-        [ -n "$prompt_default" ] || prompt_default="claude,codex,cursor,opencode"
+        [ -n "$prompt_default" ] || prompt_default="$(all_tools_csv)"
       else
         printf '\n%s•%s Current integrations are selected below.\n' "$CYAN" "$RESET" > /dev/tty
       fi
@@ -698,7 +781,7 @@ select_tools() {
     normalized="$(normalize_tools "${TOOLS_SPEC:-${prompt_default:-none}}")"
   else
     default_tools="$(detect_present_tools)"
-    [ -n "$default_tools" ] || default_tools="claude,codex,cursor,opencode"
+    [ -n "$default_tools" ] || default_tools="$(all_tools_csv)"
     if has_interactive_tty && [ "$ASSUME_YES" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
       prompt_tools "$default_tools"
       TOOLS_SPEC="$TUI_RESULT"
@@ -838,15 +921,15 @@ print_plan() {
   index=$((index + 1))
   local tool=""
   if [ -n "$SELECTED_TOOLS" ]; then
-    local plugin_noun="plugins"
-    [ "${SELECTED_TOOLS#*,}" = "$SELECTED_TOOLS" ] && plugin_noun="plugin"
-    printf '%d. Install or update the following %s for %s\n' "$index" "$plugin_noun" "$(selected_tools_plan_label)"
-    for tool in claude codex cursor opencode; do
+    local noun="integrations"
+    [ "${SELECTED_TOOLS#*,}" = "$SELECTED_TOOLS" ] && noun="integration"
+    printf '%d. Install or update the following %s for %s\n' "$index" "$noun" "$(selected_tools_plan_label)"
+    for tool in "${ALL_TOOLS[@]}"; do
       tool_selected "$tool" && printf '   (%s)\n' "$(tool_install_plan_path "$tool")"
     done
     index=$((index + 1))
   fi
-  for tool in claude codex cursor opencode; do
+  for tool in "${ALL_TOOLS[@]}"; do
     if ! tool_selected "$tool" && [ "$INSTALL_MODE" = "update" ] && tool_installed "$tool"; then
       printf '%d. Remove Macroscope-owned %s integration state at %s (deselected)\n' "$index" "$tool" "$(tool_plan_path "$tool")"
       index=$((index + 1))
@@ -904,7 +987,7 @@ print_change_details() {
       _ccd_add "$(shell_config_line)"
     fi
 
-    for tool in claude codex cursor opencode; do
+    for tool in "${ALL_TOOLS[@]}"; do
       if tool_selected "$tool"; then
         case "$tool" in
           claude)
@@ -949,6 +1032,11 @@ print_change_details() {
             _ccd_file "$HOME/.cursor/plugins/local/macroscope/"
             _ccd_add 'Macroscope plugin bundle'
             ;;
+          pi|hermes|openhands)
+            _ccd_file "$(get_skill_home "$tool")/skills/"
+            _ccd_add 'macroscope-codereview/'
+            _ccd_add 'macroscope-autoloop/'
+            ;;
           opencode)
             _ccd_file "$opencode_config"
             _ccd_add 'plugins/macroscope.js'
@@ -984,6 +1072,11 @@ print_change_details() {
           cursor)
             _ccd_file "$HOME/.cursor/plugins/local/"
             _ccd_remove 'macroscope/'
+            ;;
+          pi|hermes|openhands)
+            _ccd_file "$(get_skill_home "$tool")/skills/"
+            _ccd_remove 'macroscope-codereview/ (with Macroscope ownership marker)'
+            _ccd_remove 'macroscope-autoloop/ (with Macroscope ownership marker)'
             ;;
           opencode)
             _ccd_file "$opencode_config"
@@ -1066,6 +1159,277 @@ get_claude_state_file() {
   else
     printf '%s/.claude.json' "$HOME"
   fi
+}
+
+# Pi's agent directory, resolved the way pi's getAgentDir does: the
+# PI_CODING_AGENT_DIR override with a literal leading `~` expanded or a local
+# file:// URL converted to its path, else ~/.pi/agent. The Go uninstaller's
+# piAgentDir applies the same rules.
+#
+# Only forms every resolver agrees on are supported; anything else resolves to
+# nothing, which check_pi_agent_dir rejects:
+# - a file URL must have an empty or localhost authority, an absolute path, no
+#   query or fragment, well-formed escapes, and no %2F (pi itself fails to
+#   start on the last two);
+# - the result must be absolute, free of control characters and newlines, and
+#   free of `.` and `..` segments, which pi resolves lexically for some forms
+#   and the filesystem resolves through symlinks for others;
+# - the result must be UTF-8 without U+FFFD, so the install state records it
+#   exactly: Go decodes a corrupt record's lone surrogate escape to U+FFFD,
+#   which both readers then reject.
+resolve_pi_agent_dir() {
+  python3 - "$HOME" "${PI_CODING_AGENT_DIR:-}" <<'PY' || true
+import os, re, sys, urllib.parse
+home, value = map(os.fsencode, sys.argv[1:3])
+if not value:
+    path = home + b"/.pi/agent"
+elif value == b"~":
+    path = home
+elif value.startswith(b"~/"):
+    path = home + value[1:]
+elif value.startswith(b"file://"):
+    rest = value[len(b"file://"):]
+    if rest[:len(b"localhost/")].lower() == b"localhost/":
+        rest = rest[len(b"localhost"):]
+    if not rest.startswith(b"/") or re.search(rb"[?#\\]|%(?![0-9A-Fa-f]{2})|%2[Ff]", rest):
+        sys.exit(1)
+    path = urllib.parse.unquote_to_bytes(rest)
+else:
+    path = value
+if not path.startswith(b"/") or re.search(rb"[\x00-\x1f\x7f]", path) or {b".", b".."} & set(path.split(b"/")):
+    sys.exit(1)
+try:
+    if "\ufffd" in path.decode("utf-8"):
+        sys.exit(1)
+except UnicodeDecodeError:
+    sys.exit(1)
+sys.stdout.buffer.write(path)
+PY
+}
+
+# Hermes's home, resolved the way Hermes's get_hermes_home does for a process
+# with no profile selected: HERMES_HOME with a literal leading `~` expanded,
+# else ~/.hermes followed by HERMES_DATA_DIR_SUFFIX. The Go uninstaller's
+# hermesHome applies the same rules, and testdata/hermes_home_cases.json holds
+# both to them.
+#
+# Only forms every resolver agrees on are supported; anything else resolves to
+# nothing, which check_skill_home rejects. Hermes strips surrounding Unicode
+# whitespace from HERMES_HOME and expands $VAR references, so a value with
+# either, and a suffix with any whitespace or `$` when it applies, is refused
+# rather than guessed at; the result must also pass the checks resolve_pi_agent_dir
+# applies to a Pi agent directory. A resolved home is recorded and later read
+# back literally, so every home accepted here is maintained exactly.
+resolve_hermes_home() {
+  python3 - "$HOME" "${HERMES_HOME:-}" "${HERMES_DATA_DIR_SUFFIX:-}" <<'PY' || true
+import os, re, sys
+home, value, suffix = map(os.fsencode, sys.argv[1:4])
+text, suffix_text = (b.decode("utf-8", "surrogateescape") for b in (value, suffix))
+if value and (text != text.strip() or "$" in text):
+    sys.exit(1)
+if not value and ("$" in suffix_text or any(c.isspace() for c in suffix_text)):
+    sys.exit(1)
+if not value:
+    path = home + b"/.hermes" + suffix
+elif value == b"~":
+    path = home
+elif value.startswith(b"~/"):
+    path = home + value[1:]
+else:
+    path = value
+if not path.startswith(b"/") or re.search(rb"[\x00-\x1f\x7f]", path) or {b".", b".."} & set(path.split(b"/")):
+    sys.exit(1)
+try:
+    if "\ufffd" in path.decode("utf-8"):
+        sys.exit(1)
+except UnicodeDecodeError:
+    sys.exit(1)
+sys.stdout.buffer.write(path)
+PY
+}
+
+# The skill hosts: hosts whose whole integration is two skill directories,
+# macroscope-codereview and macroscope-autoloop, in the skills directory of a
+# home the host owns. Each skills namespace is user-wide, flat and shared with
+# the user's own skills, so the names carry the macroscope- prefix and every
+# write and removal is held to the ownership tests below.
+SKILL_HOSTS=(pi hermes openhands)
+
+is_skill_host() {
+  case "$1" in pi|hermes|openhands) return 0 ;; *) return 1 ;; esac
+}
+
+# What a skill host's home is called in messages.
+skill_home_label() {
+  case "$1" in
+    pi) printf 'Pi agent directory' ;;
+    hermes) printf 'Hermes home' ;;
+    openhands) printf 'OpenHands directory' ;;
+  esac
+}
+
+# The environment variable that moves a skill host's home, if it has one.
+# OpenHands reads user skills from ~/.openhands, which only HOME moves.
+skill_home_variable() {
+  case "$1" in
+    pi) printf 'PI_CODING_AGENT_DIR' ;;
+    hermes) printf 'HERMES_HOME' ;;
+  esac
+}
+
+# A skill host's home as the current environment names it, or nothing when
+# that is not a usable directory.
+resolve_skill_home() {
+  case "$1" in
+    pi) resolve_pi_agent_dir ;;
+    hermes) resolve_hermes_home ;;
+    openhands)
+      case "$HOME" in *[[:cntrl:]]*) return 0 ;; esac
+      printf '%s/.openhands' "$HOME" ;;
+  esac
+}
+
+# The home the last successful install wrote a skill host's skills into, as
+# load_install_state read it from the install state.
+recorded_skill_home() {
+  case "$1" in
+    pi) printf '%s' "$PI_RECORDED_AGENT_DIR" ;;
+    hermes) printf '%s' "$HERMES_RECORDED_HOME" ;;
+  esac
+}
+
+# The home every path of a skill host is derived from: the recorded one once
+# an install has succeeded, so updates, deselection and repair find the skills
+# without the override that placed them, else the one this run resolves.
+get_skill_home() {
+  local recorded=""
+  recorded="$(recorded_skill_home "$1")"
+  if [ -n "$recorded" ]; then
+    printf '%s' "$recorded"
+  else
+    resolve_skill_home "$1"
+  fi
+}
+
+# Every skill host path is derived from get_skill_home and passed around one
+# per line, so nothing touches one unless its home resolves to a usable
+# directory.
+skill_home_usable() {
+  [ -n "$(get_skill_home "$1")" ]
+}
+
+# A run that installs a skill host, or must remove its recorded state, stops
+# here before it changes anything when the current environment names an
+# unusable home — even when the recorded one would be used — so a mistyped
+# override is reported rather than ignored. Every other run leaves the host
+# alone, so a malformed override never blocks the CLI or another host's
+# integration. A recorded home the current environment would not resolve to is
+# named, since the host reads skills only from the home its variable names.
+check_skill_home() {
+  local host="$1"
+  local variable=""
+  local current=""
+  local recorded=""
+  variable="$(skill_home_variable "$host")"
+  variable="${variable:-HOME}"
+  current="$(resolve_skill_home "$host")"
+  if [ -z "$current" ]; then
+    error "$variable does not name a usable directory: $(printf '%q' "${!variable:-}")"
+    exit 2
+  fi
+  recorded="$(recorded_skill_home "$host")"
+  if [ -n "$recorded" ] && ! same_dir "$recorded" "$current"; then
+    info "Using the recorded $(skill_home_label "$host") $recorded; $(tool_label "$host") loads these skills only while $variable names it."
+  fi
+}
+
+# A run that installs a skill host must also agree with the recorded
+# installation, so skills are never silently moved to, or duplicated in,
+# another home. Removal needs no such check: it always uses the record.
+check_skill_install_home() {
+  local host="$1"
+  local variable=""
+  local current=""
+  local recorded=""
+  variable="$(skill_home_variable "$host")"
+  if [ -z "$variable" ]; then
+    check_skill_home "$host"
+    return
+  fi
+  current="$(resolve_skill_home "$host")"
+  recorded="$(recorded_skill_home "$host")"
+  if [ -n "$recorded" ] && [ -n "${!variable:-}" ] && [ -n "$current" ] && ! same_dir "$recorded" "$current"; then
+    error "Macroscope's $(tool_label "$host") skills are installed in $recorded, but $variable names $current."
+    error "To update them in place, rerun without $variable. To move them, rerun with --tools excluding $host to remove them, then install again with the new $variable."
+    exit 2
+  fi
+  check_skill_home "$host"
+}
+
+# OpenCode and the skill hosts each write macroscope-codereview and
+# macroscope-autoloop into a skills directory of their own, so two of them
+# resolving to one directory — the same home, or a symlink alias of it — would
+# overwrite each other's host-specific skills while both report success. A run
+# that installs one of them stops with exit 2 before anything changes when its
+# skills directory is that of another host it installs, or of one it would
+# keep or remove: one the install state records, or whose directory holds
+# owned skills — for OpenCode either of them, though tool_installed looks only
+# at macroscope-codereview. Ownership markers carry no host, so another host's skills in
+# that directory count as its own, and its removal would delete them.
+check_skill_destinations_distinct() {
+  local host=""
+  local role=""
+  local conflict=""
+  conflict="$(for host in opencode "${SKILL_HOSTS[@]}"; do
+    if tool_selected "$host"; then
+      role=install
+    elif tool_installed "$host" || { is_skill_host "$host" && [ -n "$(recorded_skill_home "$host")" ]; } ||
+         { [ "$host" = opencode ] && has_ownership_marker "$(get_opencode_config_dir)/skills/macroscope-autoloop"; }; then
+      role=keep
+    else
+      continue
+    fi
+    if [ "$host" = opencode ]; then
+      printf '%s\0%s\0%s/skills\0' "$host" "$role" "$(get_opencode_config_dir)"
+    elif skill_home_usable "$host"; then
+      printf '%s\0%s\0%s/skills\0' "$host" "$role" "$(get_skill_home "$host")"
+    fi
+  done | python3 -c '
+import os, sys
+fields = sys.stdin.buffer.read().split(b"\0")[:-1]
+seen = {}
+for host, role, path in zip(fields[0::3], fields[1::3], fields[2::3]):
+    real = os.path.realpath(path)
+    for other, other_role, other_path in seen.get(real, []):
+        if b"install" in (role, other_role):
+            sys.stdout.buffer.write(other + b"\0" + host + b"\0" + other_path + b"\0" + path)
+            sys.exit(0)
+    seen.setdefault(real, []).append((host, role, path))
+' | tr '\0' '\n')"
+  [ -n "$conflict" ] || return 0
+  local first="" second="" first_path="" second_path=""
+  { IFS= read -r first; IFS= read -r second; IFS= read -r first_path; IFS= read -r second_path; } <<< "$conflict"
+  if [ "$first_path" = "$second_path" ]; then
+    error "$(tool_label "$first") and $(tool_label "$second") would both use the skills directory $first_path."
+  else
+    error "$(tool_label "$first") and $(tool_label "$second") would both use one skills directory: $first_path is $second_path."
+  fi
+  error "Their skills share names, so each would overwrite the other's. Give them different homes, or remove one before installing the other."
+  exit 2
+}
+
+# Whether two resolved directories are the same path once repeated and
+# trailing slashes are ignored.
+same_dir() {
+  [ "$(printf '%s/' "$1" | tr -s /)" = "$(printf '%s/' "$2" | tr -s /)" ]
+}
+
+# The two skill directories a skill host's integration owns, one per line.
+# Callers check skill_home_usable first.
+skill_host_dirs() {
+  local skills=""
+  skills="$(get_skill_home "$1")/skills"
+  printf '%s/macroscope-codereview\n%s/macroscope-autoloop\n' "$skills" "$skills"
 }
 
 get_opencode_config_dir() {
@@ -1373,6 +1737,61 @@ remove_dir_if_present() {
     return 1
   fi
   success "Removed $path"
+}
+
+# Remove a directory whose ownership marker authorized the removal, taking the
+# marker last: when an entry cannot be removed, the marker survives with the
+# rest, so a retry still recognizes the remainder as ours and finishes the job.
+# When the emptied directory cannot be removed, the marker's original bytes are put back.
+# The removal works through one handle to the directory, opened without
+# following a symlink: the children are removed by name from inside it, and
+# the marker is read, removed and restored through it. Before anything is
+# removed, the marker is opened without blocking and must be a regular file
+# holding what has_ownership_marker accepts, so a FIFO cannot hang the run
+# and a directory is emptied only if it is itself Macroscope's. Only the final
+# rmdir goes by path; it runs while the name still leads to the opened
+# directory, and any failure after the marker is unlinked restores it with an
+# exclusive create, which never follows or overwrites what has taken its name.
+# These checks narrow the window between checking the name and acting on it;
+# they do not close it, and another process of the same user replacing the
+# directory or its parents meanwhile is not supported. The Go uninstaller's
+# removeOwnedDir follows the same order through its os.Root handle.
+remove_owned_dir_marker_last() {
+  local path="$1"
+  if python3 - "$path" "$OWNERSHIP_MARKER_FILE" <<'PY' 2>/dev/null; then
+import os, re, stat, subprocess, sys
+path, name = os.path.abspath(sys.argv[1]), sys.argv[2]
+directory = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+marker = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+data = os.read(marker, 4097) if stat.S_ISREG(os.fstat(marker).st_mode) else b""
+os.close(marker)
+lines = data.decode("utf-8", "replace").splitlines()
+if (len(data) > 4096 or not any(re.fullmatch(r"version=.+", line) for line in lines)
+        or not all(re.fullmatch(r"\s*|(version|installedAt)=.*", line) for line in lines)):
+    sys.exit(1)
+os.fchdir(directory)
+children = ["./" + entry for entry in os.listdir(".") if entry != name]
+if children and subprocess.run(["rm", "-rf", "--"] + children, stderr=subprocess.DEVNULL).returncode != 0:
+    sys.exit(1)
+os.unlink(name, dir_fd=directory)
+try:
+    if (os.path.samestat(os.lstat(path), os.fstat(directory))
+            and subprocess.run(["rmdir", path], stderr=subprocess.DEVNULL).returncode == 0):
+        sys.exit(0)
+except OSError:
+    pass
+try:
+    restored = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644, dir_fd=directory)
+    os.write(restored, data)
+except FileExistsError:
+    pass
+sys.exit(1)
+PY
+    success "Removed $path"
+    return 0
+  fi
+  warn "Could not remove $path"
+  return 1
 }
 
 # Explicit ownership marker. Every skill and plugin directory this installer
@@ -1992,6 +2411,19 @@ remove_plugin_directories() {
     "$HOME/.cursor/plugins/local/macroscope-codereview"
   do
     if remove_owned_plugin_dir "$dir" cursor; then removed=1; fi
+  done
+
+  local host=""
+  for host in "${SKILL_HOSTS[@]}"; do
+    skill_home_usable "$host" || continue
+    while IFS= read -r dir; do
+      local status=0
+      remove_host_skill_dir "$dir" "$host" || status=$?
+      case "$status" in
+        0) removed=1 ;;
+        2) REPAIR_FAILURES="${REPAIR_FAILURES:+$REPAIR_FAILURES, }$dir" ;;
+      esac
+    done <<< "$(skill_host_dirs "$host")"
   done
 
   # OpenCode's skill namespace is flat and user-wide, so even a `macroscope-`
@@ -3023,12 +3455,13 @@ validate_staged_artifacts() {
   fi
   local plugin_root="$CHECKOUT_DIR/plugins/macroscope"
   local tool="" required=""
-  for tool in claude codex cursor opencode; do
+  for tool in "${ALL_TOOLS[@]}"; do
     tool_selected "$tool" || continue
     case "$tool" in
       claude) required=".claude-plugin/plugin.json commands/macroscope-codereview.md commands/macroscope-autoloop.md skills/codereview/SKILL.md skills/autoloop/SKILL.md" ;;
       codex) required=".codex-plugin/plugin.json commands/macroscope-codereview.md commands/macroscope-autoloop.md skills/codereview/SKILL.md skills/autoloop/SKILL.md" ;;
       cursor) required=".cursor-plugin/plugin.json commands/macroscope-codereview.md commands/macroscope-autoloop.md skills/codereview/SKILL.md skills/autoloop/SKILL.md" ;;
+      pi|hermes|openhands) required="skills/codereview/SKILL.md skills/autoloop/SKILL.md" ;;
       opencode) required="opencode/macroscope.js commands/macroscope-codereview.md commands/macroscope-autoloop.md skills/codereview/SKILL.md skills/autoloop/SKILL.md" ;;
     esac
     for required in $required; do
@@ -3281,47 +3714,164 @@ install_opencode_command() {
       "$src" > "$dst"
 }
 
-# A skill destination is the installer's to write only when it is absent, or a
-# real directory (not a symlink to one) carrying the ownership marker. A
-# regular file there is a user's notes, and copy_tree would `rm -rf` it.
-opencode_skill_destination_is_ours() {
-  local dst="$1"
-  { [ -e "$dst" ] || [ -L "$dst" ]; } || return 0
-  { [ -d "$dst" ] && [ ! -L "$dst" ] && has_ownership_marker "$dst"; }
+# A skill directory is ours only when it is a real directory (not a symlink to
+# one) carrying the ownership marker. A symlink to a marked directory is still
+# the user's link, and whatever it points at is theirs too.
+is_owned_skill_dir() {
+  [ -d "$1" ] && [ ! -L "$1" ] && has_ownership_marker "$1"
 }
 
-# Copy one bundled skill into OpenCode's flat skill namespace under its
+# A skill destination is the installer's to write only when it is absent or an
+# owned skill directory. A regular file or a broken symlink there is a user's,
+# and copy_tree would `rm -rf` it.
+skill_destination_is_ours() {
+  { [ -e "$1" ] || [ -L "$1" ]; } || return 0
+  is_owned_skill_dir "$1"
+}
+
+# A skill host's home is the root of everything its integration writes or
+# removes, and its skills directory must be a real directory there, or absent.
+# A symlink in its place would carry every write and removal outside the home,
+# so it is refused; the Go uninstall, rooted at the home, refuses it too.
+skills_dir_is_contained() {
+  [ ! -L "$1" ] && { [ ! -e "$1" ] || [ -d "$1" ]; }
+}
+
+# Explains a refused skills directory of a skill host.
+warn_skills_dir_not_contained() {
+  warn "Left $1 in place (a symlink or file, not a real directory inside the $(skill_home_label "$2"))"
+}
+
+# A skill host's skill directory is ours by is_owned_skill_dir, reached
+# without leaving the home, with the marker held to the Go uninstaller's test:
+# a regular file itself, not a symlink to one, of at most 4096 bytes. Install
+# and uninstall then agree on every directory either would replace or remove.
+is_owned_host_skill_dir() {
+  local marker="$1/$OWNERSHIP_MARKER_FILE"
+  skills_dir_is_contained "${1%/*}" && is_owned_skill_dir "$1" &&
+    [ ! -L "$marker" ] && [ "$(wc -c < "$marker")" -le 4096 ]
+}
+
+# Whether a skill host's home still holds a Macroscope-owned skill.
+host_owned_skills_present() {
+  local dir=""
+  skill_home_usable "$1" || return 1
+  while IFS= read -r dir; do
+    is_owned_host_skill_dir "$dir" && return 0
+  done <<< "$(skill_host_dirs "$1")"
+  return 1
+}
+
+# A skill host's skill destination is ours to write when its skills directory
+# is contained and the destination itself is absent or owned.
+host_skill_destination_is_ours() {
+  skills_dir_is_contained "${1%/*}" &&
+    { { [ ! -e "$1" ] && [ ! -L "$1" ]; } || is_owned_host_skill_dir "$1"; }
+}
+
+# Whether a skill host's skill directory, and the marker in it when it is a
+# real directory, can be examined. Only a confirmed absence, a path component
+# that is not a directory, or a symlink settles that nothing of Macroscope's
+# is there; a permission or I/O error leaves an owned skill possibly in place.
+skill_dir_inspectable() {
+  python3 - "$1" "$OWNERSHIP_MARKER_FILE" <<'PY' 2>/dev/null
+import errno, os, stat, sys
+path, name = sys.argv[1:3]
+try:
+    if stat.S_ISDIR(os.lstat(path).st_mode):
+        marker = os.path.join(path, name)
+        if stat.S_ISREG(os.lstat(marker).st_mode):
+            fd = os.open(marker, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            os.read(fd, 4096)
+            os.close(fd)
+except OSError as error:
+    sys.exit(0 if error.errno in (errno.ENOENT, errno.ENOTDIR, errno.ELOOP) else 1)
+PY
+}
+
+# Remove a skill host's skill directory only when it is ours by the same test
+# that authorizes writing it. Every other shape at the path stays, and no
+# symlink, at the path or in place of the skills directory, is followed.
+# Returns 0 when it removed the directory, 1 when nothing there was ours, and 2
+# when an owned directory could not be removed, or the path could not be
+# examined and so may hold one.
+remove_host_skill_dir() {
+  local path="$1"
+  local host="$2"
+  if ! skill_dir_inspectable "$path"; then
+    warn "Could not check $path for a Macroscope-owned skill"
+    return 2
+  fi
+  { [ -e "$path" ] || [ -L "$path" ]; } || return 1
+  if ! skills_dir_is_contained "${path%/*}"; then
+    warn_skills_dir_not_contained "${path%/*}" "$host"
+    return 1
+  fi
+  if ! is_owned_host_skill_dir "$path"; then
+    info "Left $path in place (not a Macroscope-owned skill directory)"
+    return 1
+  fi
+  claim_skill_dir_for_rollback "$path" || return 2
+  remove_owned_dir_marker_last "$path" || return 2
+}
+
+# How a session of a skill host that is already open picks up new skills.
+skill_host_reload_hint() {
+  case "$1" in
+    pi) printf 'run /reload in an open Pi session to load them' ;;
+    hermes) printf 'an open Hermes session loads them with its next message' ;;
+    openhands) printf 'start a new OpenHands conversation to load them' ;;
+  esac
+}
+
+# Withdraw one selected integration whose destinations are not ours to write.
+# The CLI and every other integration still install; the run then exits 4 and
+# the saved selection no longer names the withdrawn tool.
+decline_integration() {
+  local tool="$1"
+  HOST_INSTALL_FAILURES="${HOST_INSTALL_FAILURES:+$HOST_INSTALL_FAILURES, }$tool"
+  SELECTED_TOOLS="$(printf '%s' "$SELECTED_TOOLS" | tr ',' '\n' | sed "/^$tool\$/d" | paste -sd, -)"
+}
+
+# Copy one bundled skill into a host's flat skill namespace under its
 # prefixed name. A directory already there that does not carry our ownership
 # marker belongs to the user: warn and skip rather than clobber it.
-install_opencode_skill() {
+install_namespaced_skill() {
   local src="$1"
   local dst="$2"
+  local host="$3"
   local skill_name=""
 
   skill_name="$(basename "$dst")"
-  if ! opencode_skill_destination_is_ours "$dst"; then
+  if ! skill_destination_is_ours "$dst"; then
     warn "Left $dst in place (no Macroscope ownership marker); skipped installing the $skill_name skill"
     return 1
   fi
+  if is_skill_host "$host"; then claim_skill_dir_for_rollback "$dst" || return 1; fi
 
   copy_tree "$src" "$dst"
-  rewrite_opencode_skill_copy "$dst/SKILL.md" "$skill_name"
+  rewrite_namespaced_skill_copy "$dst/SKILL.md" "$skill_name" "$host"
   write_ownership_marker "$dst"
 }
 
-# OpenCode resolves a skill by its directory name and rejects a SKILL.md whose
-# frontmatter `name` disagrees with it, so the prefixed copy is rewritten to
-# match. Slash-command references are prefixed for the same reason the
-# commands are.
-rewrite_opencode_skill_copy() {
+# Rewrite a prefixed skill copy for the host it is installed into. Every host
+# with a flat skill namespace resolves a skill by the frontmatter `name`, so it
+# is rewritten to the prefixed directory name, and the skill's own references
+# to invoking a skill follow the host's syntax: `/macroscope-codereview` in
+# OpenCode and Hermes, `/skill:macroscope-codereview` in Pi, and the bare
+# skill name in OpenHands, which has no skill commands. Everything else, the
+# shell-tool timeout in each host's unit included, is the shared skill
+# unchanged.
+rewrite_namespaced_skill_copy() {
   local skill_file="$1"
   local skill_name="$2"
+  local host="$3"
 
   [ -f "$skill_file" ] || return 1
-  python3 - "$skill_file" "$skill_name" <<'PY'
+  python3 - "$skill_file" "$skill_name" "$host" <<'PY'
 import sys
 
-path, name = sys.argv[1], sys.argv[2]
+path, name, host = sys.argv[1:4]
 with open(path, encoding="utf-8") as handle:
     lines = handle.read().split("\n")
 
@@ -3334,8 +3884,9 @@ if lines and lines[0] == "---":
             break
 
 text = "\n".join(lines)
-text = text.replace("`/codereview", "`/macroscope-codereview")
-text = text.replace("`/autoloop", "`/macroscope-autoloop")
+prefix = {"pi": "/skill:macroscope-", "openhands": "macroscope-"}.get(host, "/macroscope-")
+text = text.replace("`/codereview", "`" + prefix + "codereview")
+text = text.replace("`/autoloop", "`" + prefix + "autoloop")
 
 with open(path, "w", encoding="utf-8") as handle:
     handle.write(text)
@@ -3452,8 +4003,9 @@ remove_legacy_codex_shim() {
 maybe_note_absent_tool() {
   local tool="$1"
   [ "$TOOLS_EXPLICIT" -eq 1 ] || return 0
+  tool_selected "$tool" || return 0
   case ",$PRESENT_TOOLS," in *",$tool,"*) return 0 ;; esac
-  info "$tool not found; Macroscope plugin files installed for when you install it."
+  info "$tool not found; Macroscope integration files installed for when you install it."
 }
 
 install_codex_plugin() {
@@ -4057,6 +4609,15 @@ remove_tool_integration() {
       done
       ;;
     cursor) remove_owned_plugin_dir "$HOME/.cursor/plugins/local/macroscope" cursor || true ;;
+    pi|hermes|openhands)
+      local dir=""
+      # An owned skill that survives removal fails the update, which rolls
+      # back, so the host is never dropped from the saved selection while its
+      # skills are still on disk.
+      while IFS= read -r dir; do
+        remove_host_skill_dir "$dir" "$tool" || [ $? -eq 1 ] || return 1
+      done <<< "$(skill_host_dirs "$tool")"
+      ;;
     opencode)
       if install_state_records_tool opencode; then
         rm -f "$(get_opencode_config_dir)/plugins/macroscope.js" "$(get_opencode_config_dir)/commands/macroscope-codereview.md" "$(get_opencode_config_dir)/commands/macroscope-autoloop.md"
@@ -4073,15 +4634,35 @@ remove_tool_integration() {
 write_install_state() {
   local path_file="$STATE_PATH_FILE"
   [ "$PATH_ACTION" = "modify" ] && path_file="$PATH_TARGET"
-  python3 - "$STATE_FILE" "$SELECTED_TOOLS" "$path_file" "$PATH_POLICY" "$INSTALLED_VERSION" "$INSTALLED_BINARY" <<'PY'
+  # A skill host's home record outlives the selection while its owned skills
+  # do: an initial run that leaves them in place keeps the record, and the run
+  # that removes them clears it. Each record is passed as host, key and home.
+  local records=()
+  local host=""
+  local key=""
+  for host in "${SKILL_HOSTS[@]}"; do
+    key="$(skill_home_state_key "$host")"
+    [ -n "$key" ] || continue
+    if tool_selected "$host" || { [ -n "$(recorded_skill_home "$host")" ] && host_owned_skills_present "$host"; }; then
+      records+=("$host" "$key" "$(get_skill_home "$host")")
+    fi
+  done
+  python3 - "$STATE_FILE" "$SELECTED_TOOLS" "$path_file" "$PATH_POLICY" "$INSTALLED_VERSION" "$INSTALLED_BINARY" ${records[@]+"${records[@]}"} <<'PY'
 import json, os, sys, tempfile
 path, tools_csv, path_file, path_policy, version, binary_path = sys.argv[1:7]
+records = sys.argv[7:]
 selected = [x for x in tools_csv.split(",") if x]
 # binaryPath is the ownership record uninstall relies on: it is the only proof
 # that a macroscope binary outside the managed directory is ours to delete.
 data = {"schemaVersion": 3, "version": version, "tools": selected,
         "pathFile": path_file or None, "pathPolicy": path_policy,
         "binaryPath": binary_path or None}
+# Where each skill host's installed skills live, so maintenance finds them
+# without the override that placed them: {"pi": {"agentDir": ...}} and
+# {"hermes": {"home": ...}}. resolve_skill_home accepts only UTF-8 paths, so
+# every reader decodes the same one.
+for host, key, home in zip(records[0::3], records[1::3], records[2::3]):
+    data[host] = {key: home}
 
 # The release that inserted host permission rules recorded which ones it had
 # inserted, under schemaVersion 1. This installer inserts none and so has
@@ -4201,13 +4782,15 @@ PY
 # an editor while the install runs. Restoring the whole snapshot over it would
 # silently discard whatever they saved in the meantime, so its rollback removes
 # only the block this installer would have added and leaves everything else as
-# the user last wrote it.
+# the user last wrote it. Returns 1 when that edit does not apply (either file
+# is missing or not a regular file), so the caller restores the snapshot, and 2
+# when the edit failed: the file is then left alone, never replaced or deleted.
 rollback_shell_config() {
   local path="$1"
   local backup="$2"
   [ -f "$path" ] && [ -f "$backup" ] || return 1
   cmp -s "$path" "$backup" && return 0
-  python3 - "$path" "$(shell_config_line)" <<'PY'
+  python3 - "$path" "$(shell_config_line)" <<'PY' || return 2
 import sys
 
 path, line = sys.argv[1:3]
@@ -4230,25 +4813,75 @@ PY
   return 0
 }
 
+# Restore every snapshotted path, continuing past failures so one stuck path
+# does not leave the rest unrestored. Returns 1 when any path could not be
+# removed or restored, and so may not match its snapshot.
 rollback_install() {
   [ -f "$ROLLBACK_LOG" ] || return 0
   warn "Installation failed; restoring the previous install-owned state"
-  local status="" path="" backup=""
+  local status="" path="" backup="" incomplete=0
   while IFS= read -r -d '' status &&
         IFS= read -r -d '' path &&
         IFS= read -r -d '' backup; do
     [ -n "$path" ] || continue
-    if [ -n "$PATH_TARGET" ] && [ "$path" = "$PATH_TARGET" ] && [ "$status" = "present" ] &&
-        rollback_shell_config "$path" "$backup"; then
-      continue
+    if [ -n "$PATH_TARGET" ] && [ "$path" = "$PATH_TARGET" ] && [ "$status" = "present" ]; then
+      local edited=0
+      rollback_shell_config "$path" "$backup" || edited=$?
+      case "$edited" in
+        0) continue ;;
+        2)
+          warn "Could not remove the Macroscope PATH line from $path; it was left as it is"
+          incomplete=1
+          continue
+          ;;
+      esac
     fi
-    rm -rf "$path"
-    if [ "$status" = "present" ]; then
-      mkdir -p "$(dirname "$path")"
-      cp -a "$backup" "$path"
+    if ! restore_rollback_target "$status" "$path" "$backup"; then
+      warn "Could not restore $path"
+      incomplete=1
     fi
   done < "$ROLLBACK_LOG"
   remove_created_directories
+  return "$incomplete"
+}
+
+# Put one path back as the snapshot found it: removed when it was absent,
+# else replaced by its backup. Returns 1 when anything failed, a removal that
+# left part of the path behind included.
+restore_rollback_target() {
+  local status="$1" path="$2" backup="$3" failed=0
+  rm -rf "$path" || failed=1
+  [ "$status" = "present" ] || return "$failed"
+  mkdir -p "$(dirname "$path")" || return 1
+  # A directory rm could not fully remove is restored in place; copying the
+  # backup onto it would nest the backup inside what is left.
+  if [ -d "$path" ] && [ -d "$backup" ]; then
+    cp -a "$backup/." "$path" || return 1
+  else
+    cp -a "$backup" "$path" || return 1
+  fi
+  return "$failed"
+}
+
+# Record a skill host's skill directory for rollback just before this run
+# first changes it, once the caller has found it absent or owned. Skill
+# directories are never snapshotted up front: selection says only what the run
+# means to do, and a directory the run never wrote — because it failed first,
+# or declined the host when a user's directory appeared there — is not the
+# run's to remove or restore, so it never reaches the rollback log.
+claim_skill_dir_for_rollback() {
+  local path="$1" nl=$'\n'
+  [ -n "$ROLLBACK_LOG" ] || return 0
+  case "${CLAIMED_SKILL_DIRS:-$nl}" in *"$nl$path$nl"*) return 0 ;; esac
+  CLAIMED_SKILL_DIRS="${CLAIMED_SKILL_DIRS:-$nl}$path$nl"
+  if [ ! -e "$path" ] && [ ! -L "$path" ]; then
+    printf 'absent\0%s\0-\0' "$path" >> "$ROLLBACK_LOG"
+    return 0
+  fi
+  # The list only grows, so its length names each backup uniquely.
+  local backup="$TMP_DIR/rollback/skill-${#CLAIMED_SKILL_DIRS}"
+  cp -a "$path" "$backup" || return 1
+  printf 'present\0%s\0%s\0' "$path" "$backup" >> "$ROLLBACK_LOG"
 }
 
 # SIGINT and SIGTERM are handled explicitly. An untrapped signal tears the
@@ -4281,8 +4914,13 @@ handle_exit() {
     printf '\n'
     warn "Interrupted by SIG${INTERRUPT_SIGNAL}."
   fi
-  if { [ "$status" -ne 0 ] || [ -n "$INTERRUPT_SIGNAL" ]; } && [ "$APPLY_STARTED" -eq 1 ] && [ "$APPLY_COMPLETE" -eq 0 ]; then
-    rollback_install || true
+  if { [ "$status" -ne 0 ] || [ -n "$INTERRUPT_SIGNAL" ]; } && [ "$APPLY_STARTED" -eq 1 ] && [ "$APPLY_COMPLETE" -eq 0 ] &&
+      ! rollback_install; then
+    # The snapshot is the only copy of what the paths above held. It stays in
+    # the private (0700) temporary directory, and only its location is shown.
+    error "Rollback was incomplete: the paths named above may not match their state before this run."
+    error "Their backups are kept in $TMP_DIR/rollback, indexed by $TMP_DIR/rollback.log; restore those paths from there, then delete $TMP_DIR."
+    return
   fi
   [ -z "$TMP_DIR" ] || rm -rf "$TMP_DIR"
 }
@@ -4312,6 +4950,80 @@ install_cursor_plugin() {
   success "Installed Cursor plugin to ${BOLD}${cursor_dst}${RESET}"
 }
 
+# A skill host discovers skills natively, so its integration is exactly two
+# skill directories and nothing else: no settings, auth, session or extension
+# files. Both destinations are checked before either is written, so an unowned
+# one withdraws the whole integration instead of leaving half of it installed:
+# an owned skill left from an earlier install is removed too, or the next
+# update would find it, select the host again and decline it again.
+install_skill_host() {
+  local host="$1"
+  local label=""
+  label="$(tool_label "$host")"
+  step "Installing $label skills..."
+  local skills_src="$CHECKOUT_DIR/plugins/macroscope/skills"
+  local skills="$(get_skill_home "$host")/skills"
+  local dst=""
+  local refusal=""
+
+  if ! skills_dir_is_contained "$skills"; then
+    warn_skills_dir_not_contained "$skills" "$host"
+    refusal=1
+  else
+    while IFS= read -r dst; do
+      if ! host_skill_destination_is_ours "$dst"; then
+        warn "Left $dst in place (not a Macroscope-owned skill directory)"
+        refusal=1
+      fi
+    done <<< "$(skill_host_dirs "$host")"
+  fi
+  if [ -n "$refusal" ]; then
+    error "Refusing to overwrite the $label skills named above."
+    while IFS= read -r dst; do
+      if is_owned_host_skill_dir "$dst"; then
+        claim_skill_dir_for_rollback "$dst" || return 1
+        remove_owned_dir_marker_last "$dst" || return 1
+      fi
+    done <<< "$(skill_host_dirs "$host")"
+    warn "Installed no $label integration; every other selected integration was installed."
+    decline_integration "$host"
+    return 0
+  fi
+
+  while IFS= read -r dst; do
+    install_namespaced_skill "$skills_src/${dst##*/macroscope-}" "$dst" "$host"
+  done <<< "$(skill_host_dirs "$host")"
+  success "Installed $label skills to ${BOLD}${skills}${RESET}"
+  if [ "$host" = hermes ]; then note_hermes_active_profile; fi
+}
+
+# A bare `hermes` reads skills from the sticky active profile that
+# `hermes profile use` saves in the home's active_profile file, unless
+# HERMES_HOME already names a profile's own directory. The skills are in the
+# home itself, so a profile switched to there does not see them: say so, and
+# give the two ways to use them that the recorded home allows — the default
+# profile, or a move made by removing them and installing again under the
+# profile's directory, with every other selected integration kept.
+note_hermes_active_profile() {
+  local home=""
+  local profile=""
+  local others=""
+  home="$(get_skill_home hermes)"
+  [ "$(basename "$(dirname "$home")")" != profiles ] && [ -f "$home/active_profile" ] && [ ! -L "$home/active_profile" ] || return 0
+  profile="$(head -c 256 "$home/active_profile" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
+  case "$profile" in
+    ''|default) return 0 ;;
+  esac
+  info "Hermes's active profile is $profile, which does not read skills from $home/skills; use them with hermes -p default."
+  # Hermes refuses any other profile name, so only a valid one names a
+  # directory to move to.
+  printf '%s' "$profile" | grep -Eqx '[a-z0-9][a-z0-9_-]{0,63}' || return 0
+  others="$(printf '%s' "$SELECTED_TOOLS" | tr ',' '\n' | sed '/^hermes$/d' | paste -sd, -)"
+  info "To move them into that profile, run these two commands; the first removes them and the second installs them there:"
+  printf '    macroscope update --tools %s\n' "${others:-none}"
+  printf '    HERMES_HOME=%q macroscope update --tools %s\n' "$home/profiles/$profile" "${others:+$others,}hermes"
+}
+
 install_opencode_support() {
   step "Installing OpenCode plugin, commands, and skills..."
 
@@ -4339,7 +5051,7 @@ install_opencode_support() {
   # hosts are unaffected by it, it withdraws only that one. The run is reported
   # as failed at the end.
   for skill_name in codereview autoloop; do
-    if ! opencode_skill_destination_is_ours "$opencode_skills/macroscope-$skill_name"; then
+    if ! skill_destination_is_ours "$opencode_skills/macroscope-$skill_name"; then
       warn "Left $opencode_skills/macroscope-$skill_name in place (no Macroscope ownership marker); skipped installing the macroscope-$skill_name skill"
       refusal=1
     fi
@@ -4354,8 +5066,7 @@ install_opencode_support() {
     migrate_legacy_opencode_skills "$opencode_skills" 1
     error "Refusing to overwrite the OpenCode files named above."
     warn "Installed no OpenCode integration; every other selected integration was installed."
-    HOST_INSTALL_FAILURES="${HOST_INSTALL_FAILURES:+$HOST_INSTALL_FAILURES, }opencode"
-    SELECTED_TOOLS="$(printf '%s' "$SELECTED_TOOLS" | tr ',' '\n' | sed '/^opencode$/d' | paste -sd, -)"
+    decline_integration opencode
     return 0
   fi
 
@@ -4378,7 +5089,7 @@ install_opencode_support() {
   migrate_legacy_opencode_skills "$opencode_skills"
 
   for skill_name in codereview autoloop; do
-    install_opencode_skill "$skills_src/$skill_name" "$opencode_skills/macroscope-$skill_name"
+    install_namespaced_skill "$skills_src/$skill_name" "$opencode_skills/macroscope-$skill_name" opencode
   done
 
   success "Installed OpenCode plugin to ${BOLD}${opencode_plugins}/macroscope.js${RESET}"
@@ -4525,6 +5236,19 @@ verify_install() {
     warn "OpenCode install did not produce the expected plugin, command, and skill files"
   fi
 
+  local host=""
+  local skills=""
+  for host in "${SKILL_HOSTS[@]}"; do
+    tool_selected "$host" || continue
+    skills="$(get_skill_home "$host")/skills"
+    if is_owned_skill_dir "$skills/macroscope-codereview" && is_owned_skill_dir "$skills/macroscope-autoloop" &&
+       [ -f "$skills/macroscope-codereview/SKILL.md" ] && [ -f "$skills/macroscope-autoloop/SKILL.md" ]; then
+      success "$(tool_label "$host") skills installed; $(skill_host_reload_hint "$host")"
+    else
+      warn "$(tool_label "$host") install did not produce the expected skill directories in $skills"
+    fi
+  done
+
   # Codex gained plugin support in recent releases. A codex on PATH that is too
   # old gets exactly one line — the found version and how to upgrade. There is
   # nothing to redirect or wrap; the plugin files are written regardless. An
@@ -4559,14 +5283,19 @@ print_installation_completion() {
   printf "  ${CYAN}macroscope --help${RESET}              ${DIM}# Show all supported commands${RESET}\n"
   echo ""
   printf "${BOLD}Coding agent commands:${RESET}\n"
-  printf "  ${DIM}Agent        Review                    Autopilot${RESET}\n"
-  printf "  Claude Code  ${CYAN}/macroscope:codereview${RESET}   ${CYAN}/macroscope:autoloop${RESET}\n"
-  printf "  Codex        ${CYAN}\$macroscope:codereview${RESET}   ${CYAN}\$macroscope:autoloop${RESET}\n"
-  printf "  Cursor       ${CYAN}/codereview${RESET}              ${CYAN}/autoloop${RESET}\n"
-  printf "  OpenCode     ${CYAN}/macroscope-codereview${RESET}   ${CYAN}/macroscope-autoloop${RESET}\n"
+  printf "  ${DIM}Agent        Review                        Autopilot${RESET}\n"
+  printf "  Claude Code  ${CYAN}/macroscope:codereview${RESET}        ${CYAN}/macroscope:autoloop${RESET}\n"
+  printf "  Codex        ${CYAN}\$macroscope:codereview${RESET}        ${CYAN}\$macroscope:autoloop${RESET}\n"
+  printf "  Cursor       ${CYAN}/codereview${RESET}                   ${CYAN}/autoloop${RESET}\n"
+  printf "  OpenCode     ${CYAN}/macroscope-codereview${RESET}        ${CYAN}/macroscope-autoloop${RESET}\n"
+  printf "  Pi           ${CYAN}/skill:macroscope-codereview${RESET}  ${CYAN}/skill:macroscope-autoloop${RESET}\n"
+  printf "  Hermes       ${CYAN}/macroscope-codereview${RESET}        ${CYAN}/macroscope-autoloop${RESET}\n"
+  printf "  OpenHands    ${CYAN}macroscope-codereview${RESET}         ${CYAN}macroscope-autoloop${RESET}\n"
   echo ""
   printf "${BOLD}Notes:${RESET}\n"
   printf "  Restart Codex, Claude Code, Cursor, or OpenCode if they were already open.\n"
+  printf "  Run /reload in any Pi session that was already open.\n"
+  printf "  OpenHands has no skill commands: ask it to use a skill by name, in a new conversation.\n"
   printf "  Claude Code launches reviews in a background worker.\n"
   echo ""
   printf "${BOLD}Need help?${RESET}\n"
@@ -4642,6 +5371,7 @@ launch_wizard() {
 
 main() {
   trap 'handle_exit $?' EXIT
+  local host=""
   install_signal_traps
   parse_options "$@"
   if [ "$OUTPUT_FORMAT" = "json" ]; then
@@ -4654,7 +5384,19 @@ main() {
   if repair_only_requested; then
     step "Checking system requirements..."
     STATE_FILE="$(state_file_path)"
+    load_recorded_skill_homes
+    # Repair removes a host's skills from its recorded home even when the
+    # host is no longer selected, so a record is checked like a selection.
+    for host in "${SKILL_HOSTS[@]}"; do
+      if install_state_records_tool "$host" || [ -n "$(recorded_skill_home "$host")" ]; then
+        check_skill_home "$host"
+      fi
+    done
     repair_existing_install
+    if [ -n "$REPAIR_FAILURES" ]; then
+      error "Repair could not remove or check $REPAIR_FAILURES. Kept $STATE_FILE, which records where they are; fix the cause named above, then rerun the repair."
+      return 1
+    fi
     rm -f "$STATE_FILE"
     info "Repair cleanup complete (MACROSCOPE_REPAIR_ONLY=1). Preserved ~/.macroscope and saved credentials."
     return
@@ -4681,6 +5423,15 @@ main() {
     flow_section 1 "Integrations" "Choose which coding agents to connect"
   fi
   select_tools
+  # The same test the apply loop below uses to install or remove a host.
+  for host in "${SKILL_HOSTS[@]}"; do
+    if tool_selected "$host"; then
+      check_skill_install_home "$host"
+    elif [ "$INSTALL_MODE" = "update" ] && tool_installed "$host"; then
+      check_skill_home "$host"
+    fi
+  done
+  check_skill_destinations_distinct
   if [ "$SAVED_AUTO_UPDATE" -eq 0 ]; then
     if [ "$INSTALL_MODE" = "update" ]; then
       flow_section 2 "Update" "Review and apply the update"
@@ -4719,13 +5470,14 @@ main() {
   # so maybe_note_absent_tool reports on the machine as the user found it.
   PRESENT_TOOLS="$(detect_present_tools)"
   local tool=""
-  for tool in claude codex cursor opencode; do
+  for tool in "${ALL_TOOLS[@]}"; do
     if tool_selected "$tool"; then
       case "$tool" in
         claude) install_claude_plugin ;;
         codex) install_codex_plugin ;;
         cursor) install_cursor_plugin ;;
         opencode) install_opencode_support ;;
+        pi|hermes|openhands) install_skill_host "$tool" ;;
       esac
       maybe_note_absent_tool "$tool"
     elif [ "$INSTALL_MODE" = "update" ] && tool_installed "$tool"; then
